@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Backlot — 项目库</title>
+<link rel="stylesheet" href="/ui/board.css">
+</head>
+<body>
+<div class="wrap">
+  <header class="slate">
+    <div class="clapper"></div>
+    <div>
+      <span class="wordmark">Backlot</span>
+      <h1>项目库</h1>
+    </div>
+    <span class="chip" id="count"></span>
+    <div class="spacer"></div>
+    <a class="secondary-action library-automation-link" href="/automation">自动生产中心</a>
+    <a class="secondary-action library-audio-link" href="/audio">通用配音中心</a>
+    <button class="library-create" id="createProject" type="button">新建视频项目</button>
+    <span class="live idle" id="liveBadge"><span class="dot"></span><span id="liveText">暂无任务</span></span>
+  </header>
+  <p class="library-message" id="libraryMessage" role="status" aria-live="polite"></p>
+  <section class="daily-automation-panel" id="dailyAutomationPanel" aria-labelledby="dailyAutomationTitle">
+    <button class="daily-automation-summary" id="toggleDailyAutomationPanel" type="button" aria-expanded="false">
+      <span>
+        <span class="wordmark">每日自动化</span>
+        <strong id="dailyAutomationTitle">每日科技快报</strong>
+        <small id="dailyAutomationSummary">正在读取自动化状态…</small>
+      </span>
+      <span class="daily-automation-summary-side">
+        <span class="daily-run-badge idle" id="dailyRunBadge">未启用</span>
+        <span id="dailyAutomationDisclosure">展开</span>
+      </span>
+    </button>
+    <div class="daily-automation-body" id="dailyAutomationBody" hidden>
+      <div class="daily-automation-grid">
+        <label class="daily-switch-card">
+          <input id="dailyAutomationEnabled" type="checkbox" role="switch">
+          <span>
+            <strong>每天凌晨 03:00 自动开始</strong>
+            <small>浏览器关闭、Windows 锁屏后仍可执行；请保持 Windows 账户已登录。相同日期不会重复扣费。</small>
+          </span>
+        </label>
+        <div class="daily-policy-card">
+          <strong>费用与算力保护</strong>
+          <span>自动请求 Lite · 每日上限 ¥5</span>
+          <small>平台必须回传时长和费率证据；一旦观察到 Standard/Plus 或无法核验，自动停止后续付费任务。</small>
+        </div>
+      </div>
+      <div class="daily-run-facts">
+        <span><small>下次运行</small><strong id="dailyNextRun">—</strong></span>
+        <span><small>目标新闻日</small><strong id="dailyNextTarget">—</strong></span>
+        <span><small>最近项目</small><a id="dailyLatestProject">尚无</a></span>
+        <span><small>预算</small><strong id="dailyBudget">¥0 / ¥5</strong></span>
+      </div>
+      <div class="daily-run-controls">
+        <label>
+          <span>自动生成时的数字人外框</span>
+          <select id="dailyPresenterShape">
+            <option value="circle">圆形头像（推荐）</option>
+            <option value="rounded">圆角矩形</option>
+            <option value="rectangle">直角矩形</option>
+          </select>
+        </label>
+        <small class="daily-inline-note">4:5 原片会保持人物比例；圆形模式只裁切画面，不拉伸人物，也不改变音频时长。</small>
+      </div>
+      <div class="daily-run-controls">
+        <label>
+          <span>立即试跑日期</span>
+          <input id="dailyTargetDate" type="date">
+        </label>
+        <button class="primary-action" id="startDailyRun" type="button">立即生成这一天</button>
+        <button class="secondary-action" id="refreshDailyStatus" type="button">刷新状态</button>
+      </div>
+      <div class="daily-progress-card" id="dailyProgressCard" aria-live="polite">
+        <div class="daily-progress-head">
+          <strong id="dailyProgressTitle">尚无运行任务</strong>
+          <span id="dailyProgressCount">0 / 9</span>
+        </div>
+        <progress id="dailyProgress" max="9" value="0"></progress>
+        <p id="dailyProgressMessage">开启自动化，或选择已结束的日期立即试跑。</p>
+        <div class="daily-stage-list" id="dailyStageList"></div>
+      </div>
+      <div class="daily-billing-audit" id="dailyBillingAudit" aria-live="polite">
+        <strong>RunningHub 计费核验</strong>
+        <p>尚无已完成的数字人任务。</p>
+      </div>
+      <div class="daily-billing-safety" id="dailyBillingSafety" aria-live="polite"></div>
+      <div class="daily-run-controls daily-center-entry">
+        <a class="primary-action" href="/automation">进入自动生产中心</a>
+        <small class="daily-inline-note">查看历史任务、调度健康、脚本摘要、失败恢复与成本证据。</small>
+      </div>
+    </div>
+  </section>
+  <div class="lib-grid" id="grid"></div>
+  <p class="hint" id="empty" style="display:none">还没有项目。点击“新建视频项目”，选择视频类型和画幅后开始。</p>
+</div>
+
+<dialog class="project-dialog quick-project-dialog" id="projectDialog" aria-labelledby="projectDialogTitle">
+  <form class="project-form" id="projectForm">
+    <div class="project-dialog-head">
+      <div>
+        <span class="wordmark">项目启动</span>
+        <h2 id="projectDialogTitle">新建视频项目</h2>
+        <p>先建立项目框架；创建后进入对应工作台，再导入脚本、配置素材和制作细节。</p>
+      </div>
+      <button class="dialog-close" type="button" id="closeProjectDialog" aria-label="关闭">×</button>
+    </div>
+
+    <label class="form-field form-field-wide">
+      <span>项目名称 <b>必填</b></span>
+      <input id="projectTitle" name="title" maxlength="120" required autocomplete="off" placeholder="例如：8 月 29 日科技快报">
+    </label>
+
+    <input id="projectId" name="project_id" type="hidden">
+
+    <div class="form-grid">
+      <label class="form-field">
+        <span>视频工作流</span>
+        <select id="projectPipeline" name="pipeline_type">
+          <option value="animated-explainer" selected>无数字人口播</option>
+          <option value="avatar-spokesperson">有数字人口播</option>
+        </select>
+        <small>创建后进入对应工作台，再选择配音、数字人和画面素材。</small>
+      </label>
+      <label class="form-field">
+        <span>画幅</span>
+        <select id="projectAspect" name="aspect">
+          <option value="portrait" selected>竖版 9:16</option>
+          <option value="landscape">横版 16:9</option>
+          <option value="square">方形 1:1</option>
+        </select>
+      </label>
+    </div>
+
+    <p class="form-message" id="projectFormMessage" role="alert" aria-live="polite"></p>
+    <div class="project-dialog-foot">
+      <span>这里只创建项目框架，不会生成内容或消耗额度。</span>
+      <div>
+        <button class="secondary-action" type="button" id="cancelProject">取消</button>
+        <button class="primary-action" id="submitProject" type="submit">创建并进入工作台</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="project-dialog delete-project-dialog" id="deleteProjectDialog" aria-labelledby="deleteProjectDialogTitle">
+  <form class="project-form" id="deleteProjectForm">
+    <div class="project-dialog-head">
+      <div>
+        <span class="wordmark danger-wordmark">项目管理</span>
+        <h2 id="deleteProjectDialogTitle">删除项目及其数据</h2>
+        <p>删除后，项目将从项目库消失，项目目录内的脚本、素材、任务记录和成片会一并永久删除。</p>
+      </div>
+      <button class="dialog-close" type="button" id="closeDeleteProjectDialog" aria-label="关闭">×</button>
+    </div>
+
+    <div class="delete-project-summary" id="deleteProjectSummary" aria-live="polite">
+      正在检查项目数据…
+    </div>
+
+    <p class="form-message" id="deleteProjectMessage" role="alert" aria-live="assertive"></p>
+    <div class="project-dialog-foot">
+      <span>通用角色库、通用配音中心和公共风格包不会被删除。</span>
+      <div>
+        <button class="secondary-action" type="button" id="cancelDeleteProject">取消</button>
+        <button class="danger-action" id="confirmDeleteProject" type="submit" disabled>永久删除项目</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+
+<dialog class="project-dialog delete-project-dialog" id="finalDeleteProjectDialog" aria-labelledby="finalDeleteProjectDialogTitle">
+  <form class="project-form" id="finalDeleteProjectForm">
+    <div class="project-dialog-head">
+      <div>
+        <span class="wordmark danger-wordmark">最后确认</span>
+        <h2 id="finalDeleteProjectDialogTitle">确认永久删除？</h2>
+        <p>即将永久删除 <strong id="finalDeleteProjectName"></strong>。项目脚本、素材、任务记录、历史版本和成片都无法恢复。</p>
+      </div>
+      <button class="dialog-close" type="button" id="closeFinalDeleteProjectDialog" aria-label="关闭">×</button>
+    </div>
+    <div class="delete-task-warning">
+      <strong>此操作无法撤销</strong>
+      <span>如果还需要保留任何素材或成片，请先返回项目进行导出。</span>
+    </div>
+    <p class="form-message" id="finalDeleteProjectMessage" role="alert" aria-live="assertive"></p>
+    <div class="project-dialog-foot">
+      <span>只有点击右侧确认按钮后，系统才会开始删除。</span>
+      <div>
+        <button class="secondary-action" type="button" id="backFromFinalDeleteProject">返回检查</button>
+        <button class="danger-action" id="executeDeleteProject" type="submit">确认永久删除</button>
+      </div>
+    </div>
+  </form>
+</dialog>
+<script type="module" src="/ui/library.js"></script>
+</body>
+</html>

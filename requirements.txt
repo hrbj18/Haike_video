@@ -1,0 +1,24 @@
+# OpenMontage - Core Dependencies
+pyyaml>=6.0
+pydantic>=2.0
+jsonschema>=4.20
+python-dotenv>=1.0
+python-docx>=1.1.0       # DOCX publishing documents and script packs
+Pillow>=10.0
+numpy>=1.24
+opencv-python-headless>=4.10,<5  # local face/person screening for batch stock-media rules
+opencc-python-reimplemented>=0.1.7  # Simplified/traditional Chinese normalization for local ASR alignment
+requests>=2.31
+google-auth>=2.0       # service-account auth for Google TTS + Imagen (Vertex AI)
+google-genai>=1.0.0    # Gemini Developer API clients for Lyria, Veo, and Gemini Omni
+openai>=2.44.0         # Videos API support for Sora 2
+
+# Backlot - the living storyboard (local board server)
+fastapi>=0.110
+uvicorn>=0.29
+watchfiles>=0.21
+# Required by FastAPI/Starlette TestClient for the Backlot API regression suite.
+httpx>=0.27
+# Bundled, offline-discoverable FFmpeg + ffprobe pair. Runtime discovery uses
+# importlib.find_spec only and never calls static_ffmpeg.add_paths/download.
+static-ffmpeg==3.0

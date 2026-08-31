@@ -1,0 +1,501 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/artifacts/avatar_source_package",
+  "title": "Avatar Source Package",
+  "description": "Provider-neutral contract for manually uploaded or API-generated multi-speaker avatar source media.",
+  "type": "object",
+  "required": [
+    "version",
+    "project_id",
+    "audio_mode",
+    "import_mode",
+    "speakers",
+    "turns",
+    "settings",
+    "validation",
+    "asr",
+    "assembly"
+  ],
+  "properties": {
+    "version": { "type": "string", "const": "1.0" },
+    "project_id": { "type": "string", "minLength": 1 },
+    "audio_mode": { "type": "string", "const": "native_avatar_audio" },
+    "import_mode": { "type": "string", "enum": ["per_turn", "longform"] },
+    "generation_mode": { "type": "string", "enum": ["manual_import", "dashscope_wan_s2v", "runninghub_longcat", "runninghub_longform"] },
+    "plan": {
+      "description": "The active source plan. Historical plans are stored as immutable snapshots outside this active package.",
+      "type": "object",
+      "required": ["plan_id", "kind", "label", "created_at"],
+      "properties": {
+        "plan_id": { "type": "string", "pattern": "^AVP-[A-Za-z0-9-]{8,80}$" },
+        "kind": { "type": "string", "enum": ["manual_per_turn", "manual_longform", "dashscope_cloud", "runninghub_cloud", "runninghub_longform"] },
+        "label": { "type": "string", "minLength": 1 },
+        "created_at": { "type": "string" },
+        "archived_plan_count": { "type": "integer", "minimum": 0 },
+        "replaces_plan_id": { "type": "string", "pattern": "^AVP-[A-Za-z0-9-]{8,80}$" }
+      },
+      "additionalProperties": false
+    },
+    "provider": {
+      "type": "object",
+      "properties": {
+        "type": { "type": "string", "enum": ["manual_import", "company_api"] },
+        "name": { "type": "string" },
+        "base_url": { "type": ["string", "null"] },
+        "api_version": { "type": ["string", "null"] }
+      },
+      "required": ["type", "name"],
+      "additionalProperties": false
+    },
+    "presentation": {
+      "description": "Source-side compositing facts. These are declarative metadata only; the workbench records the per-scene layout decision.",
+      "type": "object",
+      "properties": {
+        "background_mode": {
+          "type": "string",
+          "enum": ["opaque", "green_screen", "transparent", "unknown"]
+        },
+        "alpha_mode": { "type": "boolean" },
+        "expected_audio": {
+          "type": "string",
+          "enum": ["embedded_native", "separate_native", "unknown"]
+        },
+        "default_treatment": {
+          "type": "string",
+          "enum": ["fullscreen", "pip_top_left", "custom", "hidden"]
+        },
+        "frame_fit_mode": {
+          "description": "How a non-matching local source is shown on the final project canvas.",
+          "type": "string",
+          "enum": ["blur_background", "contain_black", "cover_crop"]
+        }
+      },
+      "additionalProperties": false
+    },
+    "role": {
+      "description": "A reference to a software-wide avatar identity. The actual generation image remains project-local.",
+      "type": "object",
+      "required": ["role_id", "name", "version"],
+      "properties": {
+        "role_id": { "type": "string", "pattern": "^AR-[a-z0-9-]{3,64}$" },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "reference_count": { "type": "integer", "minimum": 0 },
+        "selected_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "presenter_shot": {
+      "description": "The exact project-local single-person image sent to the cloud avatar provider.",
+      "$ref": "#/$defs/sourceFile"
+    },
+    "speaker_bindings": {
+      "description": "Project-local generation bindings. Every speaker owns an actual presenter image and an independent sample approval state; the reusable identity record is optional provenance.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/speakerBinding" }
+    },
+    "voicebox": {
+      "description": "Project-local Voicebox routing and the latest sequential batch. Explicit speaker choices are retained; automatic matches are recalculated from the current common voice library.",
+      "$ref": "#/$defs/voiceboxConfiguration"
+    },
+    "cloud": {
+      "type": "object",
+      "required": ["provider", "model", "resolution", "status", "sample_approved"],
+      "properties": {
+        "provider": { "type": "string", "enum": ["dashscope_wan_s2v", "runninghub_longcat"] },
+        "model": { "type": "string", "enum": ["wan2.2-s2v", "LongCat-1.5", "InfiniteTalk-exact-clock-v2"] },
+        "resolution": { "type": "string", "enum": ["480P", "720P", "320x576", "448x560"] },
+        "configuration": {
+          "type": "object",
+          "properties": {
+            "configured": { "type": "boolean" },
+            "api_key_configured": { "type": "boolean" },
+            "workflow_id_configured": { "type": "boolean" },
+            "workflow_id": { "type": ["string", "null"] },
+            "workflow_id_suffix": { "type": ["string", "null"] },
+            "workflow_profile": { "type": ["string", "null"] },
+            "template_sha256": { "type": ["string", "null"] },
+            "issues": { "type": "array", "items": { "type": "string" } }
+          },
+          "additionalProperties": false
+        },
+        "aspect_ratio": { "type": "string", "enum": ["portrait", "landscape", "square"] },
+        "input_fit_mode": { "type": "string", "enum": ["cover_crop", "contain_blur"] },
+        "render_spec_revision": { "type": "integer", "minimum": 1 },
+        "status": { "type": "string", "enum": ["not_ready", "ready", "generating_sample", "awaiting_sample_approval", "generating_batch", "completed", "failed"] },
+        "sample_turn_id": { "type": ["string", "null"], "pattern": "^T[0-9]{3,}$" },
+        "sample_turn_ids": {
+          "type": "array",
+          "items": { "type": "string", "pattern": "^T[0-9]{3,}$" }
+        },
+        "sample_approved": { "type": "boolean" },
+        "batch_started": { "type": "boolean" },
+        "updated_at": { "type": "string" },
+        "message": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "speakers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["speaker_id", "name"],
+        "properties": {
+          "speaker_id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{1,31}$" },
+          "name": { "type": "string", "minLength": 1 },
+          "source": { "$ref": "#/$defs/sourceFile" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "turns": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["turn_id", "index", "speaker_id", "text", "expected_filename", "status"],
+        "properties": {
+          "turn_id": { "type": "string", "pattern": "^T[0-9]{3,}$" },
+          "index": { "type": "integer", "minimum": 1 },
+          "speaker_id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{1,31}$" },
+          "text": { "type": "string", "minLength": 1 },
+          "expected_filename": { "type": "string", "minLength": 1 },
+          "status": {
+            "type": "string",
+            "enum": ["missing", "uploaded", "media_invalid", "media_valid", "asr_failed", "asr_passed", "cut_pending_review", "cut_approved", "assembled", "audio_ready", "cloud_queued", "cloud_generating", "cloud_failed", "cloud_generated"]
+          },
+          "source": { "$ref": "#/$defs/sourceFile" },
+          "driving_audio": { "$ref": "#/$defs/drivingAudio" },
+          "driving_audio_candidates": {
+            "description": "Auditionable local Voicebox takes and previous approved driving-audio versions. Only driving_audio is submitted to the provider.",
+            "type": "array",
+            "items": { "$ref": "#/$defs/drivingAudio" }
+          },
+          "driving_audio_job": { "$ref": "#/$defs/drivingAudioJob" },
+          "binding_snapshot": { "$ref": "#/$defs/bindingSnapshot" },
+          "cloud_job": { "$ref": "#/$defs/cloudJob" },
+          "transcript": { "type": "string" },
+          "asr_similarity": { "type": "number", "minimum": 0, "maximum": 1 },
+          "asr_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+          "source_start_seconds": { "type": "number", "minimum": 0 },
+          "source_end_seconds": { "type": "number", "minimum": 0 },
+          "visual_contract": {
+            "type": "object",
+            "properties": {
+              "visual_intent": { "type": "string" },
+              "required_assets": { "type": "array", "items": { "type": "string" } },
+              "forbidden_states": { "type": "array", "items": { "type": "string" } },
+              "min_visual_coverage": { "type": "number", "minimum": 0, "maximum": 1 }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "settings": {
+      "type": "object",
+      "required": ["max_duration_seconds", "fps", "audio_sample_rate", "width", "height", "require_asr"],
+      "properties": {
+        "max_duration_seconds": { "type": "number", "minimum": 1 },
+        "fps": { "type": "integer", "minimum": 1 },
+        "audio_sample_rate": { "type": "integer", "minimum": 8000 },
+        "width": { "type": "integer", "minimum": 16 },
+        "height": { "type": "integer", "minimum": 16 },
+        "require_asr": { "type": "boolean" },
+        "minimum_turn_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+        "minimum_turn_similarity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "minimum_average_similarity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "speaker_change_gap_seconds": { "type": "number", "minimum": 0 },
+        "same_speaker_gap_seconds": { "type": "number", "minimum": 0 }
+      },
+      "additionalProperties": false
+    },
+    "validation": { "$ref": "#/$defs/jobState" },
+    "asr": { "$ref": "#/$defs/jobState" },
+    "cut_plan": { "$ref": "#/$defs/cutPlan" },
+    "assembly": { "$ref": "#/$defs/jobState" },
+    "created_at": { "type": "string" },
+    "updated_at": { "type": "string" },
+    "revision": { "type": "integer", "minimum": 1 }
+  },
+  "$defs": {
+    "sourceFile": {
+      "type": "object",
+      "required": ["path", "original_filename", "sha256", "size_bytes"],
+      "properties": {
+        "path": { "type": "string" },
+        "original_filename": { "type": "string" },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "uploaded_at": { "type": "string" },
+        "media": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "drivingAudio": {
+      "type": "object",
+      "required": ["path", "provider_path", "original_filename", "sha256", "size_bytes", "duration_seconds"],
+      "properties": {
+        "path": { "type": "string" },
+        "provider_path": { "type": "string" },
+        "original_filename": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "size_bytes": { "type": "integer", "minimum": 1 },
+        "duration_seconds": { "type": "number", "exclusiveMinimum": 0, "maximum": 20 },
+        "codec": { "type": ["string", "null"] },
+        "uploaded_at": { "type": "string" },
+        "id": { "type": "string", "pattern": "^AVAC-[A-Za-z0-9-]{8,80}$" },
+        "state": { "type": "string", "enum": ["candidate", "current", "superseded"] },
+        "source_type": { "type": "string", "enum": ["uploaded", "voicebox_generated"] },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "profile_name": { "type": "string", "minLength": 1 },
+        "voice_selection_source": { "type": "string", "enum": ["manual", "same_name", "default"] },
+        "batch_id": { "type": "string", "pattern": "^AVAB-[A-Za-z0-9-]{8,80}$" },
+        "script_text_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "created_at": { "type": "string" },
+        "applied_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "drivingAudioJob": {
+      "description": "One per-turn local Voicebox generation job. It never changes the provider input until its candidate is explicitly adopted.",
+      "type": "object",
+      "required": ["job_id", "status", "candidate_id", "profile_id", "profile_name", "script_text_sha256", "started_at", "error"],
+      "properties": {
+        "job_id": { "type": "string", "pattern": "^AVAJ-[A-Za-z0-9-]{8,80}$" },
+        "status": { "type": "string", "enum": ["generating", "completed", "failed"] },
+        "candidate_id": { "type": "string", "pattern": "^AVAC-[A-Za-z0-9-]{8,80}$" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "profile_name": { "type": "string", "minLength": 1 },
+        "voice_selection_source": { "type": "string", "enum": ["manual", "same_name", "default"] },
+        "batch_id": { "type": "string", "pattern": "^AVAB-[A-Za-z0-9-]{8,80}$" },
+        "script_text_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": "string" },
+        "error": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "speakerBinding": {
+      "type": "object",
+      "required": ["speaker_id", "name", "status", "sample"],
+      "properties": {
+        "speaker_id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{1,31}$" },
+        "name": { "type": "string", "minLength": 1 },
+        "status": { "type": "string", "enum": ["not_ready", "ready", "sample_generating", "awaiting_sample_approval", "approved", "failed"] },
+        "role": { "$ref": "#/$defs/roleReference" },
+        "presenter_shot": { "$ref": "#/$defs/sourceFile" },
+        "aspect_fit": { "$ref": "#/$defs/aspectFit" },
+        "sample": {
+          "type": "object",
+          "required": ["status", "approved"],
+          "properties": {
+            "status": { "type": "string", "enum": ["not_started", "queued", "generating", "awaiting_approval", "approved", "failed"] },
+            "turn_id": { "type": ["string", "null"], "pattern": "^T[0-9]{3,}$" },
+            "input_hash": { "type": ["string", "null"], "pattern": "^[a-f0-9]{64}$" },
+            "approved": { "type": "boolean" },
+            "requested_at": { "type": "string" },
+            "approved_at": { "type": "string" },
+            "error": { "type": "string" }
+          },
+          "additionalProperties": false
+        },
+        "updated_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "voiceboxSpeakerMapping": {
+      "description": "A strict exact-name Voicebox routing decision for one script speaker. Duplicate exact names deliberately require a manual choice.",
+      "type": "object",
+      "required": ["speaker_id", "speaker_name", "profile_id", "profile_name", "selection_source", "status", "detail", "updated_at"],
+      "properties": {
+        "speaker_id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{1,31}$" },
+        "speaker_name": { "type": "string", "minLength": 1 },
+        "profile_id": { "type": ["string", "null"] },
+        "profile_name": { "type": ["string", "null"] },
+        "selection_source": { "type": "string", "enum": ["manual", "same_name", "default", "ambiguous", "unavailable"] },
+        "status": { "type": "string", "enum": ["ready", "needs_attention", "unavailable"] },
+        "detail": { "type": "string" },
+        "updated_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "voiceboxBatchItem": {
+      "type": "object",
+      "required": ["turn_id", "speaker_id", "profile_id", "profile_name", "selection_source", "script_text_sha256", "status", "created_at", "error"],
+      "properties": {
+        "turn_id": { "type": "string", "pattern": "^T[0-9]{3,}$" },
+        "speaker_id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{1,31}$" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "profile_name": { "type": "string", "minLength": 1 },
+        "selection_source": { "type": "string", "enum": ["manual", "same_name", "default"] },
+        "script_text_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "status": { "type": "string", "enum": ["queued", "generating", "completed", "failed", "skipped"] },
+        "candidate_id": { "type": "string", "pattern": "^AVAC-[A-Za-z0-9-]{8,80}$" },
+        "outcome": { "type": "string", "enum": ["adopted", "candidate"] },
+        "created_at": { "type": "string" },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": "string" },
+        "error": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "voiceboxBatch": {
+      "description": "A globally serial Voicebox batch. Items are immutable script-order snapshots and never silently overwrite an adopted take in candidate-only mode.",
+      "type": "object",
+      "required": ["batch_id", "status", "mode", "apply_policy", "items", "created_at", "error"],
+      "properties": {
+        "batch_id": { "type": "string", "pattern": "^AVAB-[A-Za-z0-9-]{8,80}$" },
+        "status": { "type": "string", "enum": ["queued", "running", "completed", "completed_with_failures", "failed"] },
+        "mode": { "type": "string", "enum": ["missing_and_apply", "all_candidates", "failed_only_and_apply"] },
+        "apply_policy": { "type": "string", "enum": ["auto_adopt", "candidate_only"] },
+        "items": { "type": "array", "minItems": 1, "items": { "$ref": "#/$defs/voiceboxBatchItem" } },
+        "created_at": { "type": "string" },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": "string" },
+        "completed_count": { "type": "integer", "minimum": 0 },
+        "failed_count": { "type": "integer", "minimum": 0 },
+        "skipped_count": { "type": "integer", "minimum": 0 },
+        "error": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "voiceboxConfiguration": {
+      "type": "object",
+      "required": ["speaker_mappings", "batch"],
+      "properties": {
+        "speaker_mappings": { "type": "array", "items": { "$ref": "#/$defs/voiceboxSpeakerMapping" } },
+        "batch": { "oneOf": [{ "$ref": "#/$defs/voiceboxBatch" }, { "type": "null" }] }
+      },
+      "additionalProperties": false
+    },
+    "roleReference": {
+      "type": "object",
+      "required": ["role_id", "name", "version"],
+      "properties": {
+        "role_id": { "type": "string", "pattern": "^AR-[a-z0-9-]{3,64}$" },
+        "name": { "type": "string", "minLength": 1 },
+        "version": { "type": "integer", "minimum": 1 },
+        "reference_count": { "type": "integer", "minimum": 0 },
+        "selected_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "bindingSnapshot": {
+      "description": "Immutable per-turn generation inputs captured at queue time. The actual presenter image and audio are required; a reusable role reference is optional provenance.",
+      "type": "object",
+      "required": ["speaker_id", "presenter_shot", "driving_audio"],
+      "properties": {
+        "speaker_id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{1,31}$" },
+        "role": { "$ref": "#/$defs/roleReference" },
+        "presenter_shot": { "$ref": "#/$defs/sourceFile" },
+        "provider_input": { "$ref": "#/$defs/sourceFile" },
+        "driving_audio": { "$ref": "#/$defs/drivingAudio" }
+      },
+      "additionalProperties": false
+    },
+    "aspectFit": {
+      "description": "A preflight record for the exact image that will be uploaded to the cloud avatar provider.",
+      "type": "object",
+      "required": ["status", "target_aspect", "target_label", "source_ratio", "target_ratio", "difference_percent", "fit_mode", "message"],
+      "properties": {
+        "status": { "type": "string", "enum": ["matched", "needs_choice", "prepared"] },
+        "target_aspect": { "type": "string", "enum": ["portrait", "landscape", "square", "runninghub_4x5"] },
+        "target_label": { "type": "string", "minLength": 1 },
+        "source_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "target_ratio": { "type": "number", "exclusiveMinimum": 0 },
+        "difference_percent": { "type": "number", "minimum": 0 },
+        "fit_mode": { "type": "string", "enum": ["native", "cover_crop", "contain_blur"] },
+        "provider_input": { "$ref": "#/$defs/sourceFile" },
+        "prepared_at": { "type": "string" },
+        "message": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "cloudJob": {
+      "type": "object",
+      "required": ["job_id", "status", "stage", "input_hash", "attempt"],
+      "properties": {
+        "job_id": { "type": "string", "pattern": "^AVJ-[A-Za-z0-9-]{8,80}$" },
+        "status": { "type": "string", "enum": ["queued", "uploading", "detecting", "submitted", "running", "downloading", "succeeded", "failed", "cancelled"] },
+        "stage": { "type": "string", "minLength": 1 },
+        "input_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "binding_hash": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
+        "purpose": { "type": "string", "enum": ["sample", "batch", "retry"] },
+        "attempt": { "type": "integer", "minimum": 1 },
+        "provider_task_id": { "type": ["string", "null"] },
+        "provider_status": { "type": ["string", "null"] },
+        "sample_rate": { "type": "integer", "minimum": 1 },
+        "sample_frame_count": { "type": "integer", "minimum": 1 },
+        "samples_per_video_frame": { "type": "integer", "minimum": 1 },
+        "video_fps": { "type": "integer", "minimum": 1 },
+        "exact_total_frames": { "type": "integer", "minimum": 1 },
+        "requested_at": { "type": "string" },
+        "started_at": { "type": "string" },
+        "heartbeat_at": { "type": "string" },
+        "finished_at": { "type": "string" },
+        "error": { "type": "string" },
+        "result_path": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "jobState": {
+      "type": "object",
+      "required": ["status"],
+      "properties": {
+        "status": {
+          "type": "string",
+          "enum": ["not_started", "pending", "running", "passed", "passed_with_warnings", "failed", "blocked"]
+        },
+        "started_at": { "type": "string" },
+        "finished_at": { "type": "string" },
+        "issues": { "type": "array", "items": { "type": "object" } },
+        "summary": { "type": "object" },
+        "error": { "type": "string" },
+        "output_path": { "type": "string" },
+        "timeline_path": { "type": "string" },
+        "subtitle_path": { "type": "string" },
+        "qa_path": { "type": "string" }
+      },
+      "additionalProperties": true
+    },
+    "cutPlanItem": {
+      "description": "A non-destructive, reviewable section cut from a speaker's original long-form video.",
+      "type": "object",
+      "required": ["turn_id", "speaker_id", "status", "confidence", "source_type"],
+      "properties": {
+        "turn_id": { "type": "string", "pattern": "^T[0-9]{3,}$" },
+        "speaker_id": { "type": "string", "pattern": "^[a-z][a-z0-9_-]{1,31}$" },
+        "status": { "type": "string", "enum": ["pending_review", "approved", "needs_manual", "invalid"] },
+        "confidence": { "type": "string", "enum": ["high", "medium", "low", "manual", "exact_clock"] },
+        "source_type": { "type": "string", "enum": ["asr_alignment", "manual", "deterministic_timing_manifest"] },
+        "suggested_start_seconds": { "type": ["number", "null"], "minimum": 0 },
+        "suggested_end_seconds": { "type": ["number", "null"], "minimum": 0 },
+        "start_seconds": { "type": ["number", "null"], "minimum": 0 },
+        "end_seconds": { "type": ["number", "null"], "minimum": 0 },
+        "transcript": { "type": "string" },
+        "asr_similarity": { "type": "number", "minimum": 0, "maximum": 1 },
+        "asr_coverage": { "type": "number", "minimum": 0, "maximum": 1 },
+        "review_note": { "type": "string" },
+        "updated_at": { "type": "string" },
+        "approved_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "cutPlan": {
+      "type": "object",
+      "required": ["status", "items", "summary"],
+      "properties": {
+        "status": { "type": "string", "enum": ["not_started", "awaiting_review", "approved", "needs_attention"] },
+        "items": { "type": "array", "items": { "$ref": "#/$defs/cutPlanItem" } },
+        "summary": { "type": "object" },
+        "generated_at": { "type": "string" },
+        "approved_at": { "type": "string" }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

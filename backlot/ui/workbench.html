@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#0b1220">
+<title>海客视频工厂</title>
+<script>
+  try {
+    document.documentElement.dataset.theme = localStorage.getItem("backlot.theme") === "light" ? "light" : "dark";
+  } catch (_) {
+    document.documentElement.dataset.theme = "dark";
+  }
+</script>
+<link rel="stylesheet" href="/ui/workbench.css">
+</head>
+<body>
+<a class="skip-link" href="#main-content">跳到主要内容</a>
+<div id="app" class="shell"></div>
+<div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<dialog id="assetDialog" class="dialog">
+  <form id="assetForm" method="dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">素材登记</p><h2>新增可追溯素材</h2></div><button type="button" class="icon-button" data-dialog-close="assetDialog" aria-label="关闭">关闭</button></div>
+    <label>素材名称<input name="name" required maxlength="160" placeholder="例如：产品正面特写"></label>
+    <div class="form-grid">
+      <label>类型<select name="type"><option value="video">视频</option><option value="image">图片</option><option value="audio">音频</option><option value="animation">动画</option></select></label>
+      <label>来源<select name="source_type"><option value="human_provided">人工提供</option><option value="web_download">网络下载</option><option value="project_library">项目素材库</option><option value="ai_generated">AI 生成</option><option value="local_generated">本地生成</option></select></label>
+    </div>
+    <label>项目内相对路径<input name="path" placeholder="assets/video/candidate.mp4"></label>
+    <div class="form-grid"><label>授权/许可<input name="license" placeholder="例如：已授权 / CC BY"></label><label>来源链接<input name="source_url" placeholder="https://…"></label></div>
+    <p class="form-note">素材文件必须先位于本项目目录内。系统会分配稳定素材编号 S-xxx；每次用于场景时另分配 U-xxx。</p>
+    <div class="dialog-actions"><button type="button" data-dialog-close="assetDialog" class="button quiet">取消</button><button type="submit" class="button primary">登记素材</button></div>
+  </form>
+</dialog>
+<dialog id="imageDialog" class="dialog">
+  <form id="imageForm" method="dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">AI 生图素材</p><h2>生成并登记图片素材</h2></div><button type="button" class="icon-button" data-dialog-close="imageDialog" aria-label="关闭">关闭</button></div>
+    <p class="form-note">将通过 OpenAI 兼容服务调用 <strong>gpt-image-2</strong>。图片会保存到当前项目的 <code>assets/images/openai</code>，自动获得 S-xxx 编号；生成后仍需由人工决定是否分配为 U-xxx。</p>
+    <label>素材名称（可选）<input name="name" maxlength="140" placeholder="例如：产品主视觉 — 白底正面图"></label>
+    <label>导演提示词<textarea name="prompt" required maxlength="6000" placeholder="主体 + 画面目标 + 风格/材质 + 场景 + 光线 + 镜头。例如：一只白色保温杯，正面居中，纯白无缝背景，柔和棚拍光，电商产品静物摄影，留出干净边缘。"></textarea></label>
+    <div class="form-grid">
+      <label>画幅<select name="size"><option value="1536x1024">横版 3:2（推荐视频）</option><option value="1024x1536">竖版 2:3</option><option value="1024x1024">正方形 1:1</option><option value="auto">自动</option></select></label>
+      <label>质量<select name="quality"><option value="low">低（试样）</option><option value="medium" selected>中（默认）</option><option value="high">高（精修）</option><option value="auto">自动</option></select></label>
+    </div>
+    <label>生成数量<select name="n"><option value="1" selected>1 张</option><option value="2">2 张</option><option value="3">3 张</option><option value="4">4 张</option></select></label>
+    <p class="form-note">点击生成前会再次确认模型、数量与质量。实际费用、可用模型与限额以你的中转站账户为准；密钥不会发送到浏览器或写入项目素材元数据。</p>
+    <div class="dialog-actions"><button type="button" data-dialog-close="imageDialog" class="button quiet">取消</button><button type="submit" class="button primary">确认并生成</button></div>
+  </form>
+</dialog>
+<dialog id="aiConfigDialog" class="dialog">
+  <form id="aiConfigForm" method="dialog">
+    <div class="dialog-heading"><div><p class="eyebrow">文本智能服务</p><h2>AI 配置</h2></div><button type="button" class="icon-button" data-dialog-close="aiConfigDialog" aria-label="关闭">关闭</button></div>
+    <p class="form-note">豆包负责每日快报的中国市场选题、中文台词和独立传播冷审；主模型负责事实技术兜底与画面文案，并在豆包不可用时降级接管。密钥只保存在本机 <code>.env.secrets.local</code>，页面不会读取或显示密钥明文。</p>
+    <h3>主文本模型</h3>
+    <div id="aiConfigStatus" class="ai-config-status" role="status">正在读取配置…</div>
+    <label>OpenAI 兼容接口地址<input name="base_url" type="url" placeholder="https://api.openai.com/v1" autocomplete="url"></label>
+    <label>文本模型<input name="model" required maxlength="160" placeholder="例如：gpt-5.6-luna" autocomplete="off"></label>
+    <label>API 密钥<input name="api_key" type="password" maxlength="1000" placeholder="已保存时留空即可，不会覆盖现有密钥" autocomplete="new-password"></label>
+    <h3>豆包快报主编模型</h3>
+    <div id="doubaoConfigStatus" class="ai-config-status" role="status">正在读取配置…</div>
+    <label>火山方舟接口地址<input name="doubao_base_url" type="url" placeholder="https://ark.cn-beijing.volces.com/api/v3" autocomplete="url"></label>
+    <label>豆包模型<input name="doubao_model" maxlength="160" placeholder="doubao-seed-2-1-pro-260628" autocomplete="off"></label>
+    <label>豆包 API 密钥<input name="doubao_api_key" type="password" maxlength="1000" placeholder="已保存时留空即可，不会覆盖现有密钥" autocomplete="new-password"></label>
+    <p class="form-note">“保存配置”不调用模型；两个测试按钮各发送一次极短的结构化文本请求，可能产生少量 API 费用。</p>
+    <div class="dialog-actions"><button type="button" data-dialog-close="aiConfigDialog" class="button quiet">取消</button><button type="button" id="aiConfigTest" class="button quiet">测试主模型</button><button type="button" id="doubaoConfigTest" class="button quiet">测试豆包</button><button type="submit" class="button primary">保存两组配置</button></div>
+  </form>
+</dialog>
+<script type="module" src="/ui/workbench.js"></script>
+</body>
+</html>

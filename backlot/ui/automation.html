@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenMontage — 自动生产中心</title>
+<link rel="stylesheet" href="/ui/board.css">
+<link rel="stylesheet" href="/ui/automation.css">
+</head>
+<body class="automation-page">
+<main class="automation-shell">
+  <header class="automation-header">
+    <div>
+      <a class="backlink" href="/">← 返回项目库</a>
+      <span class="wordmark">OpenMontage / 自动生产</span>
+      <h1>每日科技快报生产中心</h1>
+      <p>由工作台在每天凌晨 03:00 调度项目内置大模型与视频流水线；Codex 不参与生产。</p>
+    </div>
+    <div class="automation-header-actions">
+      <span class="automation-health unknown" id="automationHealth">正在检查调度…</span>
+      <button class="secondary-action" id="refreshAutomation" type="button">刷新状态</button>
+    </div>
+  </header>
+
+  <p class="automation-message" id="automationMessage" role="status" aria-live="polite"></p>
+
+  <section class="automation-card automation-control-card" aria-labelledby="scheduleTitle">
+    <div class="automation-card-head">
+      <div>
+        <span class="eyebrow">01 / 调度与安全</span>
+        <h2 id="scheduleTitle">凌晨任务是否真的会运行</h2>
+      </div>
+      <label class="automation-master-switch">
+        <input id="automationEnabled" type="checkbox" role="switch">
+        <span><strong id="automationSwitchLabel">每日自动生产</strong><small>每天 03:00 生成上一自然日的待审视频</small></span>
+      </label>
+    </div>
+    <div class="scheduler-alert" id="schedulerAlert"></div>
+    <div class="automation-facts" id="schedulerFacts"></div>
+    <div class="automation-actions" id="schedulerActions">
+      <button class="primary-action" id="repairScheduler" type="button" hidden>修复凌晨调度</button>
+      <span>开关会同时更新项目配置与 Windows 计划任务，失败时自动回滚。</span>
+    </div>
+  </section>
+
+  <section class="automation-card" aria-labelledby="preflightTitle">
+    <div class="automation-card-head compact">
+      <div><span class="eyebrow">02 / 生产前检查</span><h2 id="preflightTitle">无人值守运行条件</h2></div>
+      <span class="contract-chip">9:16 · 企业 Lite 优先 · 上限 ¥5</span>
+    </div>
+    <div class="preflight-grid" id="preflightGrid"></div>
+  </section>
+
+  <section class="automation-card" aria-labelledby="runTitle">
+    <div class="automation-card-head">
+      <div><span class="eyebrow">03 / 当前任务</span><h2 id="runTitle">从新闻到待审全片</h2></div>
+      <div class="manual-run">
+        <label for="targetDate">已结束的新闻日</label>
+        <input id="targetDate" type="date">
+        <button class="secondary-action" id="startRun" type="button">立即生成</button>
+      </div>
+    </div>
+    <div class="run-overview" id="runOverview"></div>
+    <div class="stage-timeline" id="stageTimeline"></div>
+    <div class="run-detail-grid">
+      <article class="run-detail" id="scriptDetail"></article>
+      <article class="run-detail" id="costDetail"></article>
+    </div>
+    <article class="text-recovery-detail" id="textRecoveryDetail"></article>
+    <div class="failure-panel" id="failurePanel" hidden></div>
+  </section>
+
+  <section class="automation-card" aria-labelledby="historyTitle">
+    <div class="automation-card-head compact">
+      <div><span class="eyebrow">04 / 运行历史</span><h2 id="historyTitle">按日期追溯生产证据</h2></div>
+      <span class="muted">正式发布始终需要人工确认</span>
+    </div>
+    <div class="history-list" id="historyList"></div>
+  </section>
+</main>
+<script type="module" src="/ui/automation.js"></script>
+</body>
+</html>

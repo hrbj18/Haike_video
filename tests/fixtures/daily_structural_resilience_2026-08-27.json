@@ -1,0 +1,64 @@
+{
+  "target_date": "2026-08-27",
+  "combination_id": "EC-20260827-FROZEN",
+  "baseline": {
+    "status": "structural_rejected",
+    "media_cost_cny": 0,
+    "duplicate_attempts": 3,
+    "issues": [
+      "S02 event_identity必须逐字来自冻结标题或claim",
+      "S04 开场未在规定句数内说出event_identity：2026年8月国内人形机器人行业集中升温"
+    ]
+  },
+  "stories": [
+    {
+      "selection_id": "S01",
+      "allocated_planning_units": 2,
+      "canonical_title": "《王者万象棋》公布新消息",
+      "coverage_plan": [{"claim_id": "S01-event", "dim": "event_core", "claim": "《王者万象棋》公布新消息。"}]
+    },
+    {
+      "selection_id": "S02",
+      "allocated_planning_units": 2,
+      "canonical_title": "腾讯汤道生回应腾讯做AI慢了",
+      "coverage_plan": [{"claim_id": "S02-event", "dim": "event_core", "claim": "8月25日深夜，腾讯汤道生回应“腾讯做AI慢了”。"}]
+    },
+    {
+      "selection_id": "S03",
+      "allocated_planning_units": 2,
+      "canonical_title": "REDMI手机适配澎湃OS 4",
+      "coverage_plan": [{"claim_id": "S03-event", "dim": "event_core", "claim": "REDMI手机将适配澎湃OS 4双机跨设备功能。"}]
+    },
+    {
+      "selection_id": "S04",
+      "allocated_planning_units": 2,
+      "canonical_title": "2026年8月国内人形机器人行业集中升温",
+      "coverage_plan": [{"claim_id": "S04-event", "dim": "event_core", "claim": "世界机器人大会和第二届世界人形机器人运动会在北京举行。"}]
+    }
+  ],
+  "raw": {
+    "story_identities": [
+      {"story_id": "S01", "event_identity": "《王者万象棋》"},
+      {"story_id": "S02", "event_identity": "8月25日深夜"},
+      {"story_id": "S03", "event_identity": "REDMI手机"},
+      {"story_id": "S04", "event_identity": "2026年8月国内人形机器人行业集中升温"}
+    ],
+    "lines": [
+      {"turn_id": "T001", "story_id": "S01", "text": "每日科技快讯来了，《王者万象棋》公布新消息。"},
+      {"turn_id": "T002", "story_id": "S01", "text": "这次终于把玩法摆到台面上了。"},
+      {"turn_id": "T003", "story_id": "S02", "text": "再看腾讯这边，8月25日深夜汤道生直接回应“腾讯做AI慢了”。"},
+      {"turn_id": "T004", "story_id": "S02", "text": "这波算是正面接招。"},
+      {"turn_id": "T005", "story_id": "S03", "text": "接着看手机，REDMI手机将适配澎湃OS 4。"},
+      {"turn_id": "T006", "story_id": "S03", "text": "双机跨设备用起来会更顺手。"},
+      {"turn_id": "T007", "story_id": "S04", "text": "最后，世界机器人大会和第二届世界人形机器人运动会都在北京开。"},
+      {"turn_id": "T008", "story_id": "S04", "text": "机器人热度这次是真的高。"},
+      {"turn_id": "T009", "story_id": "", "text": "四条消息里你最想聊哪一条？"}
+    ]
+  },
+  "expected_identities": {
+    "S01": "《王者万象棋》",
+    "S02": "腾讯做AI慢了",
+    "S03": "REDMI手机",
+    "S04": "世界人形机器人运动会"
+  }
+}

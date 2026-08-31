@@ -1,0 +1,22 @@
+version: 1
+
+# All paths are relative to the OpenMontage repository root unless absolute.
+# This file is safe to commit. Secrets and machine-specific overrides belong
+# in .env.secrets.local or .env.local, both ignored by Git.
+paths:
+  content_root: content
+  project_source_root: content/episodes
+  library_root: content/library
+  templates_root: content/templates
+  runtime_root: projects
+  render_root: renders
+  cache_root: cache
+  temp_root: temp
+  migration_root: content/migration
+
+defaults:
+  project_id: 003-tech-chat
+  tts_provider: openmontage_local
+  stock_provider: pexels
+  fps: 25
+  aspect_ratio: "9:16"

@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "counting": "non_whitespace_characters",
+  "required_files": {
+    "AGENT_GUIDE.md": 8000,
+    "docs/handoff/README.md": 1200,
+    "docs/handoff/CURRENT_STATUS.md": 2500,
+    "docs/handoff/PRODUCT_RULES.md": 3500,
+    "docs/handoff/DECISIONS.md": 5000,
+    "docs/handoff/CODE_MAP.md": 4000,
+    "docs/handoff/DAILY_TECH_BRIEF.md": 4500,
+    "docs/handoff/DEPLOYMENT.md": 3500
+  },
+  "default_read_set": ["AGENT_GUIDE.md"],
+  "project_task_read_set": [
+    "docs/handoff/README.md",
+    "docs/handoff/CURRENT_STATUS.md"
+  ]
+}

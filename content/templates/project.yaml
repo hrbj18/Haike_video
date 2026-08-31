@@ -1,0 +1,35 @@
+id: replace-with-lowercase-project-id
+title: Replace with project title
+version: 1
+
+format:
+  fps: 25
+  aspect_ratio: "9:16"
+  resolution: 1080x1920
+
+speakers:
+  - id: speaker-a
+    display_name: Speaker A
+    media_role: primary
+  - id: speaker-b
+    display_name: Speaker B
+    media_role: secondary
+
+providers:
+  tts: voicebox
+  stock_media: pexels
+  composition: remotion
+
+quality_gates:
+  audio_alignment: true
+  subtitle_alignment: true
+  speaker_match: true
+  visual_review: true
+  source_citation: true
+
+paths:
+  script: script
+  timeline: timeline
+  media: media
+  composition: composition
+  qa: qa

@@ -1,0 +1,25 @@
+{
+  "id": "subtitle-tech-brief-v1",
+  "name": "科技快报 V1 字幕",
+  "style": {
+    "enabled": true,
+    "display_mode": "phrase",
+    "font": "Microsoft YaHei",
+    "font_size": 44,
+    "bold": true,
+    "text_color": "#FFFDF7",
+    "outline_color": "#12222C",
+    "outline_width": 3,
+    "background_enabled": false,
+    "background_color": "#12222C",
+    "background_opacity": 64,
+    "position": { "x": 0.5, "y": 0.89, "width": 0.84, "anchor": "bottom-center" },
+    "max_lines": 2
+  },
+  "rules": {
+    "one_line_ideal_chars": [12, 16],
+    "max_lines": 2,
+    "caption_is_never_baked_into_visual": true,
+    "only_apply_after_explicit_user_selection": true
+  }
+}

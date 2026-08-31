@@ -1,0 +1,438 @@
+{
+  "24": {
+    "class_type": "VHS_VideoCombine",
+    "inputs": {
+      "images": [
+        "19",
+        0
+      ],
+      "pix_fmt": "yuv420p",
+      "format": "video/h264-mp4",
+      "frame_rate": 25,
+      "pingpong": false,
+      "save_output": true,
+      "filename_prefix": "InfiniteTalk_4x5_448x560_long_4step",
+      "loop_count": 0,
+      "save_metadata": false,
+      "crf": 18,
+      "trim_to_audio": true,
+      "no_preview": false,
+      "audio": [
+        "34",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "最终输出：448×560（4:5）｜按原音频裁切｜高码率 MP4"
+    }
+  },
+  "26": {
+    "class_type": "GetImageSizeAndCount",
+    "inputs": {
+      "image": [
+        "2",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "读取预处理后图像尺寸（自动）"
+    }
+  },
+  "30": {
+    "class_type": "CR Prompt Text",
+    "inputs": {
+      "prompt": "一位专业主播坐在录音间，正对镜头自然说话。镜头固定，保持人物身份、五官、发型、服装、双手、麦克风和录音室背景一致。只允许轻微自然的头部动作、自然眨眼和克制的手部动作。不要唱歌，不要跳舞，不要挥手，不要比心，不要飞吻，不要移动镜头，不要切换场景，不要出现其他人物。"
+    },
+    "_meta": {
+      "title": "口播动作提示词（默认已优化；一般无需修改）"
+    }
+  },
+  "32": {
+    "class_type": "WanVideoLoraSelect",
+    "inputs": {
+      "lora": "Wan_2_1_T2V_14B_rCM_lora_average_rank_83_bf16.safetensors",
+      "strength": [
+        "17",
+        0
+      ],
+      "low_mem_load": false,
+      "merge_loras": false
+    },
+    "_meta": {
+      "title": "动态分辨率 LoRA（自动加载）"
+    }
+  },
+  "11": {
+    "class_type": "WanVideoModelLoader",
+    "inputs": {
+      "attention_mode": "sageattn",
+      "block_swap_args": [
+        "33",
+        0
+      ],
+      "lora": [
+        "15",
+        0
+      ],
+      "multitalk_model": [
+        "16",
+        0
+      ],
+      "rms_norm_function": "default",
+      "model": "aniWan2114BFp8E4m3fn_i2v480pNew.safetensors",
+      "load_device": "offload_device",
+      "base_precision": "fp16_fast",
+      "quantization": "disabled"
+    },
+    "_meta": {
+      "title": "Wan 2.1 图生视频主模型（自动加载）"
+    }
+  },
+  "33": {
+    "class_type": "WanVideoBlockSwap",
+    "inputs": {
+      "prefetch_blocks": 1,
+      "offload_img_emb": false,
+      "offload_txt_emb": false,
+      "block_swap_debug": false,
+      "vace_blocks_to_swap": 0,
+      "blocks_to_swap": 8,
+      "use_non_blocking": true
+    },
+    "_meta": {
+      "title": "显存管理：Block Swap（云端默认，请勿修改）"
+    }
+  },
+  "12": {
+    "class_type": "WanVideoTextEncode",
+    "inputs": {
+      "t5": [
+        "3",
+        0
+      ],
+      "negative_prompt": "唱歌，跳舞，挥手，比心，飞吻，夸张动作，大幅度手势，镜头移动，镜头缩放，场景切换，身份变化，发型变化，服装变化，背景变化，额外人物，字幕，文字，水印，过度曝光，模糊，低质量，JPEG压缩残留，面部变形，五官错位，多余手指，手部畸形，身体畸形，闪烁，抽搐，静止画面。",
+      "use_disk_cache": true,
+      "positive_prompt": [
+        "30",
+        0
+      ],
+      "force_offload": true,
+      "device": "gpu"
+    },
+    "_meta": {
+      "title": "自然口播提示词编码（默认已优化；一般无需修改）"
+    }
+  },
+  "34": {
+    "class_type": "LoadAudio",
+    "inputs": {
+      "audio": "347e8336e95f7731f4a00be820d3086615f7cb56a4723c2e0f4e4e113229fed4.wav",
+      "audioUI": ""
+    },
+    "_meta": {
+      "title": "② 上传口播音频（不限时长；仅修改这里）"
+    }
+  },
+  "13": {
+    "class_type": "WanVideoSampler",
+    "inputs": {
+      "add_noise_to_samples": true,
+      "denoise_strength": 1,
+      "text_embeds": [
+        "12",
+        0
+      ],
+      "seed": 857465038123108,
+      "cfg": 1.0000000000000002,
+      "shift": 11.000000000000002,
+      "end_step": -1,
+      "riflex_freq_index": 0,
+      "multitalk_embeds": [
+        "18",
+        0
+      ],
+      "steps": 4,
+      "scheduler": "dpm++",
+      "start_step": 0,
+      "batched_cfg": false,
+      "rope_function": "comfy",
+      "image_embeds": [
+        "14",
+        0
+      ],
+      "force_offload": false,
+      "model": [
+        "11",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "InfiniteTalk 四步采样（速度优先；自动）"
+    }
+  },
+  "35": {
+    "class_type": "JWInteger",
+    "inputs": {
+      "value": [
+        "41",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "按完整音频计算生成帧数（动态，无固定上限）"
+    }
+  },
+  "14": {
+    "class_type": "WanVideoImageToVideoMultiTalk",
+    "inputs": {
+      "motion_frame": 9,
+      "mode": "infinitetalk",
+      "clip_embeds": [
+        "7",
+        0
+      ],
+      "tiled_vae": false,
+      "width": [
+        "26",
+        1
+      ],
+      "colormatch": "disabled",
+      "output_path": "",
+      "force_offload": false,
+      "vae": [
+        "6",
+        0
+      ],
+      "frame_window_size": 81,
+      "height": [
+        "26",
+        2
+      ],
+      "start_image": [
+        "26",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "InfiniteTalk 长视频条件：448×560｜81帧窗口（约3.2秒）｜末9帧衔接（兼容版，自动）"
+    }
+  },
+  "36": {
+    "class_type": "LoadImage",
+    "inputs": {
+      "image": "a35548e5e2c7e9743d33e9533bd8bf49f8bd0b837567680a24285511ae95ddab.png"
+    },
+    "_meta": {
+      "title": "① 上传4:5人物参考图（仅修改这里）"
+    }
+  },
+  "15": {
+    "class_type": "WanVideoLoraSelect",
+    "inputs": {
+      "lora": "Wan21_I2V_14B_lightx2v_cfg_step_distill_lora_rank64.safetensors",
+      "strength": 1,
+      "prev_lora": [
+        "32",
+        0
+      ],
+      "low_mem_load": false,
+      "merge_loras": false
+    },
+    "_meta": {
+      "title": "四步蒸馏加速 LoRA（自动加载）"
+    }
+  },
+  "16": {
+    "class_type": "MultiTalkModelLoader",
+    "inputs": {
+      "model": "InfiniteTalk/Wan2_1-InfiniTetalk-Single_fp16.safetensors"
+    },
+    "_meta": {
+      "title": "InfiniteTalk 单人对口型模型（自动加载）"
+    }
+  },
+  "38": {
+    "class_type": "AudioToFPS",
+    "inputs": {
+      "加1帧": true,
+      "因数": 8,
+      "帧率": 25,
+      "音频": [
+        "34",
+        0
+      ]
+    },
+    "_meta": {
+      "title": "按 25FPS 换算音频帧数（自动）"
+    }
+  },
+  "17": {
+    "class_type": "JWFloat",
+    "inputs": {
+      "value": 0.30000000000000004
+    },
+    "_meta": {
+      "title": "提示词强度（默认 0.30；一般无需修改）"
+    }
+  },
+  "18": {
+    "class_type": "MultiTalkWav2VecEmbeds",
+    "inputs": {
+      "audio_cfg_scale": 1,
+      "add_noise_floor": false,
+      "audio_scale": 1,
+      "normalize_loudness": true,
+      "num_frames": [
+        "35",
+        0
+      ],
+      "fps": 25,
+      "wav2vec_model": [
+        "9",
+        0
+      ],
+      "multi_audio_type": "para",
+      "smooth_transients": false,
+      "audio_1": [
+        "8",
+        3
+      ]
+    },
+    "_meta": {
+      "title": "音频驱动特征：按完整音频动态生成（自动）"
+    }
+  },
+  "19": {
+    "class_type": "WanVideoDecode",
+    "inputs": {
+      "tile_y": 272,
+      "normalization": "default",
+      "tile_x": 272,
+      "tile_stride_y": 128,
+      "vae": [
+        "6",
+        0
+      ],
+      "tile_stride_x": 144,
+      "samples": [
+        "13",
+        0
+      ],
+      "enable_vae_tiling": false
+    },
+    "_meta": {
+      "title": "视频解码（自动）"
+    }
+  },
+  "2": {
+    "class_type": "ImageScale",
+    "inputs": {
+      "image": [
+        "36",
+        0
+      ],
+      "width": 448,
+      "upscale_method": "lanczos",
+      "crop": "center",
+      "height": 560
+    },
+    "_meta": {
+      "title": "人物图预处理：固定裁切至 448×560（稳定版，自动）"
+    }
+  },
+  "3": {
+    "class_type": "LoadWanVideoT5TextEncoder",
+    "inputs": {
+      "model_name": "umt5-xxl-enc-bf16.safetensors",
+      "precision": "bf16",
+      "load_device": "offload_device",
+      "quantization": "disabled"
+    },
+    "_meta": {
+      "title": "文本编码模型：T5（自动加载，请勿修改）"
+    }
+  },
+  "4": {
+    "class_type": "CLIPVisionLoader",
+    "inputs": {
+      "clip_name": "clip_vision_h.safetensors"
+    },
+    "_meta": {
+      "title": "图像理解模型：CLIP Vision（自动加载，请勿修改）"
+    }
+  },
+  "6": {
+    "class_type": "WanVideoVAELoader",
+    "inputs": {
+      "model_name": "Wan2_1_VAE_bf16.safetensors",
+      "precision": "bf16",
+      "use_cpu_cache": false,
+      "verbose": false
+    },
+    "_meta": {
+      "title": "Wan 视频 VAE（自动加载，请勿修改）"
+    }
+  },
+  "7": {
+    "class_type": "WanVideoClipVisionEncode",
+    "inputs": {
+      "strength_1": 1,
+      "tiles": 0,
+      "combine_embeds": "average",
+      "strength_2": 1,
+      "image_1": [
+        "26",
+        0
+      ],
+      "force_offload": true,
+      "clip_vision": [
+        "4",
+        0
+      ],
+      "crop": "center",
+      "ratio": 0.5
+    },
+    "_meta": {
+      "title": "参考图视觉特征编码（自动）"
+    }
+  },
+  "8": {
+    "class_type": "AudioSeparation",
+    "inputs": {
+      "chunk_fade_shape": "linear",
+      "chunk_length": 10,
+      "audio": [
+        "34",
+        0
+      ],
+      "chunk_overlap": 0.1
+    },
+    "_meta": {
+      "title": "长音频预处理：自动分块并衔接（自动）"
+    }
+  },
+  "9": {
+    "class_type": "DownloadAndLoadWav2VecModel",
+    "inputs": {
+      "model": "TencentGameMate/chinese-wav2vec2-base",
+      "load_device": "main_device",
+      "base_precision": "fp16"
+    },
+    "_meta": {
+      "title": "语音特征模型：中文 Wav2Vec2（自动加载）"
+    }
+  },
+  "41": {
+    "class_type": "MathExpression|pysssss",
+    "inputs": {
+      "a": [
+        "38",
+        1
+      ],
+      "expression": "a+2"
+    },
+    "_meta": {
+      "title": "帧数对齐计算（自动）"
+    }
+  }
+}

@@ -1,0 +1,52 @@
+{
+  "target_date": "2026-08-26",
+  "baseline": {
+    "status": "failed",
+    "current_stage": "script",
+    "elapsed_seconds": 144,
+    "editorial_score": 83,
+    "media_cost_cny": 0,
+    "issues": [
+      "T004的比赛验证判断超出冻结claim",
+      "T007的风格评价超出冻结claim",
+      "T009的发售等待判断超出冻结claim",
+      "全稿预计119.5秒，超过110秒"
+    ]
+  },
+  "events": [
+    {
+      "event_id": "ROBOT",
+      "title": "8.64秒！天工Ultra机器人百米夺冠",
+      "heat_level": "H3",
+      "observed_heat_score": 68,
+      "selection_score": 92.4,
+      "topic_family": "robotics",
+      "event_form": "visual_record",
+      "platform_hot": true
+    },
+    {
+      "event_id": "RESISTANCE",
+      "title": "国产游戏《抵抗者》公布科隆游戏展实机",
+      "heat_level": "H1",
+      "observed_heat_score": 24,
+      "selection_score": 49.4,
+      "topic_family": "gaming",
+      "event_form": "trailer_announcement",
+      "platform_hot": false
+    },
+    {
+      "event_id": "SHOWA",
+      "title": "《昭和米国物语》公布实机预告和配音阵容",
+      "heat_level": "H1",
+      "observed_heat_score": 24,
+      "selection_score": 49.05,
+      "topic_family": "gaming",
+      "event_form": "trailer_announcement",
+      "platform_hot": false
+    }
+  ],
+  "weak_backups": [
+    "国产游戏《动物朋克》公布实机演示",
+    "苹果折叠手机主板曝光"
+  ]
+}

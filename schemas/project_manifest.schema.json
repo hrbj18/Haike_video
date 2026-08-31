@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openmontage.local/schemas/project_manifest.schema.json",
+  "title": "OpenMontage Content Project",
+  "type": "object",
+  "required": ["id", "title", "version", "format", "speakers", "providers", "quality_gates"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,63}$"},
+    "title": {"type": "string", "minLength": 1},
+    "version": {"type": "integer", "minimum": 1},
+    "format": {
+      "type": "object",
+      "required": ["fps", "aspect_ratio"],
+      "properties": {
+        "fps": {"type": "integer", "enum": [24, 25, 30, 50, 60]},
+        "aspect_ratio": {"type": "string", "enum": ["9:16", "16:9", "1:1", "4:5"]},
+        "resolution": {"type": "string"}
+      },
+      "additionalProperties": true
+    },
+    "speakers": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "display_name"],
+        "properties": {
+          "id": {"type": "string"},
+          "display_name": {"type": "string"},
+          "media_role": {"type": "string"},
+          "native_audio_required": {"type": "boolean"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "providers": {"type": "object", "minProperties": 1},
+    "quality_gates": {"type": "object", "minProperties": 1},
+    "paths": {"type": "object"},
+    "source": {"type": "object"}
+  },
+  "additionalProperties": true
+}
+

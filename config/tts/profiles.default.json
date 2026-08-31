@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "profiles": [
+    {
+      "id": "openmontage-qwen-serena",
+      "name": "Qwen Serena",
+      "description": "温暖、自然的中文女声预设，无需参考音频。",
+      "language": "zh",
+      "voice_type": "preset",
+      "preset_engine": "qwen_custom_voice",
+      "preset_voice_id": "Serena",
+      "default_engine": "qwen_custom_voice"
+    },
+    {
+      "id": "openmontage-qwen-vivian",
+      "name": "Qwen Vivian",
+      "description": "明亮、清晰的中文女声预设，无需参考音频。",
+      "language": "zh",
+      "voice_type": "preset",
+      "preset_engine": "qwen_custom_voice",
+      "preset_voice_id": "Vivian",
+      "default_engine": "qwen_custom_voice"
+    },
+    {
+      "id": "openmontage-qwen-dylan",
+      "name": "Qwen Dylan",
+      "description": "稳重、清晰的中文男声预设，无需参考音频。",
+      "language": "zh",
+      "voice_type": "preset",
+      "preset_engine": "qwen_custom_voice",
+      "preset_voice_id": "Dylan",
+      "default_engine": "qwen_custom_voice"
+    }
+  ]
+}
+

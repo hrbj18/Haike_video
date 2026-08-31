@@ -1,0 +1,927 @@
+{
+  "71": {
+    "inputs": {
+      "model": "LongCat-Avatar-15_bf16.safetensors",
+      "base_precision": "bf16",
+      "quantization": "disabled",
+      "load_device": "offload_device",
+      "attention_mode": "sageattn_compiled",
+      "rms_norm_function": "default"
+    },
+    "class_type": "WanVideoModelLoader",
+    "_meta": {
+      "title": "内部处理：WanVideoModelLoader（自动，请勿修改）"
+    }
+  },
+  "103": {
+    "inputs": {
+      "model": [
+        "123",
+        0
+      ],
+      "block_swap_args": [
+        "104",
+        0
+      ]
+    },
+    "class_type": "WanVideoSetBlockSwap",
+    "_meta": {
+      "title": "内部处理：WanVideoSetBlockSwap（自动，请勿修改）"
+    }
+  },
+  "104": {
+    "inputs": {
+      "blocks_to_swap": 48,
+      "offload_img_emb": false,
+      "offload_txt_emb": false,
+      "use_non_blocking": true,
+      "vace_blocks_to_swap": 0,
+      "prefetch_blocks": 1,
+      "block_swap_debug": false
+    },
+    "class_type": "WanVideoBlockSwap",
+    "_meta": {
+      "title": "内部处理：WanVideoBlockSwap（自动，请勿修改）"
+    }
+  },
+  "108": {
+    "inputs": {
+      "model_name": "wan_2.1_vae.safetensors",
+      "precision": "bf16",
+      "use_cpu_cache": false,
+      "verbose": false
+    },
+    "class_type": "WanVideoVAELoader",
+    "_meta": {
+      "title": "内部处理：WanVideoVAELoader（自动，请勿修改）"
+    }
+  },
+  "123": {
+    "inputs": {
+      "model": [
+        "71",
+        0
+      ],
+      "lora": [
+        "539",
+        0
+      ]
+    },
+    "class_type": "WanVideoSetLoRAs",
+    "_meta": {
+      "title": "内部处理：WanVideoSetLoRAs（自动，请勿修改）"
+    }
+  },
+  "148": {
+    "inputs": {
+      "value": 13
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "重叠帧数量：13（自动）"
+    }
+  },
+  "176": {
+    "inputs": {
+      "image": "ebee2f11fcbe57bd4050f7f53036341a730626dc6c08b6c4287a7b72ffb2f2c9.png"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "① 上传人物参考图（仅修改这里）"
+    }
+  },
+  "245": {
+    "inputs": {
+      "value": 8
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "采样步数：8（自动）"
+    }
+  },
+  "249": {
+    "inputs": {
+      "value": 1
+    },
+    "class_type": "FloatConstant",
+    "_meta": {
+      "title": "固定小数参数：1（自动，请勿修改）"
+    }
+  },
+  "257": {
+    "inputs": {
+      "value": 12
+    },
+    "class_type": "FloatConstant",
+    "_meta": {
+      "title": "固定小数参数：12（自动，请勿修改）"
+    }
+  },
+  "283": {
+    "inputs": {
+      "enable_vae_tiling": false,
+      "tile_x": 272,
+      "tile_y": 272,
+      "tile_stride_x": 144,
+      "tile_stride_y": 128,
+      "normalization": "default",
+      "vae": [
+        "108",
+        0
+      ],
+      "samples": [
+        "536",
+        0
+      ]
+    },
+    "class_type": "WanVideoDecode",
+    "_meta": {
+      "title": "内部处理：WanVideoDecode（自动，请勿修改）"
+    }
+  },
+  "285": {
+    "inputs": {
+      "overlap": [
+        "148",
+        0
+      ],
+      "overlap_side": "source",
+      "overlap_mode": "cut",
+      "source_images": [
+        "512",
+        0
+      ]
+    },
+    "class_type": "ImageBatchExtendWithOverlap",
+    "_meta": {
+      "title": "内部处理：ImageBatchExtendWithOverlap（自动，请勿修改）"
+    }
+  },
+  "286": {
+    "inputs": {
+      "enable_vae_tiling": false,
+      "tile_x": 272,
+      "tile_y": 272,
+      "tile_stride_x": 144,
+      "tile_stride_y": 128,
+      "noise_aug_strength": 0,
+      "latent_strength": 1,
+      "vae": [
+        "108",
+        0
+      ],
+      "image": [
+        "285",
+        1
+      ]
+    },
+    "class_type": "WanVideoEncode",
+    "_meta": {
+      "title": "内部处理：WanVideoEncode（自动，请勿修改）"
+    }
+  },
+  "287": {
+    "inputs": {
+      "model_name": "umt5-xxl-enc-fp8_e4m3fn.safetensors",
+      "precision": "bf16",
+      "positive_prompt": [
+        "495",
+        0
+      ],
+      "negative_prompt": "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards",
+      "quantization": "disabled",
+      "use_disk_cache": true,
+      "device": "gpu"
+    },
+    "class_type": "WanVideoTextEncodeCached",
+    "_meta": {
+      "title": "口播提示词编码（自动，请勿修改）"
+    }
+  },
+  "292": {
+    "inputs": {
+      "frame_rate": 25,
+      "loop_count": 0,
+      "filename_prefix": "LongCatVideo",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": true,
+      "pingpong": false,
+      "save_output": false,
+      "no_preview": false,
+      "images": [
+        "283",
+        0
+      ],
+      "audio": [
+        "528",
+        1
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "内部处理：VHS_VideoCombine（自动，请勿修改）"
+    }
+  },
+  "295": {
+    "inputs": {
+      "enable_vae_tiling": false,
+      "tile_x": 272,
+      "tile_y": 272,
+      "tile_stride_x": 144,
+      "tile_stride_y": 128,
+      "normalization": "default",
+      "vae": [
+        "108",
+        0
+      ],
+      "samples": [
+        "541",
+        0
+      ]
+    },
+    "class_type": "WanVideoDecode",
+    "_meta": {
+      "title": "内部处理：WanVideoDecode（自动，请勿修改）"
+    }
+  },
+  "299": {
+    "inputs": {
+      "model_name": "umt5-xxl-enc-fp8_e4m3fn.safetensors",
+      "precision": "bf16",
+      "positive_prompt": [
+        "502",
+        0
+      ],
+      "negative_prompt": "Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards",
+      "quantization": "disabled",
+      "use_disk_cache": true,
+      "device": "gpu"
+    },
+    "class_type": "WanVideoTextEncodeCached",
+    "_meta": {
+      "title": "口播提示词编码（自动，请勿修改）"
+    }
+  },
+  "311": {
+    "inputs": {
+      "frame_rate": 25,
+      "loop_count": 0,
+      "filename_prefix": "LongCatVideo",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 19,
+      "save_metadata": true,
+      "trim_to_audio": false,
+      "pingpong": false,
+      "save_output": false,
+      "no_preview": false,
+      "images": [
+        "295",
+        0
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "内部处理：VHS_VideoCombine（自动，请勿修改）"
+    }
+  },
+  "312": {
+    "inputs": {
+      "overlap": [
+        "148",
+        0
+      ],
+      "overlap_side": "source",
+      "overlap_mode": "cut",
+      "source_images": [
+        "492",
+        2
+      ],
+      "new_images": [
+        "295",
+        0
+      ]
+    },
+    "class_type": "ImageBatchExtendWithOverlap",
+    "_meta": {
+      "title": "重叠帧拼接，保证续段平滑（自动）"
+    }
+  },
+  "352": {
+    "inputs": {
+      "frame_rate": 25,
+      "loop_count": 0,
+      "filename_prefix": "LongCat_TalkingAvatar_320x576",
+      "format": "video/h264-mp4",
+      "pix_fmt": "yuv420p",
+      "crf": 18,
+      "save_metadata": true,
+      "trim_to_audio": true,
+      "pingpong": false,
+      "save_output": true,
+      "no_preview": false,
+      "images": [
+        "372",
+        0
+      ],
+      "audio": [
+        "528",
+        1
+      ]
+    },
+    "class_type": "VHS_VideoCombine",
+    "_meta": {
+      "title": "最终输出：严格按音频时长裁切的 MP4（自动）"
+    }
+  },
+  "372": {
+    "inputs": {
+      "image": [
+        "493",
+        0
+      ]
+    },
+    "class_type": "GetImageSizeAndCount",
+    "_meta": {
+      "title": "内部处理：GetImageSizeAndCount（自动，请勿修改）"
+    }
+  },
+  "471": {
+    "inputs": {
+      "value": 101
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "单段生成帧数：101（约4秒，自动）"
+    }
+  },
+  "492": {
+    "inputs": {
+      "total": [
+        "546",
+        0
+      ],
+      "initial_value1": [
+        "283",
+        0
+      ],
+      "initial_value2": [
+        "536",
+        0
+      ]
+    },
+    "class_type": "easy forLoopStart",
+    "_meta": {
+      "title": "长音频自动循环开始（自动，请勿修改）"
+    }
+  },
+  "493": {
+    "inputs": {
+      "flow": [
+        "492",
+        0
+      ],
+      "initial_value1": [
+        "312",
+        2
+      ],
+      "initial_value2": [
+        "541",
+        0
+      ]
+    },
+    "class_type": "easy forLoopEnd",
+    "_meta": {
+      "title": "长音频自动循环结束与合并（自动，请勿修改）"
+    }
+  },
+  "495": {
+    "inputs": {
+      "prompt": [
+        "515",
+        0
+      ],
+      "start_index": 0,
+      "max_rows": 1
+    },
+    "class_type": "easy promptLine",
+    "_meta": {
+      "title": "内部处理：easy promptLine（自动，请勿修改）"
+    }
+  },
+  "497": {
+    "inputs": {
+      "text": "女人在边往前走边唱歌",
+      "anything": [
+        "495",
+        0
+      ]
+    },
+    "class_type": "easy showAnything",
+    "_meta": {
+      "title": "内部处理：easy showAnything（自动，请勿修改）"
+    }
+  },
+  "502": {
+    "inputs": {
+      "prompt": [
+        "515",
+        0
+      ],
+      "start_index": [
+        "504",
+        0
+      ],
+      "max_rows": 1
+    },
+    "class_type": "easy promptLine",
+    "_meta": {
+      "title": "内部处理：easy promptLine（自动，请勿修改）"
+    }
+  },
+  "504": {
+    "inputs": {
+      "expression": "a+1",
+      "a": [
+        "492",
+        1
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "内部处理：MathExpression|pysssss（自动，请勿修改）"
+    }
+  },
+  "505": {
+    "inputs": {
+      "text": "女人在边往前走边唱歌，伸出双手对着镜头比心",
+      "anything": [
+        "502",
+        0
+      ]
+    },
+    "class_type": "easy showAnything",
+    "_meta": {
+      "title": "内部处理：easy showAnything（自动，请勿修改）"
+    }
+  },
+  "512": {
+    "inputs": {
+      "aspect_ratio": "original",
+      "proportional_width": 1,
+      "proportional_height": 1,
+      "fit": "crop",
+      "method": "lanczos",
+      "round_to_multiple": "16",
+      "scale_to_side": "longest",
+      "scale_to_length": [
+        "554",
+        0
+      ],
+      "background_color": "#000000",
+      "image": [
+        "176",
+        0
+      ]
+    },
+    "class_type": "LayerUtility: ImageScaleByAspectRatio V2",
+    "_meta": {
+      "title": "竖屏人物图预处理（自动，请勿修改）"
+    }
+  },
+  "515": {
+    "inputs": {
+      "text": "A seated professional presenter in a recording studio faces the camera and speaks naturally. Keep the camera locked. Preserve the exact identity, hairstyle, clothing, hands resting on the desk, microphone, and studio background. Use subtle natural head movement, occasional blinking, and restrained hand movement. No walking, no camera move, no scene change, no extra people."
+    },
+    "class_type": "Text Multiline",
+    "_meta": {
+      "title": "内置口播动作提示词（自动，请勿修改）"
+    }
+  },
+  "523": {
+    "inputs": {
+      "num_frames": [
+        "471",
+        0
+      ],
+      "overlap": 13,
+      "frames_processed": 0,
+      "if_not_enough_audio": "pad_with_start",
+      "ref_frame_index": 10,
+      "ref_mask_frame_range": 3,
+      "prev_latents": [
+        "286",
+        0
+      ],
+      "audio_embeds": [
+        "528",
+        0
+      ],
+      "ref_latent": [
+        "286",
+        0
+      ]
+    },
+    "class_type": "WanVideoLongCatAvatarExtendEmbeds",
+    "_meta": {
+      "title": "首段视频条件生成（自动，请勿修改）"
+    }
+  },
+  "524": {
+    "inputs": {
+      "audio": "3d0f6ccc7892bce696e5f8c1c3bebd013f63a1c0f480de1f520ea7d07548416b.MP3",
+      "audioUI": ""
+    },
+    "class_type": "LoadAudio",
+    "_meta": {
+      "title": "② 上传完整口播音频（仅修改这里）"
+    }
+  },
+  "526": {
+    "inputs": {
+      "value": 25.000000000000007
+    },
+    "class_type": "FloatConstant",
+    "_meta": {
+      "title": "输出帧率：25 FPS（自动）"
+    }
+  },
+  "527": {
+    "inputs": {
+      "start_index": 0,
+      "duration": [
+        "529",
+        1
+      ],
+      "audio": [
+        "524",
+        0
+      ]
+    },
+    "class_type": "TrimAudioDuration",
+    "_meta": {
+      "title": "完整音频输入至分段系统（自动，请勿修改）"
+    }
+  },
+  "528": {
+    "inputs": {
+      "normalize_loudness": true,
+      "num_frames": [
+        "531",
+        0
+      ],
+      "fps": [
+        "526",
+        0
+      ],
+      "audio_scale": 1,
+      "audio_cfg_scale": 1,
+      "multi_audio_type": "para",
+      "whisper_model": [
+        "534",
+        0
+      ],
+      "audio_1": [
+        "527",
+        0
+      ]
+    },
+    "class_type": "LongCatAvatarWhisperEmbeds",
+    "_meta": {
+      "title": "LongCat 音频口型驱动编码（自动，请勿修改）"
+    }
+  },
+  "529": {
+    "inputs": {
+      "expression": "a / 1000.0",
+      "a": [
+        "556",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "自动换算音频总时长：毫秒 ÷ 1000 = 秒（请勿修改）"
+    }
+  },
+  "530": {
+    "inputs": {
+      "text": "453",
+      "anything": [
+        "531",
+        0
+      ]
+    },
+    "class_type": "easy showAnything",
+    "_meta": {
+      "title": "内部处理：easy showAnything（自动，请勿修改）"
+    }
+  },
+  "531": {
+    "inputs": {
+      "expression": "((a + 3) // 4) * 4+1",
+      "a": [
+        "532",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "总帧数对齐（自动）"
+    }
+  },
+  "532": {
+    "inputs": {
+      "value": "a*b",
+      "a": [
+        "529",
+        1
+      ],
+      "b": [
+        "526",
+        0
+      ]
+    },
+    "class_type": "SimpleMath+",
+    "_meta": {
+      "title": "音频总时长 × 25fps = 总帧数（自动）"
+    }
+  },
+  "534": {
+    "inputs": {
+      "model": "whisper_large_v3_encoder_fp16.safetensors",
+      "base_precision": "fp16",
+      "load_device": "main_device"
+    },
+    "class_type": "WhisperModelLoader",
+    "_meta": {
+      "title": "内部处理：WhisperModelLoader（自动，请勿修改）"
+    }
+  },
+  "535": {
+    "inputs": {
+      "num_frames": [
+        "471",
+        0
+      ],
+      "overlap": 13,
+      "frames_processed": [
+        "552",
+        3
+      ],
+      "if_not_enough_audio": "pad_with_start",
+      "ref_frame_index": 10,
+      "ref_mask_frame_range": 3,
+      "prev_latents": [
+        "492",
+        3
+      ],
+      "audio_embeds": [
+        "528",
+        0
+      ],
+      "ref_latent": [
+        "286",
+        0
+      ]
+    },
+    "class_type": "WanVideoLongCatAvatarExtendEmbeds",
+    "_meta": {
+      "title": "续段视频条件与衔接（自动，请勿修改）"
+    }
+  },
+  "536": {
+    "inputs": {
+      "cfg": [
+        "249",
+        0
+      ],
+      "seed": 123492147965692,
+      "force_offload": true,
+      "add_noise_to_samples": false,
+      "model": [
+        "103",
+        0
+      ],
+      "image_embeds": [
+        "523",
+        0
+      ],
+      "scheduler": [
+        "537",
+        0
+      ],
+      "text_embeds": [
+        "287",
+        0
+      ],
+      "samples": [
+        "523",
+        1
+      ]
+    },
+    "class_type": "WanVideoSamplerv2",
+    "_meta": {
+      "title": "首段 LongCat 视频采样（自动）"
+    }
+  },
+  "537": {
+    "inputs": {
+      "scheduler": "longcat_distill_euler",
+      "steps": [
+        "245",
+        0
+      ],
+      "shift": [
+        "257",
+        0
+      ],
+      "start_step": 0,
+      "end_step": -1,
+      "enhance_hf": false
+    },
+    "class_type": "WanVideoSchedulerv2",
+    "_meta": {
+      "title": "8步蒸馏采样调度（自动，请勿修改）"
+    }
+  },
+  "538": {
+    "inputs": {
+      "cfg": [
+        "249",
+        0
+      ],
+      "seed": 123492147965692,
+      "force_offload": true,
+      "add_noise_to_samples": false,
+      "model": [
+        "103",
+        0
+      ],
+      "image_embeds": [
+        "535",
+        0
+      ],
+      "scheduler": [
+        "537",
+        0
+      ],
+      "text_embeds": [
+        "299",
+        0
+      ]
+    },
+    "class_type": "WanVideoSamplerv2",
+    "_meta": {
+      "title": "续段 LongCat 视频采样（自动）"
+    }
+  },
+  "539": {
+    "inputs": {
+      "lora": "LongCat-Avatar-15_dmd_distill_lora_rank128_bf16.safetensors",
+      "strength": 1,
+      "low_mem_load": false,
+      "merge_loras": false
+    },
+    "class_type": "WanVideoLoraSelect",
+    "_meta": {
+      "title": "内部处理：WanVideoLoraSelect（自动，请勿修改）"
+    }
+  },
+  "541": {
+    "inputs": {
+      "index": 0,
+      "destination": [
+        "538",
+        0
+      ],
+      "source": [
+        "543",
+        0
+      ]
+    },
+    "class_type": "ReplaceVideoLatentFrames",
+    "_meta": {
+      "title": "将续段写入长视频时间线（自动）"
+    }
+  },
+  "542": {
+    "inputs": {
+      "start_index": -1,
+      "num_frames": [
+        "148",
+        0
+      ],
+      "images": [
+        "492",
+        2
+      ]
+    },
+    "class_type": "GetImageRangeFromBatch",
+    "_meta": {
+      "title": "内部处理：GetImageRangeFromBatch（自动，请勿修改）"
+    }
+  },
+  "543": {
+    "inputs": {
+      "enable_vae_tiling": false,
+      "tile_x": 272,
+      "tile_y": 272,
+      "tile_stride_x": 144,
+      "tile_stride_y": 128,
+      "noise_aug_strength": 0,
+      "latent_strength": 1,
+      "vae": [
+        "108",
+        0
+      ],
+      "image": [
+        "542",
+        0
+      ]
+    },
+    "class_type": "WanVideoEncode",
+    "_meta": {
+      "title": "内部处理：WanVideoEncode（自动，请勿修改）"
+    }
+  },
+  "545": {
+    "inputs": {
+      "audioUI": "",
+      "audio": [
+        "527",
+        0
+      ]
+    },
+    "class_type": "PreviewAudio",
+    "_meta": {
+      "title": "内部处理：PreviewAudio（自动，请勿修改）"
+    }
+  },
+  "546": {
+    "inputs": {
+      "expression": "max(0, ceil((a - b) / (b - c)))",
+      "a": [
+        "531",
+        0
+      ],
+      "b": [
+        "471",
+        0
+      ],
+      "c": [
+        "148",
+        0
+      ]
+    },
+    "class_type": "MathExpression|pysssss",
+    "_meta": {
+      "title": "按有效新增帧数自动计算续段次数（自动）"
+    }
+  },
+  "552": {
+    "inputs": {
+      "image": [
+        "492",
+        2
+      ]
+    },
+    "class_type": "GetImageSizeAndCount",
+    "_meta": {
+      "title": "内部处理：GetImageSizeAndCount（自动，请勿修改）"
+    }
+  },
+  "554": {
+    "inputs": {
+      "value": 576
+    },
+    "class_type": "INTConstant",
+    "_meta": {
+      "title": "输出长边：576（固定，请勿修改）"
+    }
+  },
+  "555": {
+    "inputs": {
+      "image": "5c69e90c7195935d3e3144a31ba8dfc5b8b2824aa48f26df26c49af027a0e673.jpg"
+    },
+    "class_type": "LoadImage",
+    "_meta": {
+      "title": "内部处理：LoadImage（自动，请勿修改）"
+    }
+  },
+  "556": {
+    "inputs": {
+      "audio": [
+        "524",
+        0
+      ]
+    },
+    "class_type": "Audio Duration (mtb)",
+    "_meta": {
+      "title": "自动读取音频总时长（毫秒）— 请勿修改"
+    }
+  }
+}

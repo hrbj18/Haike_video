@@ -1,0 +1,12 @@
+{
+  "portrait_relationship_map": {
+    "width": 1080,
+    "height": 1920,
+    "duration_seconds": 8,
+    "scene_id": "T003",
+    "recipe": "relationship_map",
+    "headline": "数字人开始影响现实",
+    "nodes": ["固定形象", "粉丝关系", "宣传参与", "商业价值"],
+    "forbidden": ["baked_caption", "second_presenter", "watermark"]
+  }
+}

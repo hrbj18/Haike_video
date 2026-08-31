@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "id": "seed-risk-opensource",
+  "approved": false,
+  "approved_by": "seed_example",
+  "approved_at": "",
+  "source_kind": "generic_seed",
+  "redact_terms": [],
+  "title": "范例：风险警示与开源项目",
+  "lines": [
+    {"speaker_name": "雅雅", "text": "每日科技快讯来了，先说一件需要你留个心眼的事，有人已经中招了。"},
+    {"speaker_name": "檬檬", "text": "没错，套路不新，但话术换得很快，专挑急着办事的人下手。"},
+    {"speaker_name": "雅雅", "text": "那它到底是先要钱，还是先要你点链接？"},
+    {"speaker_name": "檬檬", "text": "关键在第一步：先让你觉得占了便宜，再诱导你授权或转账，钱一出去就难追了。"},
+    {"speaker_name": "雅雅", "text": "也就是说，只要对方催得急、催得凶，就先停下来想一想。"},
+    {"speaker_name": "檬檬", "text": "再看，开源圈今天有个项目火了，程序员应该会喜欢。"},
+    {"speaker_name": "雅雅", "text": "开源项目？这跟不写代码的人有关系吗？"},
+    {"speaker_name": "檬檬", "text": "有关系，它做的是把复杂操作变得一键完成，普通人也能拿来提效。"},
+    {"speaker_name": "雅雅", "text": "那这个工具是免费的吗，用起来会不会有门槛？"},
+    {"speaker_name": "檬檬", "text": "免费开源，门槛就在配置，不过现在已经有现成的一键包了。"},
+    {"speaker_name": "雅雅", "text": "你被网上的套路坑过吗？踩过什么坑，评论区说说。"}
+  ]
+}

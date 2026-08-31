@@ -1,0 +1,82 @@
+{
+  "default_recipe": "relationship_map",
+  "recipes": {
+    "headline_statement": {
+      "name": "标题判断",
+      "description": "用一个编辑式标题建立本段判断，辅以一条极短结论。",
+      "min_nodes": 0,
+      "max_nodes": 2,
+      "default_variant": "editorial_headline",
+      "variants": [
+        {"id": "editorial_headline", "name": "编辑标题", "motion_variant": "stamp_in", "description": "主判断以编辑标题落版，补充结论在底部锁定。"},
+        {"id": "signal_stack", "name": "信号标签", "motion_variant": "tags_lock", "description": "两层信号标签逐一锁定，适合短而明确的判断。"}
+      ]
+    },
+    "relationship_map": {
+      "name": "关系图",
+      "description": "一个中心概念连接三至四个真实语义节点，适合解释角色、产品或商业关系。",
+      "min_nodes": 3,
+      "max_nodes": 4,
+      "default_variant": "radial_map",
+      "variants": [
+        {"id": "radial_map", "name": "中心辐射", "motion_variant": "node_bloom", "description": "中心概念向多个真实关系节点展开。"},
+        {"id": "causal_chain", "name": "因果链", "motion_variant": "step_through", "description": "从起因到结果逐级传递，强调逻辑链路。"},
+        {"id": "convergence", "name": "多点汇聚", "motion_variant": "converge_in", "description": "多个输入概念汇聚到一个结论，强调合力或价值形成。"}
+      ]
+    },
+    "single_metric": {
+      "name": "关键数字",
+      "description": "强调一个真实数据或比例；没有可信数据时退化为短结论，不伪造数字。",
+      "min_nodes": 0,
+      "max_nodes": 2,
+      "default_variant": "hero_metric",
+      "variants": [
+        {"id": "hero_metric", "name": "大数字", "motion_variant": "metric_pop", "description": "一个被验证的数字作为主视觉。"},
+        {"id": "metric_ledger", "name": "数字台账", "motion_variant": "ledger_reveal", "description": "数字与其解释分区呈现，适合短指标说明。"}
+      ]
+    },
+    "comparison": {
+      "name": "双项对比",
+      "description": "把两种角色、方案或前后状态并列，不使用虚构数据。",
+      "min_nodes": 2,
+      "max_nodes": 2,
+      "default_variant": "split_columns",
+      "variants": [
+        {"id": "split_columns", "name": "左右对照", "motion_variant": "opposing_slide", "description": "两项从左右进入，在底部收束结论。"},
+        {"id": "stacked_duel", "name": "上下对照", "motion_variant": "top_bottom_lock", "description": "两项上下排列，适合竖屏连续比较。"},
+        {"id": "balance_axis", "name": "张力平衡", "motion_variant": "axis_balance", "description": "两项围绕中轴形成取舍或前后关系。"}
+      ]
+    },
+    "process": {
+      "name": "流程",
+      "description": "展示三至五步连续动作或逻辑路径。",
+      "min_nodes": 3,
+      "max_nodes": 5,
+      "default_variant": "vertical_rail",
+      "variants": [
+        {"id": "vertical_rail", "name": "纵向轨道", "motion_variant": "rail_build", "description": "步骤沿纵向轨道依次建立。"},
+        {"id": "zigzag_steps", "name": "折线步骤", "motion_variant": "zigzag_step", "description": "步骤交错推进，增加竖屏节奏变化。"}
+      ]
+    },
+    "quote_evidence": {
+      "name": "证据短句",
+      "description": "用一条经过编辑的短结论配合两条证据点。",
+      "min_nodes": 2,
+      "max_nodes": 3,
+      "default_variant": "claim_evidence",
+      "variants": [
+        {"id": "claim_evidence", "name": "主张与证据", "motion_variant": "evidence_stack", "description": "主张先出现，再依次给出证据。"}
+      ]
+    },
+    "closing_question": {
+      "name": "结尾提问",
+      "description": "以一句问题收束，不与逐句字幕重复。",
+      "min_nodes": 0,
+      "max_nodes": 2,
+      "default_variant": "question_hold",
+      "variants": [
+        {"id": "question_hold", "name": "问题收束", "motion_variant": "question_land", "description": "以提问和两个观察方向收束。"}
+      ]
+    }
+  }
+}

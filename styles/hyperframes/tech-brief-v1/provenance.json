@@ -1,0 +1,16 @@
+{
+  "id": "tech-brief-v1",
+  "version": "1.0.0",
+  "source": {
+    "kind": "local_open_design_reference",
+    "path": "hy风格/artifact",
+    "adaptation": "只提取可迁移的设计令牌与信息层级；不复制原始文案、品牌标识或页面结构。"
+  },
+  "license_review": {
+    "status": "internal-reference-only",
+    "third_party_brand_imitation": "not-intended",
+    "notes": "输出不得包含 Open Design 品牌、原模板文案、第三方商标或来源水印。"
+  },
+  "frozen_at": "2026-08-17",
+  "supported_aspects": ["portrait", "landscape-compatibility-only"]
+}

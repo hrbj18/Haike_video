@@ -1,0 +1,23 @@
+{
+  "version": "1.0",
+  "id": "seed-consumer-ai",
+  "approved": false,
+  "approved_by": "seed_example",
+  "approved_at": "",
+  "source_kind": "generic_seed",
+  "redact_terms": [],
+  "title": "范例：消费电子降价落到钱包",
+  "lines": [
+    {"speaker_name": "雅雅", "text": "每日科技快讯来了，这次是真金白银，一款热门设备价格直接往下探了。"},
+    {"speaker_name": "檬檬", "text": "确实，幅度不小，而且不是清库存的套路，是新款首发就直接让利。"},
+    {"speaker_name": "雅雅", "text": "那普通人现在该纠结的，其实不是买不买，而是现在下手划不划算吧？"},
+    {"speaker_name": "檬檬", "text": "关键要看两点：一是这价是不是历史低位，二是你手上的旧款还有没有残值可抵。"},
+    {"speaker_name": "雅雅", "text": "也就是说，先别急着冲，把两个数一算，答案自己就出来了。"},
+    {"speaker_name": "檬檬", "text": "再看一条，AI 圈今天也有新动作，同样和你有关。"},
+    {"speaker_name": "雅雅", "text": "咦，又是模型更新？这次不会又要让我重装一遍软件吧。"},
+    {"speaker_name": "檬檬", "text": "注意，这次不用折腾，它是云端直接升级，你什么都不用做就能用上。"},
+    {"speaker_name": "雅雅", "text": "那它到底强在哪，能让我少干多少活？"},
+    {"speaker_name": "檬檬", "text": "说白了，就是长文本和推理更稳了，写材料、查资料这类事更少返工。"},
+    {"speaker_name": "雅雅", "text": "最后想问一句：你买东西是更看重首发尝鲜，还是等价格稳了再入手？"}
+  ]
+}

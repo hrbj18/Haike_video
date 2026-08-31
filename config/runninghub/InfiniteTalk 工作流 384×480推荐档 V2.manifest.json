@@ -1,0 +1,34 @@
+{
+  "workflow_name": "InfiniteTalk 工作流 384×480推荐档 V2",
+  "workflow_type": "comfyui_project_json",
+  "source_path": "config\\runninghub\\infinitetalk_source_original_0016e65b.json",
+  "source_sha256": "0016e65bf817b2887576ca9bbc549ff29a84a33c166ec5d4641e10154d9fd2ec",
+  "project_path": "config\\runninghub\\InfiniteTalk 工作流 384×480推荐档 V2.json",
+  "input_nodes": {
+    "image": "36",
+    "audio": "34"
+  },
+  "output_node": "24",
+  "model_stack": {
+    "base": "aniWan2114BFp8E4m3fn_i2v480pNew.safetensors",
+    "base_precision": "fp16_fast",
+    "infinitetalk": "InfiniteTalk/Wan2_1-InfiniTetalk-Single_fp16.safetensors",
+    "vae": "Wan2_1_VAE_bf16.safetensors",
+    "text_encoder": "umt5-xxl-enc-bf16.safetensors",
+    "wav2vec": "TencentGameMate/chinese-wav2vec2-base",
+    "loras": [
+      "Wan_2_1_T2V_14B_rCM_lora_average_rank_83_bf16.safetensors",
+      "Wan21_I2V_14B_lightx2v_cfg_step_distill_lora_rank64.safetensors"
+    ]
+  },
+  "render": {
+    "width": 384,
+    "height": 480,
+    "fps": 25,
+    "steps": 4,
+    "blocks_to_swap": 16,
+    "force_offload": false,
+    "max_audio_seconds": 10
+  },
+  "api_export_required_after_import": true
+}

@@ -1,0 +1,183 @@
+{
+  "version": "1.0",
+  "enabled": false,
+  "schedule_time": "03:00",
+  "timezone": "Asia/Shanghai",
+  "window_mode": "previous_calendar_day",
+  "aspect": "portrait",
+  "max_budget_cny": 5.0,
+  "story_count": {
+    "minimum": 3,
+    "maximum": 4
+  },
+  "text_resilience": {
+    "max_episode_combinations": 3,
+    "max_editorial_reviews": 2,
+    "max_text_attempts": 3,
+    "max_rescue_research_rounds": 1,
+    "max_wall_clock_seconds": 720
+  },
+  "media_release": {
+    "rule_version": "daily-media-release-v2-review-candidate",
+    "premium_total": 85,
+    "premium_hook": 16,
+    "premium_dialogue": 16,
+    "premium_information_density": 20,
+    "reliable_total": 78,
+    "reliable_hook": 14,
+    "reliable_dialogue": 15,
+    "reliable_information_density": 19,
+    "reliable_output": "review_only"
+  },
+  "runninghub": {
+    "primary_instance": "default",
+    "standard_instance_type": "default",
+    "allow_plus": false,
+    "max_concurrency": 1
+  },
+  "avatar": {
+    "default_treatment": "pip_top_left",
+    "shape": "circle",
+    "source_aspect": "4:5",
+    "preserve_source_aspect": true,
+    "source_directory": ""
+  },
+  "visuals": {
+    "static_images_enabled": false,
+    "mode": "ai_balanced_motion"
+  },
+  "background_music": {
+    "enabled": true,
+    "use_first_news_track": true
+  },
+  "news_sources": [
+    {
+      "id": "ithome-direct",
+      "name": "IT之家",
+      "url": "https://www.ithome.com/rss/",
+      "authority": "media",
+      "max_candidates": 40
+    },
+    {
+      "id": "qbitai-direct",
+      "name": "量子位",
+      "url": "https://www.qbitai.com/feed",
+      "authority": "media",
+      "max_candidates": 30
+    },
+    {
+      "id": "ifanr-direct",
+      "name": "爱范儿",
+      "url": "https://www.ifanr.com/feed",
+      "authority": "media",
+      "max_candidates": 30
+    },
+    {
+      "id": "google-deepmind",
+      "name": "Google DeepMind 官方博客",
+      "url": "https://deepmind.google/blog/rss.xml",
+      "authority": "official"
+    },
+    {
+      "id": "openai-news",
+      "name": "OpenAI 官方新闻",
+      "url": "https://openai.com/news/rss.xml",
+      "authority": "official"
+    },
+    {
+      "id": "nvidia-blog",
+      "name": "NVIDIA 官方博客",
+      "url": "https://blogs.nvidia.com/feed/",
+      "authority": "official"
+    },
+    {
+      "id": "nvidia-developer",
+      "name": "NVIDIA 开发者博客",
+      "url": "https://developer.nvidia.com/blog/feed/",
+      "authority": "official"
+    },
+    {
+      "id": "microsoft-blog",
+      "name": "Microsoft 官方博客",
+      "url": "https://blogs.microsoft.com/feed/",
+      "authority": "official"
+    },
+    {
+      "id": "techcrunch-ai",
+      "name": "TechCrunch AI",
+      "url": "https://techcrunch.com/category/artificial-intelligence/feed/",
+      "authority": "media"
+    },
+    {
+      "id": "the-verge",
+      "name": "The Verge",
+      "url": "https://www.theverge.com/rss/index.xml",
+      "authority": "media"
+    },
+    {
+      "id": "ars-technica-technology",
+      "name": "Ars Technica Technology Lab",
+      "url": "https://feeds.arstechnica.com/arstechnica/technology-lab",
+      "authority": "media"
+    },
+    {
+      "id": "venturebeat-ai",
+      "name": "VentureBeat AI",
+      "url": "https://venturebeat.com/category/ai/feed/",
+      "authority": "media"
+    },
+    {
+      "id": "google-news-cn-big-tech",
+      "name": "中国大厂科技新闻聚合",
+      "url": "https://news.google.com/rss/search?q=%28%E8%85%BE%E8%AE%AF+OR+%E5%AD%97%E8%8A%82%E8%B7%B3%E5%8A%A8+OR+%E9%98%BF%E9%87%8C%E5%B7%B4%E5%B7%B4+OR+%E7%99%BE%E5%BA%A6+OR+%E5%8D%8E%E4%B8%BA+OR+DeepSeek%29+%28AI+OR+%E5%A4%A7%E6%A8%A1%E5%9E%8B+OR+%E8%8A%AF%E7%89%87+OR+%E6%9C%BA%E5%99%A8%E4%BA%BA%29+after:{previous_date}+before:{next_date}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+      "authority": "media",
+      "max_candidates": 40
+    },
+    {
+      "id": "google-news-cn-tech-media",
+      "name": "中文科技媒体新闻聚合",
+      "url": "https://news.google.com/rss/search?q=%28site%3A36kr.com+OR+site%3Aithome.com+OR+site%3Ageekpark.net+OR+site%3Aleiphone.com%29+%28AI+OR+%E5%A4%A7%E6%A8%A1%E5%9E%8B+OR+%E8%8A%AF%E7%89%87+OR+%E6%9C%BA%E5%99%A8%E4%BA%BA%29+after:{previous_date}+before:{next_date}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+      "authority": "media",
+      "max_candidates": 40
+    },
+    {
+      "id": "google-news-cn-consumer-tech",
+      "name": "中文消费科技新闻聚合",
+      "url": "https://news.google.com/rss/search?q=%28site%3Aithome.com%20OR%20site%3A36kr.com%20OR%20site%3Ageekpark.net%20OR%20site%3Aleiphone.com%29%20%28%E5%BE%AE%E4%BF%A1%20OR%20%E6%89%8B%E6%9C%BA%20OR%20%E6%95%B0%E7%A0%81%20OR%20%E6%B8%B8%E6%88%8F%20OR%20%E6%B5%8F%E8%A7%88%E5%99%A8%20OR%20%E8%80%B3%E6%9C%BA%20OR%20%E9%BC%A0%E6%A0%87%20OR%20%E9%99%8D%E4%BB%B7%20OR%20%E6%B6%A8%E4%BB%B7%29%20after%3A{previous_date}%20before%3A{next_date}&hl=zh-CN&gl=CN&ceid=CN:zh-Hans",
+      "authority": "media",
+      "max_candidates": 40
+    }
+  ],
+  "heat_sources": [
+    {
+      "id": "baidu-realtime",
+      "name": "百度实时热榜",
+      "kind": "baidu_board",
+      "url": "https://top.baidu.com/board?tab=realtime",
+      "max_items": 50
+    }
+  ],
+  "douyin_sources": [
+    {
+      "id": "douyin-hotboard",
+      "name": "抖音热榜",
+      "kind": "douyin_board",
+      "api_url": "",
+      "max_items": 50,
+      "snapshot_path": "config/douyin_snapshots/hotboard.json"
+    },
+    {
+      "id": "douyin-benchmark-accounts",
+      "name": "对标账号最新视频",
+      "kind": "douyin_creator",
+      "api_url": "",
+      "max_items": 30,
+      "snapshot_path": "config/douyin_snapshots/benchmark_accounts.json"
+    }
+  ],
+  "copy_skill_hotspot_feed": {
+    "enabled": false,
+    "root": "integrations/copy_skill_hotspot"
+  },
+  "last_updated_at": null
+}
