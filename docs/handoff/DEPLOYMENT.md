@@ -5,6 +5,7 @@
 ## 权威入口
 
 - 私有仓库：`https://github.com/hrbj18/haike`
+- 发布状态：`main` 已完成首次精简快照发布并核验；初始源码快照为 `3c35019195ac023c9a88008b9128f0a31ba4a7dd`。
 - Windows 完整步骤：`docs/DEPLOYMENT_WINDOWS_ZH-CN.md`
 - 环境变量模板：`.env.example`
 - 一键安装：`scripts/setup.ps1`
