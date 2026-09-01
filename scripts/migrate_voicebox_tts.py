@@ -1,8 +1,8 @@
-"""One-time migration from Voicebox profiles into OpenMontage local TTS data.
+"""One-time migration from Voicebox profiles into Haike Video local TTS data.
 
 The source database is opened read-only.  Original profiles and audio samples
 are never modified.  Model cache import supports hard links on the same volume
-so the resulting OpenMontage cache survives deletion of the old directory
+so the resulting Haike Video cache survives deletion of the old directory
 without duplicating multi-gigabyte blobs.
 """
 
@@ -172,7 +172,7 @@ def import_models(source_cache: Path, destination: Path, selection: str, mode: s
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Migrate Voicebox profiles into OpenMontage local TTS")
+    parser = argparse.ArgumentParser(description="Migrate Voicebox profiles into Haike Video local TTS")
     parser.add_argument("--source", type=Path, default=DEFAULT_SOURCE)
     parser.add_argument("--destination", type=Path, default=DEFAULT_DESTINATION)
     parser.add_argument("--model-cache", type=Path)

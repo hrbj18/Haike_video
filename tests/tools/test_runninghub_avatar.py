@@ -262,7 +262,7 @@ def test_deployed_infinitetalk_exact_clock_workflow_contract():
 
     digest = _validate_infinitetalk_448x560_exact_clock_template(path)
 
-    assert digest == "bee819e8d88ff01aded7e02950b2a7f2f6a9104f934f2ff40e39333cf5146264"
+    assert digest == "f901ee9a13645ec75913164b38ca6c6a9d7f3519324854071f98310f397f1562"
 
 
 def test_poll_v2_keeps_running_task_resumable():

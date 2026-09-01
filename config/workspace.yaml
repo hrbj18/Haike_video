@@ -1,6 +1,6 @@
 version: 1
 
-# All paths are relative to the OpenMontage repository root unless absolute.
+# All paths are relative to the Haike Video repository root unless absolute.
 # This file is safe to commit. Secrets and machine-specific overrides belong
 # in .env.secrets.local or .env.local, both ignored by Git.
 paths:
@@ -16,7 +16,7 @@ paths:
 
 defaults:
   project_id: 003-tech-chat
-  tts_provider: openmontage_local
+  tts_provider: haike_video_local
   stock_provider: pexels
   fps: 25
   aspect_ratio: "9:16"

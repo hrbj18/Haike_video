@@ -18,7 +18,7 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from lib.config_model import OpenMontageConfig
+from lib.config_model import HaikeVideoConfig
 from lib.checkpoint import (
     CheckpointValidationError,
     STAGES,
@@ -254,13 +254,13 @@ def sample_artifact(name: str) -> dict:
 
 class TestConfig:
     def test_load_defaults(self):
-        config = OpenMontageConfig()
+        config = HaikeVideoConfig()
         assert config.llm.provider == "anthropic"
         assert config.budget.mode.value == "warn"
         assert config.checkpoint.policy.value == "guided"
 
     def test_load_from_yaml(self):
-        config = OpenMontageConfig.load()
+        config = HaikeVideoConfig.load()
         assert config.budget.total_usd == 10.0
 
 

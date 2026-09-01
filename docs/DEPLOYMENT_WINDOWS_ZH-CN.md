@@ -1,6 +1,6 @@
-# OpenMontage Windows 完整部署指南
+# Haike Video Windows 完整部署指南
 
-本指南面向从 `https://github.com/hrbj18/haike` 获取代码的新电脑。仓库只包含可复现的源码、公开配置模板和测试；密钥、私有音色、人物参考图、模型、缓存、项目媒体与付费产物不会进入 Git。
+本指南面向从 `https://github.com/hrbj18/Haike_video` 获取代码的新电脑。仓库只包含可复现的源码、公开配置模板和测试；密钥、私有音色、人物参考图、模型、缓存、项目媒体与付费产物不会进入 Git。
 
 ## 1. 已验证环境
 
@@ -18,8 +18,8 @@ FFmpeg/ffprobe 由固定版本的 `static-ffmpeg` Python 包提供；如果系�
 这是私有仓库。先用有访问权限的 GitHub 账号完成认证：Git for Windows 可在首次克隆时通过 Git Credential Manager 打开浏览器登录；已安装 GitHub CLI 时也可运行 `gh auth login --web`。不要把个人访问令牌写进命令、脚本或文档。
 
 ```powershell
-git clone https://github.com/hrbj18/haike.git
-Set-Location haike
+git clone https://github.com/hrbj18/Haike_video.git
+Set-Location Haike_video
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1
 ```
 
@@ -41,7 +41,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1
 
 - `PEXELS_API_KEY`：下载实拍素材；
 - 可用的文本模型配置：仅 AI 导演、生成/整理脚本时需要；
-- OpenMontage 本地 TTS：安装后可使用 Serena、Vivian、Dylan 公开预设。
+- Haike Video 本地 TTS：安装后可使用 Serena、Vivian、Dylan 公开预设。
 
 有数字人预览还需要：
 
@@ -57,14 +57,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1
 旧电脑导出克隆音色：
 
 ```powershell
-$voicePack = Join-Path $env:USERPROFILE 'OpenMontage-private\voices.zip'
+$voicePack = Join-Path $env:USERPROFILE 'Haike_video-private\voices.zip'
 .\.venv\Scripts\python.exe scripts\local_tts_profiles.py export --output $voicePack --profile-id <PROFILE_ID>
 ```
 
 新电脑导入：
 
 ```powershell
-$voicePack = Join-Path $env:USERPROFILE 'OpenMontage-private\voices.zip'
+$voicePack = Join-Path $env:USERPROFILE 'Haike_video-private\voices.zip'
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup_local_tts.ps1 -ImportProfilePack $voicePack
 ```
 

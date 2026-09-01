@@ -1,4 +1,4 @@
-"""Portable workspace path resolution for OpenMontage.
+"""Portable workspace path resolution for Haike Video.
 
 The repository is the only canonical project root.  Machine-specific media
 locations can be overridden through .env.local without changing committed
@@ -35,20 +35,20 @@ DEFAULT_CONFIG = {
 }
 
 ENV_OVERRIDES = {
-    "content_root": "OPENMONTAGE_CONTENT_ROOT",
-    "project_source_root": "OPENMONTAGE_PROJECT_SOURCE_ROOT",
-    "library_root": "OPENMONTAGE_LIBRARY_ROOT",
-    "templates_root": "OPENMONTAGE_TEMPLATES_ROOT",
-    "runtime_root": "OPENMONTAGE_RUNTIME_ROOT",
-    "render_root": "OPENMONTAGE_RENDER_ROOT",
-    "cache_root": "OPENMONTAGE_CACHE_ROOT",
-    "temp_root": "OPENMONTAGE_TEMP_ROOT",
-    "migration_root": "OPENMONTAGE_MIGRATION_ROOT",
+    "content_root": "HAIKE_VIDEO_CONTENT_ROOT",
+    "project_source_root": "HAIKE_VIDEO_PROJECT_SOURCE_ROOT",
+    "library_root": "HAIKE_VIDEO_LIBRARY_ROOT",
+    "templates_root": "HAIKE_VIDEO_TEMPLATES_ROOT",
+    "runtime_root": "HAIKE_VIDEO_RUNTIME_ROOT",
+    "render_root": "HAIKE_VIDEO_RENDER_ROOT",
+    "cache_root": "HAIKE_VIDEO_CACHE_ROOT",
+    "temp_root": "HAIKE_VIDEO_TEMP_ROOT",
+    "migration_root": "HAIKE_VIDEO_MIGRATION_ROOT",
 }
 
 
 def find_repo_root(start: Path | None = None) -> Path:
-    """Find the nearest OpenMontage repository root."""
+    """Find the nearest Haike Video repository root."""
 
     candidate = (start or Path(__file__)).resolve()
     if candidate.is_file():
@@ -56,7 +56,7 @@ def find_repo_root(start: Path | None = None) -> Path:
     for path in (candidate, *candidate.parents):
         if (path / "AGENT_GUIDE.md").exists() and (path / ".git").exists():
             return path
-    raise WorkspaceConfigError(f"Could not locate an OpenMontage repository root from {candidate}")
+    raise WorkspaceConfigError(f"Could not locate an Haike Video repository root from {candidate}")
 
 
 def _resolve_path(repo_root: Path, value: str) -> Path:
@@ -85,7 +85,7 @@ def _load_config(repo_root: Path, config_path: Path | None = None) -> Mapping[st
 
 @dataclass(frozen=True)
 class WorkspacePaths:
-    """Canonical filesystem locations for one OpenMontage checkout."""
+    """Canonical filesystem locations for one Haike Video checkout."""
 
     repo_root: Path
     content_root: Path

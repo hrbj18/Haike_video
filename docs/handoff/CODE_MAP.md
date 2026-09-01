@@ -21,7 +21,7 @@
 - V2 正式脚本、冷审与 `story_id` 合同：`backlot/daily_script_v2.py`
 - 文本韧性控制器（Top 3组合、attempt/progress 指纹、重复拒稿抑制、新鲜写稿/换组合升级、最佳稿与幂等账本）：`backlot/daily_text_resilience.py`
 - 主模型/豆包独立安全配置、每日快报职责路由与连接测试：`backlot/ai_text.py`；用户批准样稿：`backlot/golden_scripts/`
-- OpenMontage 本地配音、RunningHub、切割、失败画面槽单独恢复、合成与 QA：`backlot/daily_pipeline.py`
+- Haike Video 本地配音、RunningHub、切割、失败画面槽单独恢复、合成与 QA：`backlot/daily_pipeline.py`
 - 无付费媒体预检、本地配音隐藏启动与阶段瞬时故障重试：`backlot/daily_pipeline.py`；Windows包装器级同日期重试：`scripts/run_daily_automation.py`
 - 命令入口：`backlot/daily_cli.py`
 - V2 命令：`python -m backlot.daily_cli select-v2 --target-date YYYY-MM-DD`
@@ -41,8 +41,8 @@
 
 - RunningHub：`tools/avatar/runninghub_avatar.py`、`backlot/avatar_cloud.py`；最终 WAV 精确帧时钟：`backlot/avatar_audio_clock.py`；安全配置持久化：`backlot/runninghub_config.py`；生产模板：`config/runninghub/workflow-2094449979141218305.api.json`；短样本付费验收：`scripts/accept_runninghub_exact_clock.py`
 - 有数字人一键预览父任务、有限 OOM 恢复、尾静音规范化与安全点继续：`backlot/avatar_review_preview_pipeline.py`；测试入口：`tests/backlot/test_avatar_review_preview_pipeline.py`、`test_review_preview_server.py`、`test_review_preview_ui_contract.py`
-- 内置 Qwen3-TTS 引擎、串行任务与音色目录：`tools/audio/openmontage_tts_engine.py`
-- 本地 HTTP 服务：`tools/audio/openmontage_tts_server.py`
+- 内置 Qwen3-TTS 引擎、串行任务与音色目录：`tools/audio/haike_video_tts_engine.py`
+- 本地 HTTP 服务：`tools/audio/haike_video_tts_server.py`
 - 历史调用兼容层：`tools/audio/voicebox_tts.py`
 - 安装/启动/旧音色迁移/私有音色包：`scripts/setup_local_tts.ps1`、`scripts/start_local_tts.ps1`、`scripts/migrate_voicebox_tts.py`、`scripts/local_tts_profiles.py`
 - 长视频导入与切割：`backlot/avatar_import.py`

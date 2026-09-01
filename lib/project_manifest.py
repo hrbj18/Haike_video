@@ -60,7 +60,7 @@ def validate_project_manifest(data: dict[str, Any], path: Path | None = None) ->
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Validate an OpenMontage project manifest")
+    parser = argparse.ArgumentParser(description="Validate an Haike Video project manifest")
     parser.add_argument("manifest", type=Path)
     args = parser.parse_args()
     try:

@@ -1,6 +1,6 @@
 """RunningHub LongCat talking-avatar provider.
 
-The workflow itself is frozen in a local ComfyUI API JSON file.  OpenMontage
+The workflow itself is frozen in a local ComfyUI API JSON file.  Haike Video
 only replaces the presenter image and driving-audio inputs, then submits the
 published RunningHub workflow id.  Keeping this client separate from the
 project orchestration makes paid-task resume and provider mocking testable.
@@ -735,7 +735,7 @@ class RunningHubLongCatClient:
 
         RunningHub has stopped maintaining the legacy ``status`` and
         ``outputs`` endpoints.  V2 returns the task state and final result in
-        one response, so a resumed OpenMontage task does not need a second
+        one response, so a resumed Haike Video task does not need a second
         provider request after completion.
         """
         response = self.session.post(

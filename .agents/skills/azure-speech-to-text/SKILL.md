@@ -1,6 +1,6 @@
 ---
 name: azure-speech-to-text
-description: Transcribe audio to text using Azure AI Speech (Fast Transcription REST API). Use when converting audio/video to text, generating subtitles, or processing spoken content in OpenMontage. Optional cloud STT provider — preferred when AZURE_SPEECH_KEY is configured; the local faster-whisper `transcriber` is the default offline path.
+description: Transcribe audio to text using Azure AI Speech (Fast Transcription REST API). Use when converting audio/video to text, generating subtitles, or processing spoken content in Haike Video. Optional cloud STT provider — preferred when AZURE_SPEECH_KEY is configured; the local faster-whisper `transcriber` is the default offline path.
 license: MIT
 compatibility: Requires internet access and an Azure AI Speech resource (AZURE_SPEECH_KEY + AZURE_SPEECH_REGION).
 metadata: {"openclaw": {"requires": {"env": ["AZURE_SPEECH_KEY", "AZURE_SPEECH_REGION"]}, "primaryEnv": "AZURE_SPEECH_KEY"}}
@@ -10,7 +10,7 @@ metadata: {"openclaw": {"requires": {"env": ["AZURE_SPEECH_KEY", "AZURE_SPEECH_R
 
 Transcribe audio to text with **Azure Fast Transcription** — synchronous,
 word-level timestamps, speaker diarization, and multi-language identification.
-In OpenMontage this is exposed through the `azure_stt` tool (`capability=analysis`,
+In Haike Video this is exposed through the `azure_stt` tool (`capability=analysis`,
 `provider=azure`). It is an **optional cloud STT provider** — when
 `AZURE_SPEECH_KEY` is configured, prefer it for cloud transcription. The local
 `transcriber` tool (faster-whisper) remains the **default offline path** and the
@@ -20,7 +20,7 @@ fallback when Azure is unavailable.
 
 ## Why Fast Transcription (not Batch)
 
-Azure exposes three STT surfaces. OpenMontage uses **Fast Transcription** because
+Azure exposes three STT surfaces. Haike Video uses **Fast Transcription** because
 the pipeline transcribes **local audio files**:
 
 | Surface | Input | Latency | Needs |
@@ -86,7 +86,7 @@ If `azure_stt` is unavailable (no key) or errors, fall back to `transcriber`
 ## Response shape (mapped to the transcriber schema)
 
 The raw Azure response (`phrases[]` with `offsetMilliseconds` / `words[]`) is
-converted to seconds and the OpenMontage transcript schema:
+converted to seconds and the Haike Video transcript schema:
 
 ```json
 {

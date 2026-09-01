@@ -3012,7 +3012,7 @@
       ],
       "scale": 0.1908439282676202
     },
-    "openmontage_profile": {
+    "haike_video_profile": {
       "name": "InfiniteTalk 工作流 384×480推荐档 V2",
       "source_sha256": "0016e65bf817b2887576ca9bbc549ff29a84a33c166ec5d4641e10154d9fd2ec",
       "input_image_node": 36,

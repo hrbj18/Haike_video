@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "openmontage/artifacts/avatar_source_package",
+  "$id": "haike_video/artifacts/avatar_source_package",
   "title": "Avatar Source Package",
   "description": "Provider-neutral contract for manually uploaded or API-generated multi-speaker avatar source media.",
   "type": "object",

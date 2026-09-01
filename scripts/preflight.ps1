@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$Project = '',
     [switch]$Strict,
     [switch]$Providers
@@ -126,14 +126,14 @@ if ($envText -notmatch '(?m)^PEXELS_API_KEY=\s*[^\r\n]+') {
     $warnings.Add('PEXELS_API_KEY is not configured in a local environment file')
 }
 
-if ($envText -notmatch '(?m)^OPENMONTAGE_TTS_BASE_URL=\s*[^\r\n]+') {
-    $warnings.Add('OPENMONTAGE_TTS_BASE_URL is not configured; localhost:17494 will be used')
+if ($envText -notmatch '(?m)^HAIKE_VIDEO_TTS_BASE_URL=\s*[^\r\n]+') {
+    $warnings.Add('HAIKE_VIDEO_TTS_BASE_URL is not configured; localhost:17494 will be used')
 }
 $ttsPython = Join-Path $repoRoot '.backlot\tts-runtime\.venv\Scripts\python.exe'
 if (Test-Path -LiteralPath $ttsPython) {
-    Write-Host '[OK] OpenMontage local TTS runtime'
+    Write-Host '[OK] Haike Video local TTS runtime'
 } else {
-    $warnings.Add('OpenMontage local TTS runtime is not installed; run scripts/setup_local_tts.ps1')
+    $warnings.Add('Haike Video local TTS runtime is not installed; run scripts/setup_local_tts.ps1')
 }
 
 if ($Providers) {
@@ -152,18 +152,18 @@ if ($Providers) {
     }
 
     $ttsBaseUrl = 'http://127.0.0.1:17494'
-    if ($envText -match '(?m)^OPENMONTAGE_TTS_BASE_URL=\s*([^\r\n]+)') {
+    if ($envText -match '(?m)^HAIKE_VIDEO_TTS_BASE_URL=\s*([^\r\n]+)') {
         $ttsBaseUrl = $matches[1].Trim().Trim('"').Trim("'").TrimEnd('/')
     }
     try {
         $ttsHealth = Invoke-RestMethod -Uri "$ttsBaseUrl/health" -Method Get -TimeoutSec 10
-        if ($ttsHealth.status -eq 'healthy' -and $ttsHealth.service -eq 'openmontage-local-tts') {
-            Write-Host '[OK] OpenMontage local TTS health'
+        if ($ttsHealth.status -eq 'healthy' -and $ttsHealth.service -eq 'haike_video-local-tts') {
+            Write-Host '[OK] Haike Video local TTS health'
         } else {
-            $warnings.Add("OpenMontage local TTS is reachable but not healthy: $($ttsHealth.status)")
+            $warnings.Add("Haike Video local TTS is reachable but not healthy: $($ttsHealth.status)")
         }
     } catch {
-        $warnings.Add("OpenMontage local TTS health check failed: $($_.Exception.Message)")
+        $warnings.Add("Haike Video local TTS health check failed: $($_.Exception.Message)")
     }
 }
 

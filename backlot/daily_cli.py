@@ -20,7 +20,7 @@ from backlot.daily_script_v2 import run_script_v2_test
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="OpenMontage 每日科技快报自动化")
+    parser = argparse.ArgumentParser(description="Haike Video 每日科技快报自动化")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("status")
     run = sub.add_parser("run")

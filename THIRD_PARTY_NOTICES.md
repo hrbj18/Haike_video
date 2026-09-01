@@ -2,11 +2,11 @@
 
 ## Qwen3-TTS
 
-OpenMontage's optional embedded local TTS runtime uses the official `qwen-tts` Python package and Qwen3-TTS model family from [QwenLM/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS). The upstream source repository is licensed under Apache License 2.0. Model files are downloaded or imported into an ignored local cache and are not redistributed by this repository. Users should review the current model card and terms before redistribution or commercial deployment.
+Haike Video's optional embedded local TTS runtime uses the official `qwen-tts` Python package and Qwen3-TTS model family from [QwenLM/Qwen3-TTS](https://github.com/QwenLM/Qwen3-TTS). The upstream source repository is licensed under Apache License 2.0. Model files are downloaded or imported into an ignored local cache and are not redistributed by this repository. Users should review the current model card and terms before redistribution or commercial deployment.
 
 ## Voicebox migration compatibility
 
-The optional migration script reads a user's existing local Voicebox profile database and copies user-owned reference audio. OpenMontage does not vendor, launch, or redistribute the Voicebox desktop application or server. Voicebox is available separately from [jamiepine/voicebox](https://github.com/jamiepine/voicebox) under the MIT License.
+The optional migration script reads a user's existing local Voicebox profile database and copies user-owned reference audio. Haike Video does not vendor, launch, or redistribute the Voicebox desktop application or server. Voicebox is available separately from [jamiepine/voicebox](https://github.com/jamiepine/voicebox) under the MIT License.
 
 ## GSAP
 

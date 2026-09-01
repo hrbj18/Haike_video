@@ -4883,8 +4883,8 @@ def _visual_batch_ai_context(project_dir: Path, state: dict, items: list[dict], 
         "task": "visual_route_planning",
         "aspect": "9:16" if height > width else "16:9",
         "has_presenter_overlay": _is_avatar_project(state),
-        "caption_owner": "OpenMontage 独立字幕层",
-        "headline_owner": "OpenMontage 按 story_id 统一的小标题叠加层；HyperFrames 不得渲染右上角新闻标题",
+        "caption_owner": "Haike Video 独立字幕层",
+        "headline_owner": "Haike Video 按 story_id 统一的小标题叠加层；HyperFrames 不得渲染右上角新闻标题",
         "hyperframes_layout_variants": layout_variant_catalog(),
         "preferences": {
             "mix_strategy": policy["mix_strategy"],
@@ -6110,7 +6110,7 @@ def _build_hyperframes_review(project_dir: Path, state: dict, scene: dict, timel
         },
         "asset_manifest": {"assets": manifest_assets},
         "playbook": {
-            "name": "OpenMontage 中文导演审核台",
+            "name": "Haike Video 中文导演审核台",
             "visual_language": {"color_palette": {"background": "#0B0F1A", "text": "#F5F7FA", "accent": "#F5A623"}},
             "typography": {"heading": {"font": "Arial"}, "body": {"font": "Arial"}},
         },
@@ -7822,7 +7822,7 @@ def _try_official_image_candidate(
             lambda: requests.get(
                 image_url,
                 timeout=30,
-                headers={"User-Agent": "Mozilla/5.0 OpenMontage/1.0"},
+                headers={"User-Agent": "Mozilla/5.0 Haike Video/1.0"},
             ),
         )
         response.raise_for_status()
@@ -8313,8 +8313,8 @@ def _generate_hyperframes_visual_block(
             "style_pack_id": style_context["style_pack_id"],
             "style_pack_version": style_context["style_pack_version"],
             "style_context": style_context, "require_layout_inspect": True,
-            "caption_owner": "openmontage", "subtitle_burn": False,
-            "headline_owner": "openmontage-story-overlay" if scene.get("story_id") else "hyperframes",
+            "caption_owner": "haike_video", "subtitle_burn": False,
+            "headline_owner": "haike_video-story-overlay" if scene.get("story_id") else "hyperframes",
         },
         "cuts": [
             {"id": f"{scene['id']}-{block['id']}-hero", "type": "text_card", "text": intent, "in_seconds": 0, "out_seconds": duration},
@@ -9585,7 +9585,7 @@ def start_project_narration(project_dir: Path, payload: dict) -> dict:
     if narration_job.get("status") == "generating":
         raise WorkbenchError("项目旁白正在生成，请不要重复点击")
     if VoiceboxTTS().get_status().value != "available":
-        raise WorkbenchError("OpenMontage 本地配音当前不可用，请先完成安装并启动服务")
+        raise WorkbenchError("Haike Video 本地配音当前不可用，请先完成安装并启动服务")
     voice = get_default_voice()
     if not voice or not voice.get("id"):
         raise WorkbenchError("尚未在通用配音中心设置可用默认音色，请先选择并试听")
@@ -9602,7 +9602,7 @@ def start_project_narration(project_dir: Path, payload: dict) -> dict:
     }
     _mark_render_needs_refresh(state, "项目旁白将重新生成，原全片预览与正式成片会在新时间线下过期")
     automation["render"] = {"status": "awaiting_narration", "runtime": "ffmpeg", "output_path": None, "error": ""}
-    _decision(state, "voice_selection", "旁白配音", f"OpenMontage 本地配音 / {voice['name']}", "引用通用配音中心的当前默认音色；项目只记录引用与生成结果。")
+    _decision(state, "voice_selection", "旁白配音", f"Haike Video 本地配音 / {voice['name']}", "引用通用配音中心的当前默认音色；项目只记录引用与生成结果。")
     _activity(state, "narration_generation_started", f"开始用通用音色“{voice['name']}”生成项目旁白；完成后将以真实时长建立时间线")
     return _save(project_dir, state)
 
@@ -9656,7 +9656,7 @@ def generate_project_narration(project_dir: Path) -> dict:
         audio_asset = _append_asset(project_dir, state, {
             "name": f"{scene.get('title') or scene['id']} · {automation['voice']['label']}旁白", "type": "audio", "source_type": "local_generated",
             "path": str(source_audio), "duration_seconds": duration_seconds,
-            "provider": "OpenMontage 本地配音", "source_tool": "voicebox_tts", "license": "本机 Qwen3-TTS 生成；按项目发布规范复核",
+            "provider": "Haike Video 本地配音", "source_tool": "voicebox_tts", "license": "本机 Qwen3-TTS 生成；按项目发布规范复核",
             "generation": {"profile_id": profile_id, "profile_name": automation["voice"]["profile_name"], "voice_label": automation["voice"]["label"], "scene_id": scene["id"], "generated_at": _now(), "timing_mode": "natural"},
         })
         scene_narration = scene.get("narration") if isinstance(scene.get("narration"), dict) else _scene_narration_default(text)
@@ -9739,7 +9739,7 @@ def start_scene_narration_candidate(project_dir: Path, scene_id: str, payload: d
     if job.get("status") == "generating":
         raise WorkbenchError("这个片段的候选配音正在生成，请等待完成后再试")
     if VoiceboxTTS().get_status().value != "available":
-        raise WorkbenchError("OpenMontage 本地配音当前不可用，请先完成安装并启动服务")
+        raise WorkbenchError("Haike Video 本地配音当前不可用，请先完成安装并启动服务")
 
     catalog = voice_catalog()
     profiles = catalog.get("profiles") if isinstance(catalog.get("profiles"), list) else []
@@ -9810,7 +9810,7 @@ def generate_scene_narration_candidate(project_dir: Path, scene_id: str) -> dict
     audio_asset = _append_asset(project_dir, state, {
         "name": f"{scene.get('title') or scene_id} · {job.get('profile_name') or '本地音色'} 候选配音",
         "type": "audio", "source_type": "local_generated", "path": str(raw_audio), "duration_seconds": duration_seconds,
-        "provider": "OpenMontage 本地配音", "source_tool": "voicebox_tts", "license": "本机 Qwen3-TTS 生成；请按项目发布规范复核",
+        "provider": "Haike Video 本地配音", "source_tool": "voicebox_tts", "license": "本机 Qwen3-TTS 生成；请按项目发布规范复核",
         "generation": {
             "profile_id": job["profile_id"], "profile_name": job.get("profile_name"), "scene_id": scene_id,
             "narration_version_id": version_id, "generated_at": _now(), "timing_mode": "natural",

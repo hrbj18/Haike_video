@@ -924,15 +924,15 @@ def test_news_source_templates_expand_and_duplicate_candidate_ids_are_dropped():
 def test_scheduler_xml_has_missed_run_and_duplicate_guards():
     spec = {
         "schedule_time": "03:00",
-        "working_directory": r"C:\OpenMontage",
-        "command": [r"C:\OpenMontage\.venv\Scripts\python.exe", "wrapper.py", "run"],
+        "working_directory": r"C:\Haike_video",
+        "command": [r"C:\Haike_video\.venv\Scripts\python.exe", "wrapper.py", "run"],
         "execution_time_limit_hours": 12,
     }
     xml = daily_automation._scheduler_task_xml(spec, username=r"TEST\\operator").decode("utf-16")
     assert "<StartWhenAvailable>true</StartWhenAvailable>" in xml
     assert "<WakeToRun>true</WakeToRun>" in xml
     assert "<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>" in xml
-    assert "<WorkingDirectory>C:\\OpenMontage</WorkingDirectory>" in xml
+    assert "<WorkingDirectory>C:\\Haike_video</WorkingDirectory>" in xml
     assert "<ExecutionTimeLimit>PT12H</ExecutionTimeLimit>" in xml
 
 
@@ -995,17 +995,17 @@ def test_today_cannot_be_frozen_as_a_complete_news_day(monkeypatch):
 
 def test_scheduler_runtime_parser_detects_disabled_chinese_task():
     spec = {
-        "task_name": "OpenMontage-Daily-Tech-Brief",
+        "task_name": "Haike Video-Daily-Tech-Brief",
         "enabled": True,
         "schedule_time": "03:00",
-        "command": [r"D:\OpenMontage\.venv\Scripts\python.exe", r"D:\OpenMontage\scripts\run_daily_automation.py"],
+        "command": [r"D:\Haike_video\.venv\Scripts\python.exe", r"D:\Haike_video\scripts\run_daily_automation.py"],
     }
     raw = r"""
 下次运行时间: N/A
 模式: 已禁用
 上次运行时间: 2026/8/21 3:00:00
 上次结果: 1
-要运行的任务: D:\OpenMontage\.venv\Scripts\python.exe D:\OpenMontage\scripts\run_daily_automation.py run
+要运行的任务: D:\Haike_video\.venv\Scripts\python.exe D:\Haike_video\scripts\run_daily_automation.py run
 计划任务状态: 已禁用
 """
     value = daily_automation._parse_scheduler_runtime_output(raw, installed=True, spec=spec)

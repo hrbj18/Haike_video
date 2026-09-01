@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [ValidateRange(1024, 65535)]
     [int]$Port = 4754,
@@ -27,7 +27,7 @@ function Stop-VerifiedBacklotServer {
     foreach ($ownerId in $ownerIds) {
         $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerId" -ErrorAction SilentlyContinue
         if (-not $process -or $process.CommandLine -notmatch '(^|\s)-m\s+backlot\s+serve(\s|$)' -or $process.CommandLine -notmatch "--port\s+$TargetPort(\s|$)") {
-            throw "端口 $TargetPort 正被非 OpenMontage 服务使用；为保护该程序，未执行重启。"
+            throw "端口 $TargetPort 正被非 Haike Video 服务使用；为保护该程序，未执行重启。"
         }
         [void]$verifiedIds.Add([int]$ownerId)
         $parentId = [int]$process.ParentProcessId
@@ -39,7 +39,7 @@ function Stop-VerifiedBacklotServer {
         }
     }
     $targets = @($verifiedIds | Select-Object -Unique)
-    Write-Host "正在停止旧版 OpenMontage 服务（端口 $TargetPort）…" -ForegroundColor Yellow
+    Write-Host "正在停止旧版 Haike Video 服务（端口 $TargetPort）…" -ForegroundColor Yellow
     Stop-Process -Id $targets -Force -ErrorAction Stop
     Start-Sleep -Milliseconds 700
 }

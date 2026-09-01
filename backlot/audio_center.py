@@ -1,4 +1,4 @@
-"""Software-wide OpenMontage local TTS configuration and previews.
+"""Software-wide Haike Video local TTS configuration and previews.
 
 Project narration remains an auditable project asset.  Voice identity and
 short listening tests live here instead, so a creator configures a voice once
@@ -88,12 +88,12 @@ def _profile_payload(profile: dict[str, Any] | None) -> dict[str, Any] | None:
     if not profile:
         return None
     configured_id = (
-        os.environ.get("OPENMONTAGE_TTS_PROFILE_ID", "").strip()
+        os.environ.get("HAIKE_VIDEO_TTS_PROFILE_ID", "").strip()
         or os.environ.get("VOICEBOX_PROFILE_ID", "").strip()
     )
     configured_name = (
-        os.environ.get("OPENMONTAGE_TTS_PROFILE_DISPLAY_NAME", "").strip()
-        or os.environ.get("OPENMONTAGE_TTS_PROFILE_NAME", "").strip()
+        os.environ.get("HAIKE_VIDEO_TTS_PROFILE_DISPLAY_NAME", "").strip()
+        or os.environ.get("HAIKE_VIDEO_TTS_PROFILE_NAME", "").strip()
         or os.environ.get("VOICEBOX_PROFILE_DISPLAY_NAME", "").strip()
         or os.environ.get("VOICEBOX_PROFILE_NAME", "").strip()
     )
@@ -133,7 +133,7 @@ def read_audio_center() -> dict[str, Any]:
     return {
         "provider": {
             "id": "voicebox_tts",
-            "name": "OpenMontage 本地配音",
+            "name": "Haike Video 本地配音",
             "status": tool_status,
             "detail": "音色、试听与默认选择为软件通用设置；项目只引用已确认的默认音色。",
         },
@@ -155,7 +155,7 @@ def set_default_voice(payload: dict[str, Any]) -> dict[str, Any]:
         raise AudioCenterError("请选择一个音色后再设为通用默认")
     profiles = _profiles()
     if not profiles:
-        raise AudioCenterError("OpenMontage 本地配音当前不可用，请先完成安装并启动服务")
+        raise AudioCenterError("Haike Video 本地配音当前不可用，请先完成安装并启动服务")
     if not any(profile["id"] == profile_id for profile in profiles):
         raise AudioCenterError("所选音色已不存在，请刷新音色列表后重试")
     persisted = _load()
@@ -173,7 +173,7 @@ def start_preview(payload: dict[str, Any]) -> dict[str, Any]:
         raise AudioCenterError("试听文案请控制在 500 个字符以内")
     profiles = _profiles()
     if not profiles:
-        raise AudioCenterError("OpenMontage 本地配音当前不可用，请先完成安装并启动服务")
+        raise AudioCenterError("Haike Video 本地配音当前不可用，请先完成安装并启动服务")
     persisted = _load()
     if (persisted.get("preview_job") or {}).get("status") == "generating":
         raise AudioCenterError("已有试听正在生成，请等待完成后再试")
@@ -223,7 +223,7 @@ def generate_preview() -> dict[str, Any]:
         "file_name": output.name,
         "created_at": _now(),
         "duration_seconds": (result.data or {}).get("duration"),
-        "provider": "OpenMontage 本地配音",
+        "provider": "Haike Video 本地配音",
     }
     previews = list(persisted.get("previews") or [])
     previews.append(preview)

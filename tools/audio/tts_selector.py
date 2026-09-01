@@ -214,7 +214,7 @@ class TTSSelector(BaseTool):
 
         preferred = inputs.get("preferred_provider", "auto")
         if preferred == "auto":
-            preferred = os.environ.get("OPENMONTAGE_TTS_PROVIDER", "auto")
+            preferred = os.environ.get("HAIKE_VIDEO_TTS_PROVIDER", "auto")
         allowed = set(inputs.get("allowed_providers") or [])
         if allowed:
             candidates = [tool for tool in candidates if tool.provider in allowed]

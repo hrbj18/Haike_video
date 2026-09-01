@@ -1,7 +1,7 @@
 {
-  "name": "openmontage-remotion-composer",
+  "name": "haike_video-remotion-composer",
   "version": "1.0.0",
-  "description": "Remotion composition renderer for OpenMontage animated explainer videos",
+  "description": "Remotion composition renderer for Haike Video animated explainer videos",
   "scripts": {
     "start": "npx remotion studio",
     "build": "npx remotion render src/index.tsx Explainer out/video.mp4",

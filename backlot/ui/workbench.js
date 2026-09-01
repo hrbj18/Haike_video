@@ -2571,7 +2571,7 @@ async function generateAvatarVoiceboxDrivingAudio(turnId, profileId) {
   await mutate(
     `/avatar-package/turns/${encodeURIComponent(turnId)}/driving-audio/voicebox/candidates/jobs`,
     { method: "POST", body: profileId ? { profile_id: profileId } : {} },
-    `${turnId} 正在用 OpenMontage 本地配音生成候选音频；完成后可直接试听与采用`,
+    `${turnId} 正在用 Haike Video 本地配音生成候选音频；完成后可直接试听与采用`,
   );
 }
 
@@ -2587,7 +2587,7 @@ async function refreshAvatarVoiceboxMappings() {
   await mutate(
     "/avatar-package/voicebox/mappings/refresh",
     { method: "POST", body: {} },
-    "已按 OpenMontage 本地音色库重新识别同名说话人；重复同名音色会要求你手动指定",
+    "已按 Haike Video 本地音色库重新识别同名说话人；重复同名音色会要求你手动指定",
   );
 }
 
@@ -3582,7 +3582,7 @@ function renderSidebar() {
     nav.append(el("button", { class: activeView === id ? "active" : "", type: "button", onclick: () => { activeView = id; render(); } }, label));
   }
   return el("aside", { class: "sidebar" },
-    el("div", { class: "brand" }, el("div", { class: "brand-mark" }, "OpenMontage / 海客视频工厂"), el("h1", {}, "海客视频工厂"), el("p", {}, "人审决策，而非手工剪辑")),
+    el("div", { class: "brand" }, el("div", { class: "brand-mark" }, "Haike Video / 海客视频工厂"), el("h1", {}, "海客视频工厂"), el("p", {}, "人审决策，而非手工剪辑")),
     nav,
     el("div", { class: "sidebar-foot" }, el("strong", {}, "当前原则"), el("br"), "按片段审核画面、字幕和配音；采用后只合成目标片段。"),
   );
@@ -4643,7 +4643,7 @@ function renderVisualBatchPanel(scene) {
               copyInput("supporting_statement", "补充判断或证据", "补充说明"),
               el("label", { class: "visual-copy-field" }, el("small", {}, "画面要点（用｜分隔）"), nodeInput),
             ),
-            el("small", {}, "以上是生成前可审核的画面文案。动态图形只生成主体画面；数字人与模块化字幕仍由 OpenMontage 叠加。"),
+            el("small", {}, "以上是生成前可审核的画面文案。动态图形只生成主体画面；数字人与模块化字幕仍由 Haike Video 叠加。"),
           );
           else details.push(el("small", {}, "OpenAI 生图会在开始执行前再次提示费用；图片会转成该槽位长度的视频，便于无缝合成。"));
           return el("label", { class: "visual-query-plan" },
@@ -5397,7 +5397,7 @@ function renderNarrationReview(scene) {
         button(generating ? "正在生成候选配音…" : "生成候选配音", "primary", () => startSceneNarrationCandidate(scene, text.value, profile.value), generating || !voiceReady),
         button("管理通用音色", "quiet", openAudioCenter),
       ),
-      !voiceReady ? el("div", { class: "report bad" }, "OpenMontage 本地配音当前不可用。请完成安装并在通用配音中心确认音色。") : null,
+      !voiceReady ? el("div", { class: "report bad" }, "Haike Video 本地配音当前不可用。请完成安装并在通用配音中心确认音色。") : null,
       generating ? el("div", { class: "narration-job is-running" }, status("generating"), el("span", {}, `正在生成 ${job.version_id || "候选版本"}，页面完成后会自动刷新；不会覆盖当前成片。`)) : null,
       job.status === "failed" ? el("div", { class: "report bad" }, job.error || "候选配音生成失败，请检查本地配音服务后重试。") : null,
     ),
@@ -6108,7 +6108,7 @@ function renderCloudTurnCard(turn, speakerNames, packageState) {
     }, !audio));
   }
   const audioOrigin = audio && audio.source_type === "voicebox_generated"
-    ? `OpenMontage 本地配音 · ${audio.profile_name || "未标注音色"}`
+    ? `Haike Video 本地配音 · ${audio.profile_name || "未标注音色"}`
     : "已上传音频";
   const candidateBlocks = candidateTakes.map((candidate) => el("div", { class: "cloud-audio-preview narration-take" },
     el("div", { class: "take-head" }, el("strong", {}, `候选音频 · ${candidate.profile_name || "本地音色"}`), status("candidate")),
@@ -6122,11 +6122,11 @@ function renderCloudTurnCard(turn, speakerNames, packageState) {
     audio ? el("div", { class: "cloud-audio-preview" },
       el("span", { class: "minor" }, `${audioOrigin} · ${audio.original_filename} · ${fmtDuration(audio.duration_seconds)} · 该时长将成为片段时长`),
       el("audio", { controls: "", src: mediaURL(projectId, audio.path) }),
-    ) : el("p", { class: "minor" }, "尚未采用驱动音频。可上传已有音频，或用 OpenMontage 本地配音按本轮台词生成候选；单段最多 20 秒。"),
+    ) : el("p", { class: "minor" }, "尚未采用驱动音频。可上传已有音频，或用 Haike Video 本地配音按本轮台词生成候选；单段最多 20 秒。"),
     el("div", { class: "voicebox-turn-control" },
       el("label", { class: "control-label" }, "本轮本地音色（生成内容固定为上方台词）", profile),
       el("span", { class: `minor ${mapping.status !== "ready" ? "voicebox-mapping-warning" : ""}` }, `${voiceboxSelectionLabel(mapping)}：${mapping.detail || "将在开始生成时确认"}`),
-      !voiceReady ? el("div", { class: "report bad" }, "OpenMontage 本地配音当前不可用。你仍可上传现成驱动音频；如需生成，请先安装服务并到通用配音中心检查音色。") : null,
+      !voiceReady ? el("div", { class: "report bad" }, "Haike Video 本地配音当前不可用。你仍可上传现成驱动音频；如需生成，请先安装服务并到通用配音中心检查音色。") : null,
       voiceJob.status === "generating" ? el("div", { class: "narration-job is-running" }, status("generating"), el("span", {}, `正在生成 ${voiceJob.profile_name || "本地音色"} 候选音频；不会覆盖当前已采用音频。`)) : null,
       voiceJob.status === "failed" ? el("div", { class: "report bad" }, voiceJob.error || "本地候选音频生成失败，请检查服务后重试。") : null,
     ),
@@ -6459,7 +6459,7 @@ function renderVoiceboxBatchPanel(packageState) {
     ), button("重新识别同名音色", "quiet small", refreshAvatarVoiceboxMappings, running || !voiceReady)),
     el("div", { class: "panel-body" },
       el("div", { class: "voicebox-speaker-routes" }, mappingCards),
-      !voiceReady ? el("div", { class: "report bad" }, "OpenMontage 本地配音当前不可用。请先在通用配音中心确认服务与音色可用；仍可上传已有音频。") : null,
+      !voiceReady ? el("div", { class: "report bad" }, "Haike Video 本地配音当前不可用。请先在通用配音中心确认服务与音色可用；仍可上传已有音频。") : null,
       unresolved.length ? el("div", { class: "report bad" }, `请先为 ${unresolved.map((item) => item.speaker_name).join("、")} 指定音色，再开始批量配音。`) : null,
       el("div", { class: "voicebox-batch-actions" },
         el("label", { class: "intake-field" }, el("span", {}, "批量模式"), mode),

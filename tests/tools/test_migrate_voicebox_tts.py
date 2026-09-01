@@ -8,7 +8,7 @@ from scripts.migrate_voicebox_tts import migrate_profiles
 
 def test_migration_preserves_profile_id_and_copies_private_sample(tmp_path):
     source = tmp_path / "voicebox"
-    destination = tmp_path / "openmontage"
+    destination = tmp_path / "haike_video"
     sample = source / "profiles" / "voice-yaya" / "sample.wav"
     sample.parent.mkdir(parents=True)
     sample.write_bytes(b"RIFFreference")

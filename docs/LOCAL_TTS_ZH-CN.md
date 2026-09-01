@@ -1,6 +1,6 @@
-# OpenMontage 内置本地配音
+# Haike Video 内置本地配音
 
-OpenMontage 已内置独立的 Qwen3-TTS 服务。工作台、每日生产和数字人驱动音频不需要安装或启动 Voicebox；历史 Python 类名 `VoiceboxTTS` 仅作为项目状态兼容层保留。
+Haike Video 已内置独立的 Qwen3-TTS 服务。工作台、每日生产和数字人驱动音频不需要安装或启动 Voicebox；历史 Python 类名 `VoiceboxTTS` 仅作为项目状态兼容层保留。
 
 ## 新机器安装
 
@@ -31,7 +31,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup_local_tts.
 
 ```powershell
 # 旧机器导出，可重复指定 --profile-id
-$voicePack = Join-Path $env:USERPROFILE 'OpenMontage-private\voices.zip'
+$voicePack = Join-Path $env:USERPROFILE 'Haike_video-private\voices.zip'
 python scripts\local_tts_profiles.py export --output $voicePack --profile-id <PROFILE_ID>
 
 # 新机器完成依赖安装后导入
@@ -54,14 +54,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup_local_tts.
 在 `.env.local` 或 `.env.secrets.local` 中配置，均为可选：
 
 ```dotenv
-OPENMONTAGE_TTS_BASE_URL=http://127.0.0.1:17494
-OPENMONTAGE_TTS_DEVICE=auto
-OPENMONTAGE_TTS_PROFILE_NAME=Qwen Serena
-OPENMONTAGE_TTS_PROFILE_ID=
-OPENMONTAGE_TTS_DATA_DIR=
-OPENMONTAGE_TTS_MODEL_CACHE=
-OPENMONTAGE_TTS_MAX_LOADED_MODELS=1
-OPENMONTAGE_TTS_MAX_CHARS=500
+HAIKE_VIDEO_TTS_BASE_URL=http://127.0.0.1:17494
+HAIKE_VIDEO_TTS_DEVICE=auto
+HAIKE_VIDEO_TTS_PROFILE_NAME=Qwen Serena
+HAIKE_VIDEO_TTS_PROFILE_ID=
+HAIKE_VIDEO_TTS_DATA_DIR=
+HAIKE_VIDEO_TTS_MODEL_CACHE=
+HAIKE_VIDEO_TTS_MAX_LOADED_MODELS=1
+HAIKE_VIDEO_TTS_MAX_CHARS=500
 ```
 
 `auto` 会优先使用可用 CUDA，否则使用 CPU。当前机器的真实验证是 CPU；1.7B 模型第一次冷加载较慢，后续同模型任务会复用内存。
@@ -73,4 +73,4 @@ Invoke-RestMethod http://127.0.0.1:17494/health
 Invoke-RestMethod http://127.0.0.1:17494/profiles
 ```
 
-健康结果必须同时满足 `status=healthy` 和 `service=openmontage-local-tts`。日志位于 `.backlot\tts\logs`。
+健康结果必须同时满足 `status=healthy` 和 `service=haike_video-local-tts`。日志位于 `.backlot\tts\logs`。

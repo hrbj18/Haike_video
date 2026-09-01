@@ -1,4 +1,4 @@
-﻿param(
+param(
     [switch]$SkipEnvFile,
     [switch]$SkipInstall,
     [switch]$SkipDev,
@@ -56,7 +56,7 @@ $pythonVersionOutput = & $venvPython -c "import struct, sys; print('.'.join(map(
 $pythonVersionExitCode = $LASTEXITCODE
 $pythonVersion = ([string]$pythonVersionOutput).Trim()
 if ($pythonVersionExitCode -ne 0 -or $pythonVersion -ne '3.12:64') {
-    throw "OpenMontage full Windows deployment requires 64-bit Python 3.12. Current project environment: $pythonVersion"
+    throw "Haike Video full Windows deployment requires 64-bit Python 3.12. Current project environment: $pythonVersion"
 }
 
 if (-not $SkipInstall) {
@@ -108,7 +108,7 @@ if (-not $SkipLocalTts) {
     if ($MigrateLegacyVoicebox) { $ttsArguments += '-MigrateVoicebox' }
     & powershell.exe @ttsArguments
     if ($LASTEXITCODE -ne 0) {
-        throw 'OpenMontage 本地配音运行时安装失败。可用 -SkipLocalTts 跳过。'
+        throw 'Haike Video 本地配音运行时安装失败。可用 -SkipLocalTts 跳过。'
     }
 }
 
@@ -136,7 +136,7 @@ if (-not $SkipEnvFile) {
     }
 }
 
-Write-Output "OpenMontage workspace ready: $repoRoot"
+Write-Output "Haike Video workspace ready: $repoRoot"
 Write-Output "Python runtime: $venvPython ($pythonVersion)"
 if (-not $SkipInstall -and -not $SkipAsr) { Write-Output 'Local ASR dependencies: installed' }
 if (-not $SkipInstall -and -not $SkipDev) { Write-Output 'Development and acceptance-test dependencies: installed' }

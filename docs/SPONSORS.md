@@ -1,6 +1,6 @@
 # Sponsors
 
-This document defines how sponsor logos are added to the OpenMontage README.
+This document defines how sponsor logos are added to the Haike Video README.
 
 ## Sponsor Asset Convention
 
@@ -18,7 +18,7 @@ Add each sponsor as a table row inside the `Sponsors` section near the top of `R
 ```html
 <tr>
 <td width="180" align="center"><a href="https://example.com"><img src="assets/sponsors/example-sponsor.svg" alt="Example Sponsor" width="150"></a></td>
-<td><strong>Example Sponsor</strong> helps OpenMontage users do something concrete. Mention the useful product outcome, then close with a short <a href="https://example.com">CTA link</a>.</td>
+<td><strong>Example Sponsor</strong> helps Haike Video users do something concrete. Mention the useful product outcome, then close with a short <a href="https://example.com">CTA link</a>.</td>
 </tr>
 ```
 
@@ -34,7 +34,7 @@ For a sponsor with separate light and dark logos, use a `picture` element:
     </picture>
   </a>
 </td>
-<td><strong>Example Sponsor</strong> helps OpenMontage users do something concrete. Mention the useful product outcome, then close with a short <a href="https://example.com">CTA link</a>.</td>
+<td><strong>Example Sponsor</strong> helps Haike Video users do something concrete. Mention the useful product outcome, then close with a short <a href="https://example.com">CTA link</a>.</td>
 </tr>
 ```
 
@@ -45,7 +45,7 @@ Before adding a sponsor, collect:
 - Sponsor display name
 - Sponsor URL
 - Logo file, preferably SVG
-- Confirmation that OpenMontage has permission to display the logo in the README
+- Confirmation that Haike Video has permission to display the logo in the README
 - Any required trademark wording, if the sponsor has one
 
 Do not add tracking URLs, affiliate redirects, or claims about endorsement unless they are explicitly approved by the project maintainer.

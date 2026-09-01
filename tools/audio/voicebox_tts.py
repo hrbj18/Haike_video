@@ -1,7 +1,7 @@
-"""Compatibility adapter for the OpenMontage embedded local TTS service.
+"""Compatibility adapter for the Haike Video embedded local TTS service.
 
 The historical class and tool names remain stable so existing project state
-does not need migration.  Runtime generation is owned by OpenMontage and no
+does not need migration.  Runtime generation is owned by Haike Video and no
 longer starts or calls the standalone Voicebox application.
 """
 
@@ -64,7 +64,7 @@ class TTSJobNotReady(RuntimeError):
 
 
 class VoiceboxTTS(BaseTool):
-    """Generate narration through the OpenMontage local TTS server."""
+    """Generate narration through the Haike Video local TTS server."""
 
     _resolved_base_url: str | None = None
     _base_url_candidates = (
@@ -75,13 +75,13 @@ class VoiceboxTTS(BaseTool):
     version = "0.1.0"
     tier = ToolTier.VOICE
     capability = "tts"
-    provider = "openmontage_local_tts"
+    provider = "haike_video_local_tts"
     stability = ToolStability.BETA
     execution_mode = ExecutionMode.SYNC
     determinism = Determinism.DETERMINISTIC
     runtime = ToolRuntime.LOCAL
 
-    dependencies = ["http:OPENMONTAGE_TTS_BASE_URL"]
+    dependencies = ["http:HAIKE_VIDEO_TTS_BASE_URL"]
     install_instructions = (
         "Run scripts/setup_local_tts.ps1 once, then scripts/start_local_tts.ps1."
     )
@@ -95,12 +95,12 @@ class VoiceboxTTS(BaseTool):
         "native_audio": True,
     }
     best_for = [
-        "local Chinese narration through OpenMontage's embedded Qwen3-TTS runtime",
-        "Qwen CustomVoice presets and private cloned profiles migrated into OpenMontage",
+        "local Chinese narration through Haike Video's embedded Qwen3-TTS runtime",
+        "Qwen CustomVoice presets and private cloned profiles migrated into Haike Video",
         "private, API-free voiceover generation",
     ]
     not_good_for = [
-        "machines where the OpenMontage local TTS runtime has not been installed",
+        "machines where the Haike Video local TTS runtime has not been installed",
         "high-concurrency CPU generation with the Qwen 1.7B model",
     ]
 
@@ -140,15 +140,15 @@ class VoiceboxTTS(BaseTool):
     )
     retry_policy = RetryPolicy(max_retries=0)
     idempotency_key_fields = ["text", "profile_id", "engine", "model_size", "instruct"]
-    side_effects = ["writes WAV audio to output_path", "calls the OpenMontage localhost TTS service"]
+    side_effects = ["writes WAV audio to output_path", "calls the Haike Video localhost TTS service"]
     user_visible_verification = ["Listen to the generated WAV for intelligibility and voice consistency"]
 
     @classmethod
     def _base_url(cls) -> str:
-        configured = os.environ.get("OPENMONTAGE_TTS_BASE_URL", "").strip()
+        configured = os.environ.get("HAIKE_VIDEO_TTS_BASE_URL", "").strip()
         if not configured:
             # Temporary compatibility for existing private .env files.  New
-            # installations only document OPENMONTAGE_TTS_BASE_URL.
+            # installations only document HAIKE_VIDEO_TTS_BASE_URL.
             configured = os.environ.get("VOICEBOX_BASE_URL", "auto").strip()
         if configured and configured.lower() not in {"auto", "detect"}:
             return configured.rstrip("/")
@@ -201,27 +201,27 @@ class VoiceboxTTS(BaseTool):
                     ]
                     return json.loads(events[-1] if events else text)
                 except (json.JSONDecodeError, UnicodeError) as exc:
-                    raise TTSProtocolError(f"OpenMontage 本地配音返回了无效 JSON/SSE：{exc}") from exc
+                    raise TTSProtocolError(f"Haike Video 本地配音返回了无效 JSON/SSE：{exc}") from exc
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", errors="replace")
             if exc.code == 409:
-                raise TTSRequestConflict(f"OpenMontage TTS 请求冲突：{detail}") from exc
+                raise TTSRequestConflict(f"Haike Video TTS 请求冲突：{detail}") from exc
             if exc.code >= 500:
                 raise TTSServiceUnavailable(
-                    f"OpenMontage TTS 服务暂不可用：HTTP {exc.code}",
+                    f"Haike Video TTS 服务暂不可用：HTTP {exc.code}",
                     ambiguous_after_submit=method.upper() == "POST",
                 ) from exc
-            raise RuntimeError(f"OpenMontage TTS {method} {path} failed: HTTP {exc.code}: {detail}") from exc
+            raise RuntimeError(f"Haike Video TTS {method} {path} failed: HTTP {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
             raise TTSServiceUnavailable(
-                f"无法连接 OpenMontage 本地配音服务 {cls._base_url()}：{exc.reason}",
+                f"无法连接 Haike Video 本地配音服务 {cls._base_url()}：{exc.reason}",
                 ambiguous_after_submit=method.upper() == "POST",
             ) from exc
         except (TimeoutError, ConnectionError, OSError, http.client.IncompleteRead) as exc:
             ambiguous = method.upper() == "POST"
             hint = "；提交结果可能未知，请仅使用相同 request_id 安全重试" if ambiguous else ""
             raise TTSServiceUnavailable(
-                f"OpenMontage 本地配音传输中断：{exc}{hint}",
+                f"Haike Video 本地配音传输中断：{exc}{hint}",
                 ambiguous_after_submit=ambiguous,
             ) from exc
 
@@ -269,7 +269,7 @@ class VoiceboxTTS(BaseTool):
         explicit = (
             inputs.get("profile_id")
             or inputs.get("voice_id")
-            or os.environ.get("OPENMONTAGE_TTS_PROFILE_ID")
+            or os.environ.get("HAIKE_VIDEO_TTS_PROFILE_ID")
             or os.environ.get("VOICEBOX_PROFILE_ID")
         )
         profiles = cls.list_profiles()
@@ -279,14 +279,14 @@ class VoiceboxTTS(BaseTool):
 
         profile_name = str(
             inputs.get("profile_name")
-            or os.environ.get("OPENMONTAGE_TTS_PROFILE_NAME")
+            or os.environ.get("HAIKE_VIDEO_TTS_PROFILE_NAME")
             or os.environ.get("VOICEBOX_PROFILE_NAME")
             or DEFAULT_PROFILE_NAME
         ).lower()
         for profile in profiles:
             if profile["name"].lower() == profile_name:
                 return profile
-        raise RuntimeError(f"找不到 OpenMontage 本地音色：{profile_name}")
+        raise RuntimeError(f"找不到 Haike Video 本地音色：{profile_name}")
 
     @classmethod
     def submit(cls, inputs: dict[str, Any], *, request_id: str) -> dict[str, Any]:
@@ -294,7 +294,7 @@ class VoiceboxTTS(BaseTool):
 
         text = str(inputs.get("text") or "").strip()
         if not text:
-            raise ValueError("OpenMontage 本地配音文本不能为空")
+            raise ValueError("Haike Video 本地配音文本不能为空")
         if not str(request_id or "").strip():
             raise TTSProtocolError("可恢复配音提交必须提供稳定 request_id")
         profile = cls._resolve_profile(inputs)
@@ -307,12 +307,12 @@ class VoiceboxTTS(BaseTool):
         engine = str(
             inputs.get("engine")
             or profile.get("default_engine")
-            or os.environ.get("OPENMONTAGE_TTS_ENGINE")
+            or os.environ.get("HAIKE_VIDEO_TTS_ENGINE")
             or os.environ.get("VOICEBOX_ENGINE", DEFAULT_ENGINE)
         )
         language = str(
             inputs.get("language")
-            or os.environ.get("OPENMONTAGE_TTS_LANGUAGE")
+            or os.environ.get("HAIKE_VIDEO_TTS_LANGUAGE")
             or os.environ.get("VOICEBOX_LANGUAGE", DEFAULT_LANGUAGE)
         )
         payload: dict[str, Any] = {
@@ -329,15 +329,15 @@ class VoiceboxTTS(BaseTool):
         }
         response = cls._request("POST", "/speak", payload, timeout=60)
         if not isinstance(response, dict):
-            raise TTSProtocolError("OpenMontage 本地配音提交返回了非对象响应")
+            raise TTSProtocolError("Haike Video 本地配音提交返回了非对象响应")
         generation_id = str(response.get("id") or response.get("generation_id") or "")
         status = str(response.get("status") or "")
         if not generation_id or status not in JOB_STATUSES:
-            raise TTSProtocolError("OpenMontage 本地配音提交缺少有效任务 ID 或状态")
+            raise TTSProtocolError("Haike Video 本地配音提交缺少有效任务 ID 或状态")
         if response.get("request_id") != request_id:
-            raise TTSProtocolError("OpenMontage 本地配音未回显相同 request_id，禁止进入不可恢复轮询")
+            raise TTSProtocolError("Haike Video 本地配音未回显相同 request_id，禁止进入不可恢复轮询")
         if response.get("voice_signature") != voice_signature:
-            raise TTSProtocolError("OpenMontage 本地配音未回显冻结音色签名")
+            raise TTSProtocolError("Haike Video 本地配音未回显冻结音色签名")
         return {
             "generation_id": generation_id,
             "request_id": str(request_id),
@@ -357,11 +357,11 @@ class VoiceboxTTS(BaseTool):
         path = f"/generate/{generation_id}/status" if api_mode == "speak" else f"/history/{generation_id}"
         info = cls._request("GET", path, timeout=30)
         if not isinstance(info, dict):
-            raise TTSProtocolError("OpenMontage 本地配音返回了无效任务状态")
+            raise TTSProtocolError("Haike Video 本地配音返回了无效任务状态")
         returned_id = str(info.get("id") or info.get("generation_id") or "")
         status = str(info.get("status") or "")
         if returned_id != str(generation_id) or status not in JOB_STATUSES:
-            raise TTSProtocolError("OpenMontage 本地配音任务 ID 或状态不符合协议")
+            raise TTSProtocolError("Haike Video 本地配音任务 ID 或状态不符合协议")
         return {
             "generation_id": returned_id,
             "request_id": info.get("request_id"),
@@ -387,7 +387,7 @@ class VoiceboxTTS(BaseTool):
             raise TTSJobNotReady(f"配音任务 {generation_id} 尚未完成：{status['status']}")
         data = cls._request("GET", f"/audio/{generation_id}", timeout=180)
         if not isinstance(data, bytes) or not data:
-            raise TTSProtocolError("OpenMontage 本地配音没有返回音频")
+            raise TTSProtocolError("Haike Video 本地配音没有返回音频")
         destination = Path(output_path)
         destination.parent.mkdir(parents=True, exist_ok=True)
         temporary = destination.with_name(f".{destination.name}.{uuid4().hex}.tmp")
@@ -409,11 +409,11 @@ class VoiceboxTTS(BaseTool):
                 or frames <= 0
                 or len(raw_frames) != expected_bytes
             ):
-                raise TTSProtocolError("OpenMontage 本地配音返回的不是完整 PCM16 WAV")
+                raise TTSProtocolError("Haike Video 本地配音返回的不是完整 PCM16 WAV")
             digest = hashlib.sha256(data).hexdigest()
             os.replace(temporary, destination)
         except (OSError, wave.Error, EOFError) as exc:
-            raise TTSProtocolError(f"OpenMontage 本地配音 WAV 校验失败：{exc}") from exc
+            raise TTSProtocolError(f"Haike Video 本地配音 WAV 校验失败：{exc}") from exc
         finally:
             if temporary.exists():
                 temporary.unlink()
@@ -446,7 +446,7 @@ class VoiceboxTTS(BaseTool):
             if status in TERMINAL_STATUSES:
                 return info
             if time.monotonic() - started > timeout_seconds:
-                raise RuntimeError(f"OpenMontage 本地配音超过 {timeout_seconds} 秒仍未完成")
+                raise RuntimeError(f"Haike Video 本地配音超过 {timeout_seconds} 秒仍未完成")
             time.sleep(max(0.2, poll_seconds))
 
     @classmethod
@@ -455,11 +455,11 @@ class VoiceboxTTS(BaseTool):
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
         if self.get_status() != ToolStatus.AVAILABLE:
-            return ToolResult(success=False, error="OpenMontage 本地配音服务不可用。" + self.install_instructions)
+            return ToolResult(success=False, error="Haike Video 本地配音服务不可用。" + self.install_instructions)
 
         text = str(inputs.get("text", "")).strip()
         if not text:
-            return ToolResult(success=False, error="OpenMontage 本地配音文本不能为空。")
+            return ToolResult(success=False, error="Haike Video 本地配音文本不能为空。")
 
         started = time.time()
         output_path = Path(inputs.get("output_path", "voicebox_tts.wav"))
@@ -469,7 +469,7 @@ class VoiceboxTTS(BaseTool):
             engine = str(
                 inputs.get("engine")
                 or profile.get("default_engine")
-                or os.environ.get("OPENMONTAGE_TTS_ENGINE")
+                or os.environ.get("HAIKE_VIDEO_TTS_ENGINE")
                 or os.environ.get("VOICEBOX_ENGINE", DEFAULT_ENGINE)
             )
             modern_payload: dict[str, Any] = {
@@ -477,7 +477,7 @@ class VoiceboxTTS(BaseTool):
                 "profile": profile_id,
                 "language": (
                     inputs.get("language")
-                    or os.environ.get("OPENMONTAGE_TTS_LANGUAGE")
+                    or os.environ.get("HAIKE_VIDEO_TTS_LANGUAGE")
                     or os.environ.get("VOICEBOX_LANGUAGE", DEFAULT_LANGUAGE)
                 ),
                 "engine": engine,
@@ -503,7 +503,7 @@ class VoiceboxTTS(BaseTool):
                 }
                 instruct = (
                     inputs.get("instruct")
-                    or os.environ.get("OPENMONTAGE_TTS_INSTRUCT")
+                    or os.environ.get("HAIKE_VIDEO_TTS_INSTRUCT")
                     or os.environ.get("VOICEBOX_INSTRUCT")
                 )
                 if instruct:
@@ -512,7 +512,7 @@ class VoiceboxTTS(BaseTool):
                 api_mode = "legacy"
             generation_id = response.get("id") or response.get("generation_id")
             if not generation_id:
-                raise RuntimeError(f"OpenMontage 本地配音没有返回任务 ID：{response}")
+                raise RuntimeError(f"Haike Video 本地配音没有返回任务 ID：{response}")
 
             info = self._wait_for_generation(
                 str(generation_id),
@@ -523,7 +523,7 @@ class VoiceboxTTS(BaseTool):
             if str(info.get("status")) != "completed":
                 return ToolResult(
                     success=False,
-                    error=f"OpenMontage 本地配音任务 {generation_id} 结束状态为 {info.get('status')}：{info.get('error', '')}",
+                    error=f"Haike Video 本地配音任务 {generation_id} 结束状态为 {info.get('status')}：{info.get('error', '')}",
                     data={"generation_id": generation_id, "status": info.get("status")},
                 )
 
@@ -548,4 +548,4 @@ class VoiceboxTTS(BaseTool):
                 duration_seconds=round(time.time() - started, 2),
             )
         except Exception as exc:  # noqa: BLE001 - surface provider errors as ToolResult.
-            return ToolResult(success=False, error=f"OpenMontage 本地配音失败：{exc}", duration_seconds=round(time.time() - started, 2))
+            return ToolResult(success=False, error=f"Haike Video 本地配音失败：{exc}", duration_seconds=round(time.time() - started, 2))

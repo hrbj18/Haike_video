@@ -1,4 +1,4 @@
-"""Run contract-level QA for a reusable OpenMontage content project."""
+"""Run contract-level QA for a reusable Haike Video content project."""
 
 from __future__ import annotations
 

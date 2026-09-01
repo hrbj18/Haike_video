@@ -1,6 +1,6 @@
 ---
 name: kling-official
-description: Official Kling direct API guidance for OpenMontage providers. Use before calling `kling_official_video`, `kling_official_image`, `kling_tts`, `kling_avatar`, or `kling_lip_sync`.
+description: Official Kling direct API guidance for Haike Video providers. Use before calling `kling_official_video`, `kling_official_image`, `kling_tts`, `kling_avatar`, or `kling_lip_sync`.
 metadata:
   openclaw:
     requires:
@@ -10,7 +10,7 @@ metadata:
 
 # Kling Official Direct API
 
-Use this skill for OpenMontage tools with `provider="kling_official"`. This is not the fal.ai Kling gateway. Official Kling uses `KLING_API_KEY`, optional `KLING_API_BASE_URL`, and `Authorization: Bearer <KLING_API_KEY>`.
+Use this skill for Haike Video tools with `provider="kling_official"`. This is not the fal.ai Kling gateway. Official Kling uses `KLING_API_KEY`, optional `KLING_API_BASE_URL`, and `Authorization: Bearer <KLING_API_KEY>`.
 
 ## Provider Split
 
@@ -71,7 +71,7 @@ Image Omni accepts `image_list[]` with official `image` values. Prompt placehold
 
 ## Capability Boundaries
 
-TTS, avatar, and lip sync are provider additions to existing OpenMontage capabilities. Audio effects and video effects are official Kling endpoints, but they are not registered as default OpenMontage tools until a pipeline has a stable capability slot for them.
+TTS, avatar, and lip sync are provider additions to existing Haike Video capabilities. Audio effects and video effects are official Kling endpoints, but they are not registered as default Haike Video tools until a pipeline has a stable capability slot for them.
 
 - Do not add `sound_effects` or `video_effects` capabilities from inside a provider implementation.
 - Do not let video effects enter the ordinary `video_generation` selector path.
@@ -79,7 +79,7 @@ TTS, avatar, and lip sync are provider additions to existing OpenMontage capabil
 
 ## Video Parameters
 
-Use `operation` for OpenMontage semantics:
+Use `operation` for Haike Video semantics:
 
 - `text_to_video`
 - `image_to_video`
@@ -148,11 +148,11 @@ Local video paths must not be silently uploaded through fal.ai or any other prov
 
 ## Audio Effects And Video Effects
 
-Official Kling audio effects (`/v1/audio/text-to-audio`, `/v1/audio/video-to-audio`) and video effects (`/v1/videos/effects`) are intentionally not default OpenMontage selector tools. Record the non-mapping reason in docs/tests instead of registering tools that current pipelines might misuse.
+Official Kling audio effects (`/v1/audio/text-to-audio`, `/v1/audio/video-to-audio`) and video effects (`/v1/videos/effects`) are intentionally not default Haike Video selector tools. Record the non-mapping reason in docs/tests instead of registering tools that current pipelines might misuse.
 
 ## Elements Helper
 
-Elements are an internal Kling Official helper, not a new OpenMontage tool capability.
+Elements are an internal Kling Official helper, not a new Haike Video tool capability.
 Use `tools/_kling/elements.py` to normalize `element_list[].element_id`, optionally query read-only element endpoints, and record element metadata when queried. Do not create or delete elements from the default provider path.
 
 ## Account Usage Helper
@@ -197,4 +197,4 @@ High-cost Omni inputs such as multiple references, element IDs, `result_type="se
 
 ## Prompt Notes
 
-For video, start from the universal OpenMontage video prompt skeleton: subject, subject motion, scene, spatial framing, and camera. Kling tends to respond well to clear temporal action order, camera movement verbs, and concise negative prompts. For reference workflows, state what should stay consistent from the reference and what should change.
+For video, start from the universal Haike Video video prompt skeleton: subject, subject motion, scene, spatial framing, and camera. Kling tends to respond well to clear temporal action order, camera movement verbs, and concise negative prompts. For reference workflows, state what should stay consistent from the reference and what should change.

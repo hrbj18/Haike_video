@@ -1,6 +1,6 @@
-# OpenMontage Provider Guide
+# Haike Video Provider Guide
 
-Everything you need to know about every provider in OpenMontage — setup instructions, pricing, free tiers, and what each unlocks.
+Everything you need to know about every provider in Haike Video — setup instructions, pricing, free tiers, and what each unlocks.
 
 ---
 
@@ -100,7 +100,7 @@ Current xAI docs pricing for the Grok media models:
 | `grok-imagine-video` at 720p | $0.07/sec |
 | `grok-imagine-video` input images | $0.002 per input image |
 
-OpenMontage now uses those published rates in the Grok tool estimators.
+Haike Video now uses those published rates in the Grok tool estimators.
 
 ---
 
@@ -258,14 +258,14 @@ No subscription — pure pay-as-you-go, no minimum spend.
 #### Notes
 
 - `provider="kling_official"` is intentionally different from fal.ai's `provider="kling"`.
-- Official Kling is a paid remote API. OpenMontage uses conservative cost estimates and includes high-cost factors such as Omni references, series output, 4k mode, and native sound.
+- Official Kling is a paid remote API. Haike Video uses conservative cost estimates and includes high-cost factors such as Omni references, series output, 4k mode, and native sound.
 - Local image paths are sent as raw base64 for supported Classic/image-generation fields. Turbo image-to-video requires a URL and will not silently upload through fal.ai.
-- Video Omni and Image Omni can pass official `element_id` references through `element_list`; Elements remain an internal Kling Official helper, not a standalone OpenMontage capability.
+- Video Omni and Image Omni can pass official `element_id` references through `element_list`; Elements remain an internal Kling Official helper, not a standalone Haike Video capability.
 - Account Usage is available as a low-frequency diagnostic helper under `tools/_kling/account.py`; it is not a selector or pipeline tool.
-- `callback_url` is passed through and recorded when supplied, but OpenMontage still polls tasks by default.
-- `kling_tts` requires an explicit `voice_id`; OpenMontage does not guess a default official voice.
+- `callback_url` is passed through and recorded when supplied, but Haike Video still polls tasks by default.
+- `kling_tts` requires an explicit `voice_id`; Haike Video does not guess a default official voice.
 - `kling_avatar` and `kling_lip_sync` register under the existing `avatar` capability and coexist with local SadTalker/Wav2Lip tools. Current avatar pipelines must opt into them explicitly; registry discovery alone does not replace local tools.
-- Official Kling audio effects and video effects are documented but intentionally not registered as OpenMontage tools yet, because current pipelines do not have a stable sound-effects or video-effects capability slot for them.
+- Official Kling audio effects and video effects are documented but intentionally not registered as Haike Video tools yet, because current pipelines do not have a stable sound-effects or video-effects capability slot for them.
 
 ---
 
@@ -317,7 +317,7 @@ No subscription — pure pay-as-you-go, no minimum spend.
 
 #### API Notes
 
-OpenMontage uses the new-console API key flow:
+Haike Video uses the new-console API key flow:
 
 ```text
 X-Api-Key: ${DOUBAO_SPEECH_API_KEY}
@@ -339,7 +339,7 @@ Start with `speech_rate: 0` for natural Mandarin delivery. If the approved forma
 
 #### Pricing
 
-Doubao Speech 2.0 is billed by character package or usage in Volcengine. OpenMontage estimates cost from text length and prefers provider-returned usage metadata when available.
+Doubao Speech 2.0 is billed by character package or usage in Volcengine. Haike Video estimates cost from text length and prefers provider-returned usage metadata when available.
 
 ---
 
@@ -364,7 +364,7 @@ Doubao Speech 2.0 is billed by character package or usage in Volcengine. OpenMon
 
 #### API Notes
 
-OpenMontage uses the **Fast Transcription** REST endpoint, which accepts a local
+Haike Video uses the **Fast Transcription** REST endpoint, which accepts a local
 audio file directly (multipart upload) and returns a synchronous result — no
 Azure Blob storage, SAS URLs, or async job polling:
 
@@ -373,7 +373,7 @@ POST https://{region}.api.cognitive.microsoft.com/speechtotext/transcriptions:tr
 Ocp-Apim-Subscription-Key: ${AZURE_SPEECH_KEY}
 ```
 
-For files longer than ~2 hours or bulk jobs, use Azure Batch Transcription instead (not wired into OpenMontage).
+For files longer than ~2 hours or bulk jobs, use Azure Batch Transcription instead (not wired into Haike Video).
 
 #### What It Is Best For
 
@@ -386,7 +386,7 @@ For files longer than ~2 hours or bulk jobs, use Azure Batch Transcription inste
 
 Azure AI Speech Standard (S0) bills speech-to-text by audio-hour (roughly
 $1.00/audio-hour at time of writing; a free F0 tier includes a limited monthly
-allowance). OpenMontage estimates cost from the transcribed audio duration. See
+allowance). Haike Video estimates cost from the transcribed audio duration. See
 [Azure AI Speech pricing](https://azure.microsoft.com/pricing/details/cognitive-services/speech-services/) for current rates.
 
 ---
@@ -771,7 +771,7 @@ ffmpeg -version
 npx --yes hyperframes doctor
 ```
 
-The CLI is consumed as `npx hyperframes`. Do not use `npx @hyperframes/cli`; that package name is not the OpenMontage runtime path.
+The CLI is consumed as `npx hyperframes`. Do not use `npx @hyperframes/cli`; that package name is not the Haike Video runtime path.
 
 #### What HyperFrames Renders
 
@@ -782,7 +782,7 @@ The CLI is consumed as `npx hyperframes`. Do not use `npx @hyperframes/cli`; tha
 | **Website-to-video** | Browser-captured site compositions with HyperFrames validation |
 | **Character animation** | SVG character rigs, pose/action timelines, and GSAP acting beats rendered to `renders/final.mp4` |
 
-HyperFrames workspaces live under `projects/<project-name>/hyperframes/`. Final videos still follow the normal OpenMontage convention: `projects/<project-name>/renders/final.mp4`.
+HyperFrames workspaces live under `projects/<project-name>/hyperframes/`. Final videos still follow the normal Haike Video convention: `projects/<project-name>/renders/final.mp4`.
 
 **Cost:** Free. Always local.
 

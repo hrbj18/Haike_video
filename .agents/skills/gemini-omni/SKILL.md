@@ -13,9 +13,9 @@ metadata:
 
 # Gemini Omni Flash (Google DeepMind)
 
-Gemini Omni is Google DeepMind's video generation **and editing** model family, announced at I/O 2026. The first model, **Gemini Omni Flash** (`gemini-omni-flash-preview`, developer access since June 30, 2026), generates 3-10 second clips at 720p/24fps with synthesized audio via the Gemini **Interactions API**. Its differentiator in the OpenMontage fleet is **stateful conversational editing**: each generation returns an `interaction_id`, and a follow-up call with `previous_interaction_id` edits that video in place — no other wrapped provider can refine a clip without regenerating it.
+Gemini Omni is Google DeepMind's video generation **and editing** model family, announced at I/O 2026. The first model, **Gemini Omni Flash** (`gemini-omni-flash-preview`, developer access since June 30, 2026), generates 3-10 second clips at 720p/24fps with synthesized audio via the Gemini **Interactions API**. Its differentiator in the Haike Video fleet is **stateful conversational editing**: each generation returns an `interaction_id`, and a follow-up call with `previous_interaction_id` edits that video in place — no other wrapped provider can refine a clip without regenerating it.
 
-OpenMontage wraps it as `gemini_omni_video` (native Gemini API, no gateway). It shares `GOOGLE_API_KEY`/`GEMINI_API_KEY` with `google_imagen` and `google_tts` — one key, three capabilities. Paid tier only: ~$0.10 per second of output video (billed as 5,792 output tokens/sec at $17.50/1M).
+Haike Video wraps it as `gemini_omni_video` (native Gemini API, no gateway). It shares `GOOGLE_API_KEY`/`GEMINI_API_KEY` with `google_imagen` and `google_tts` — one key, three capabilities. Paid tier only: ~$0.10 per second of output video (billed as 5,792 output tokens/sec at $17.50/1M).
 
 ## When to pick it (and when not)
 
@@ -42,7 +42,7 @@ Describe **scene + camera + lighting + motion + audio**. Official example:
 
 ### Timecode syntax
 
-Schedule beats with bracketed ranges or natural language — this maps directly onto OpenMontage scene-plan timings:
+Schedule beats with bracketed ranges or natural language — this maps directly onto Haike Video scene-plan timings:
 
 ```
 [0-3s] A person is walking [3-6s] They stop and turn around

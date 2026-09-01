@@ -28,7 +28,7 @@ POST https://openspeech.bytedance.com/api/v3/tts/query
 
 This returns `audio_url` plus `sentences[].words[]` timing metadata that can be used to build subtitles.
 
-## OpenMontage Usage
+## Haike Video Usage
 
 Generate with the TTS selector:
 

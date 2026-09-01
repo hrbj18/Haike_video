@@ -1223,7 +1223,7 @@ def test_ai_director_visual_plan_routes_slots_and_keeps_the_plan_editable(projec
     })
 
     planned = [block for block in preview["items"][0]["blocks"] if block["status"] == "planned"]
-    assert captured["caption_owner"] == "OpenMontage 独立字幕层"
+    assert captured["caption_owner"] == "Haike Video 独立字幕层"
     assert captured["preferences"]["allowed_routes"] == ["hyperframes", "stock_video"]
     assert captured["preferences"]["primary_image_policy"] == "manual_only"
     assert [block["route"] for block in planned] == ["stock_video", "hyperframes"]

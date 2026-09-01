@@ -1,4 +1,4 @@
-# OpenMontage embedded local TTS runtime (installed into its own virtualenv).
+# Haike Video embedded local TTS runtime (installed into its own virtualenv).
 # Qwen3-TTS is Apache-2.0 and downloads model weights on first use.
 qwen-tts==0.1.1
 fastapi>=0.110,<1

@@ -46,7 +46,7 @@ function profileCard(profile) {
   const isDefault = center.default_voice && profile.id === center.default_voice.id;
   const card = el("article", { class: `voice-card${isSelected ? " selected" : ""}` },
     el("div", { class: "voice-card-top" },
-      el("div", {}, el("h3", {}, profile.name), el("p", {}, profile.description || "OpenMontage 本地音色")),
+      el("div", {}, el("h3", {}, profile.name), el("p", {}, profile.description || "Haike Video 本地音色")),
       isDefault ? el("span", { class: "badge default" }, "通用默认") : el("span", { class: "badge" }, profile.voice_type === "cloned" ? "克隆音色" : "预设音色"),
     ),
     el("dl", { class: "voice-facts" },
@@ -103,7 +103,7 @@ function render() {
   textarea.value = job.status === "generating" ? job.text || "" : "这是一段通用配音试听。语速自然、咬字清晰，适合中文知识类短视频旁白。";
 
   const service = el("section", { class: "service-strip" },
-    el("div", {}, el("p", { class: "eyebrow" }, "本机服务"), el("h2", {}, provider.name || "OpenMontage 本地配音"), el("p", {}, provider.detail || "")),
+    el("div", {}, el("p", { class: "eyebrow" }, "本机服务"), el("h2", {}, provider.name || "Haike Video 本地配音"), el("p", {}, provider.detail || "")),
     el("div", { class: "service-state" }, el("span", { class: `status ${provider.status || "unavailable"}` }, statusText[provider.status] || "未知"), el("span", {}, "不会把音色写死到某一个视频里")),
   );
   const defaultCard = el("section", { class: "default-card" },
@@ -114,13 +114,13 @@ function render() {
     el("div", { class: "panel-head" }, el("div", {}, el("p", { class: "eyebrow" }, "独立试听"), el("h2", {}, "先听音色，再用到视频"), el("p", {}, selected ? `当前试听：${selected.name}。此音频属于软件级试听，不写入任何项目。` : "请先选择一个音色。")), isGenerating ? el("span", { class: "status generating" }, "正在生成") : null),
     el("div", { class: "panel-body" }, textarea, el("div", { class: "audition-actions" }, button(isGenerating ? "正在生成试听…" : "生成试听", "primary", generatePreview, isGenerating || provider.status !== "available"), selected && center.default_voice && selected.id !== center.default_voice.id ? button("将当前试听音色设为默认", "quiet", () => setDefault(selected.id), isGenerating) : null)),
     job.status === "failed" ? el("p", { class: "error" }, job.error || "试听生成失败") : null,
-    job.status === "generating" ? el("p", { class: "hint" }, "OpenMontage 正在本机生成音频，页面会自动刷新。") : null,
+    job.status === "generating" ? el("p", { class: "hint" }, "Haike Video 正在本机生成音频，页面会自动刷新。") : null,
   );
-  const voiceGrid = el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("p", { class: "eyebrow" }, "音色目录"), el("h2", {}, "选择一个真实可用的本地音色"), el("p", {}, "预设与克隆音色都由 OpenMontage 私有目录管理；项目只保存音色编号。"))), el("div", { class: "voice-grid" }, (center.profiles || []).map(profileCard)));
+  const voiceGrid = el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("p", { class: "eyebrow" }, "音色目录"), el("h2", {}, "选择一个真实可用的本地音色"), el("p", {}, "预设与克隆音色都由 Haike Video 私有目录管理；项目只保存音色编号。"))), el("div", { class: "voice-grid" }, (center.profiles || []).map(profileCard)));
   const previews = el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("p", { class: "eyebrow" }, "近期试听"), el("h2", {}, "可重复试听的通用音频"))), (center.previews || []).length ? el("div", { class: "preview-list" }, center.previews.map(previewRow)) : el("div", { class: "empty" }, "还没有试听记录。先选一个音色，输入一句文案即可。"));
 
   app.replaceChildren(
-    el("header", { class: "topbar" }, el("a", { class: "back-link", href: backHref }, returnPath ? "返回当前项目" : "返回项目库"), el("div", { class: "title" }, el("p", { class: "eyebrow" }, "OpenMontage / 软件级功能"), el("h1", {}, "通用配音中心"), el("p", {}, "管理全局默认音色与独立试听；项目只生成、审核并引用自己的旁白文件。"))),
+    el("header", { class: "topbar" }, el("a", { class: "back-link", href: backHref }, returnPath ? "返回当前项目" : "返回项目库"), el("div", { class: "title" }, el("p", { class: "eyebrow" }, "Haike Video / 软件级功能"), el("h1", {}, "通用配音中心"), el("p", {}, "管理全局默认音色与独立试听；项目只生成、审核并引用自己的旁白文件。"))),
     el("div", { class: "layout" }, el("div", { class: "intro-column" }, service, defaultCard), audition),
     voiceGrid,
     previews,

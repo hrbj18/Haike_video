@@ -9,7 +9,7 @@ from uuid import uuid5
 
 import pytest
 
-from tools.audio.openmontage_tts_engine import (
+from tools.audio.haike_video_tts_engine import (
     IdempotencyConflict,
     JobLedgerError,
     ProfileError,
@@ -27,9 +27,9 @@ def test_clean_profile_store_exposes_checked_in_chinese_presets(tmp_path):
     profiles = store.public_profiles()
 
     assert {profile["id"] for profile in profiles} >= {
-        "openmontage-qwen-serena",
-        "openmontage-qwen-vivian",
-        "openmontage-qwen-dylan",
+        "haike_video-qwen-serena",
+        "haike_video-qwen-vivian",
+        "haike_video-qwen-dylan",
     }
     assert all(profile["voice_type"] == "preset" for profile in profiles)
     assert all(profile["available"] is True for profile in profiles)
@@ -203,7 +203,7 @@ def test_one_data_directory_cannot_be_owned_by_two_tts_instances(tmp_path):
 
 
 def test_model_cache_key_tracks_effective_model_identity(tmp_path, monkeypatch):
-    import tools.audio.openmontage_tts_engine as engine_module
+    import tools.audio.haike_video_tts_engine as engine_module
 
     fake_torch = ModuleType("torch")
     fake_torch.cuda = SimpleNamespace(is_available=lambda: False, empty_cache=lambda: None)
@@ -227,12 +227,12 @@ def test_model_cache_key_tracks_effective_model_identity(tmp_path, monkeypatch):
     monkeypatch.setattr(engine_module, "runtime_dependencies", lambda: {"qwen_tts": True, "torch": True, "soundfile": True, "numpy": True})
     runtime = QwenTTSRuntime(tmp_path)
 
-    monkeypatch.setenv("OPENMONTAGE_TTS_MAX_LOADED_MODELS", "2")
-    monkeypatch.setenv("OPENMONTAGE_TTS_CUSTOM_MODEL", "local/model-a")
+    monkeypatch.setenv("HAIKE_VIDEO_TTS_MAX_LOADED_MODELS", "2")
+    monkeypatch.setenv("HAIKE_VIDEO_TTS_CUSTOM_MODEL", "local/model-a")
     first = runtime._load_model("custom")
     assert runtime._load_model("custom") is first
     assert len(calls) == 1
-    monkeypatch.setenv("OPENMONTAGE_TTS_CUSTOM_MODEL", "local/model-b")
+    monkeypatch.setenv("HAIKE_VIDEO_TTS_CUSTOM_MODEL", "local/model-b")
     second = runtime._load_model("custom")
 
     assert first is not second
@@ -271,7 +271,7 @@ def test_clone_prompt_cache_key_includes_full_voice_signature(tmp_path):
 
 
 def test_atomic_json_replace_retries_windows_sharing_violation(tmp_path, monkeypatch):
-    import tools.audio.openmontage_tts_engine as engine_module
+    import tools.audio.haike_video_tts_engine as engine_module
 
     destination = tmp_path / "job.json"
     real_replace = engine_module.os.replace

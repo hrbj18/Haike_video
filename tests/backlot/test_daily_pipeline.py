@@ -201,15 +201,15 @@ def test_voicebox_preflight_starts_local_service_once(monkeypatch):
 
 def test_clean_install_uses_distinct_checked_in_role_presets(monkeypatch):
     monkeypatch.setattr(daily_pipeline, "ensure_voicebox_ready", lambda: {"profiles": [
-        {"id": "openmontage-qwen-serena", "name": "Qwen Serena"},
-        {"id": "openmontage-qwen-dylan", "name": "Qwen Dylan"},
+        {"id": "haike_video-qwen-serena", "name": "Qwen Serena"},
+        {"id": "haike_video-qwen-dylan", "name": "Qwen Dylan"},
     ]})
     monkeypatch.setattr(daily_pipeline, "ROLE_PROFILE_IDS", {"yaya": "missing-yaya", "mengmeng": "missing-mengmeng"})
 
     profiles = daily_pipeline._voicebox_profiles()
 
-    assert profiles["yaya"]["id"] == "openmontage-qwen-serena"
-    assert profiles["mengmeng"]["id"] == "openmontage-qwen-dylan"
+    assert profiles["yaya"]["id"] == "haike_video-qwen-serena"
+    assert profiles["mengmeng"]["id"] == "haike_video-qwen-dylan"
 
 
 def test_transient_media_stage_retries_only_current_worker(monkeypatch):

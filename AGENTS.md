@@ -1,4 +1,4 @@
-# OpenMontage
+# Haike Video
 
 **MANDATORY: Read `AGENT_GUIDE.md` before responding to ANY user message.**
 

@@ -4,8 +4,8 @@ from pathlib import Path
 
 from fastapi.testclient import TestClient
 
-from tools.audio.openmontage_tts_server import create_app
-from tools.audio.openmontage_tts_engine import IdempotencyConflict, JobLedgerError
+from tools.audio.haike_video_tts_server import create_app
+from tools.audio.haike_video_tts_engine import IdempotencyConflict, JobLedgerError
 
 
 VOICE_SIGNATURE = "a" * 64

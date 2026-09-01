@@ -1,6 +1,6 @@
-"""OpenMontage-owned Qwen3-TTS engine, profile store, and serial job queue.
+"""Haike Video-owned Qwen3-TTS engine, profile store, and serial job queue.
 
-Heavy model imports are intentionally lazy.  The main OpenMontage environment
+Heavy model imports are intentionally lazy.  The main Haike Video environment
 can discover this module without installing PyTorch; the dedicated TTS runtime
 created by ``scripts/setup_local_tts.ps1`` owns those dependencies.
 """
@@ -50,12 +50,12 @@ def utc_now() -> str:
 
 
 def data_dir_from_env() -> Path:
-    value = os.environ.get("OPENMONTAGE_TTS_DATA_DIR", "").strip()
+    value = os.environ.get("HAIKE_VIDEO_TTS_DATA_DIR", "").strip()
     return Path(value).expanduser().resolve() if value else DEFAULT_DATA_DIR
 
 
 def model_cache_from_env(data_dir: Path | None = None) -> Path:
-    value = os.environ.get("OPENMONTAGE_TTS_MODEL_CACHE", "").strip()
+    value = os.environ.get("HAIKE_VIDEO_TTS_MODEL_CACHE", "").strip()
     return Path(value).expanduser().resolve() if value else (data_dir or data_dir_from_env()) / "models"
 
 
@@ -170,9 +170,9 @@ class ProfileStore:
         profile = self.get(profile_id)
         voice_type = str(profile.get("voice_type") or "preset")
         model_id = (
-            os.environ.get("OPENMONTAGE_TTS_BASE_MODEL", DEFAULT_BASE_MODEL)
+            os.environ.get("HAIKE_VIDEO_TTS_BASE_MODEL", DEFAULT_BASE_MODEL)
             if voice_type == "cloned"
-            else os.environ.get("OPENMONTAGE_TTS_CUSTOM_MODEL", DEFAULT_CUSTOM_MODEL)
+            else os.environ.get("HAIKE_VIDEO_TTS_CUSTOM_MODEL", DEFAULT_CUSTOM_MODEL)
         )
         payload: dict[str, Any] = {
             "signature_version": 1,
@@ -181,7 +181,7 @@ class ProfileStore:
             "language": str(profile.get("language") or "zh"),
             "default_engine": str(profile.get("default_engine") or "qwen"),
             "model_id": model_id,
-            "seed": int(os.environ.get("OPENMONTAGE_TTS_SEED", "42")),
+            "seed": int(os.environ.get("HAIKE_VIDEO_TTS_SEED", "42")),
             "preset_voice_id": profile.get("preset_voice_id"),
         }
         if voice_type == "cloned":
@@ -275,21 +275,21 @@ class QwenTTSRuntime:
             from huggingface_hub import snapshot_download
             from qwen_tts import Qwen3TTSModel
 
-            configured = os.environ.get("OPENMONTAGE_TTS_DEVICE", "auto").strip().lower()
+            configured = os.environ.get("HAIKE_VIDEO_TTS_DEVICE", "auto").strip().lower()
             if configured in {"", "auto"}:
                 device = "cuda:0" if torch.cuda.is_available() else "cpu"
             else:
                 device = configured
             dtype = torch.bfloat16 if device.startswith("cuda") else torch.float32
             model_id = (
-                os.environ.get("OPENMONTAGE_TTS_BASE_MODEL", DEFAULT_BASE_MODEL)
+                os.environ.get("HAIKE_VIDEO_TTS_BASE_MODEL", DEFAULT_BASE_MODEL)
                 if kind == "base"
-                else os.environ.get("OPENMONTAGE_TTS_CUSTOM_MODEL", DEFAULT_CUSTOM_MODEL)
+                else os.environ.get("HAIKE_VIDEO_TTS_CUSTOM_MODEL", DEFAULT_CUSTOM_MODEL)
             )
             model_key = (kind, model_id, device, str(dtype))
             if model_key in self._models:
                 return self._models[model_key]
-            max_loaded = max(1, int(os.environ.get("OPENMONTAGE_TTS_MAX_LOADED_MODELS", "1")))
+            max_loaded = max(1, int(os.environ.get("HAIKE_VIDEO_TTS_MAX_LOADED_MODELS", "1")))
             if len(self._models) >= max_loaded:
                 self._models.clear()
                 self._clone_prompts.clear()
@@ -299,7 +299,7 @@ class QwenTTSRuntime:
                 if torch.cuda.is_available():
                     torch.cuda.empty_cache()
             self.model_cache.mkdir(parents=True, exist_ok=True)
-            offline = os.environ.get("OPENMONTAGE_TTS_OFFLINE", "").strip().lower() in {"1", "true", "yes"}
+            offline = os.environ.get("HAIKE_VIDEO_TTS_OFFLINE", "").strip().lower() in {"1", "true", "yes"}
             try:
                 model_path = snapshot_download(
                     repo_id=model_id,
@@ -318,7 +318,7 @@ class QwenTTSRuntime:
                 kwargs["local_files_only"] = True
             # qwen-tts 0.1.1 does not forward cache_dir to its nested speech
             # tokenizer loader. Passing the resolved snapshot directory keeps
-            # every nested component inside OpenMontage's private cache.
+            # every nested component inside Haike Video's private cache.
             model = Qwen3TTSModel.from_pretrained(model_path, **kwargs)
             self._models[model_key] = model
             return model
@@ -352,7 +352,7 @@ class QwenTTSRuntime:
         instruct: str = "",
         expected_voice_signature: str | None = None,
     ) -> dict[str, Any]:
-        max_chars = max(80, int(os.environ.get("OPENMONTAGE_TTS_MAX_CHARS", "500")))
+        max_chars = max(80, int(os.environ.get("HAIKE_VIDEO_TTS_MAX_CHARS", "500")))
         chunks = split_text(text, max_chars)
         if not chunks:
             raise ValueError("配音文本不能为空")
@@ -366,7 +366,7 @@ class QwenTTSRuntime:
             import soundfile as sf
             import torch
 
-            seed = int(os.environ.get("OPENMONTAGE_TTS_SEED", "42"))
+            seed = int(os.environ.get("HAIKE_VIDEO_TTS_SEED", "42"))
             torch.manual_seed(seed)
             language_name = self._language(language or profile.get("language"))
             voice_type = profile.get("voice_type")
@@ -403,7 +403,7 @@ class QwenTTSRuntime:
                 audio_parts.append(np.asarray(wavs[0], dtype=np.float32).reshape(-1))
 
             assert sample_rate is not None
-            silence_ms = max(0, int(os.environ.get("OPENMONTAGE_TTS_CHUNK_SILENCE_MS", "80")))
+            silence_ms = max(0, int(os.environ.get("HAIKE_VIDEO_TTS_CHUNK_SILENCE_MS", "80")))
             silence = np.zeros(int(sample_rate * silence_ms / 1000), dtype=np.float32)
             combined: list[Any] = []
             for index, part in enumerate(audio_parts):
@@ -532,7 +532,7 @@ class SerialTTSJobs:
         with self._lock:
             if self._thread and self._thread.is_alive():
                 return
-            self._thread = threading.Thread(target=self._worker, name="openmontage-tts", daemon=True)
+            self._thread = threading.Thread(target=self._worker, name="haike_video-tts", daemon=True)
             self._thread.start()
 
     def submit(self, payload: dict[str, Any]) -> dict[str, Any]:

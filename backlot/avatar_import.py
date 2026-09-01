@@ -2422,7 +2422,7 @@ def _assemble_avatar_package_parallel(project_dir: Path, payload: dict | None = 
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / "avatar-dialogue-master.mp4"
     candidate_output = output_dir / f".avatar-dialogue-master-{uuid4().hex}.mp4"
-    with tempfile.TemporaryDirectory(prefix="openmontage-avatar-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="haike_video-avatar-") as temp_dir:
         graph_path = Path(temp_dir) / "filter.txt"
         graph_path.write_text(graph, encoding="utf-8")
         command = [ffmpeg, "-y"]
@@ -2435,7 +2435,7 @@ def _assemble_avatar_package_parallel(project_dir: Path, payload: dict | None = 
             "-pix_fmt", "yuv420p", "-r", str(package["settings"]["fps"]), "-fps_mode", "cfr",
             "-c:a", "aac", "-b:a", "192k", "-ar", str(package["settings"]["audio_sample_rate"]), "-ac", "2",
             "-movflags", "+faststart",
-            "-metadata", "title=OpenMontage Avatar Dialogue Master",
+            "-metadata", "title=Haike Video Avatar Dialogue Master",
             "-metadata", "comment=Native avatar audio is the master timeline",
             str(candidate_output),
         ])

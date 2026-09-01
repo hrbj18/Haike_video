@@ -1,6 +1,6 @@
 ---
 name: lyria
-description: Generate and validate music with Google Lyria 3 through the Gemini Interactions API. Use before calling OpenMontage `google_music`, designing Lyria 3 Clip or Pro prompts, using image-to-music or custom lyrics, choosing between Lyria 3 and Lyria RealTime, diagnosing Google music-generation failures, or preparing exact-duration music for a video.
+description: Generate and validate music with Google Lyria 3 through the Gemini Interactions API. Use before calling Haike Video `google_music`, designing Lyria 3 Clip or Pro prompts, using image-to-music or custom lyrics, choosing between Lyria 3 and Lyria RealTime, diagnosing Google music-generation failures, or preparing exact-duration music for a video.
 ---
 
 # Google Lyria 3
@@ -28,7 +28,7 @@ Read [references/api-and-prompting.md](references/api-and-prompting.md) when cho
 | Full song, vocals, longer structure, image-conditioned score | `lyria-3-pro-preview` | Prompt-influenced duration up to roughly three minutes; currently $0.08/request |
 | Live, continuously steered instrumental performance | `lyria-realtime-exp` | Separate WebSocket workflow; do not route through `google_music` |
 
-The current OpenMontage `google_music` adapter is locked to `lyria-3-pro-preview`. It does not expose Clip, WAV response selection, multiple images, or RealTime controls. Surface that limitation rather than implying those options are available through the adapter.
+The current Haike Video `google_music` adapter is locked to `lyria-3-pro-preview`. It does not expose Clip, WAV response selection, multiple images, or RealTime controls. Surface that limitation rather than implying those options are available through the adapter.
 
 Do not change models silently. For a 30-second video, either obtain approval for Pro plus exact-duration mastering or use Clip through an explicitly supported path.
 
@@ -71,7 +71,7 @@ Treat the returned vocal as untrusted until auditioned. Check lyric adherence, l
 
 ## Treat Duration As Untrusted Until Probed
 
-Lyria 3 Pro duration is controlled through prompt instructions and timestamps, not an exact API parameter. The OpenMontage adapter appends a target-duration instruction, but its returned `duration_seconds` field is the request, not a media probe.
+Lyria 3 Pro duration is controlled through prompt instructions and timestamps, not an exact API parameter. The Haike Video adapter appends a target-duration instruction, but its returned `duration_seconds` field is the request, not a media probe.
 
 Always inspect the generated file:
 
@@ -91,12 +91,12 @@ If exact duration is required:
 
 ## Authenticate And Diagnose Safely
 
-The Gemini API commonly uses `GEMINI_API_KEY`. OpenMontage also supports `GOOGLE_API_KEY` and Vertex service-account credentials.
+The Gemini API commonly uses `GEMINI_API_KEY`. Haike Video also supports `GOOGLE_API_KEY` and Vertex service-account credentials.
 
 - Use one known credential path per run.
 - Never print keys or edit credential files while debugging.
 - Do not assume a rejected first key will fall through to a second configured key.
-- In the current OpenMontage resolver, `GOOGLE_API_KEY` takes precedence over `GEMINI_API_KEY` when both are non-empty.
+- In the current Haike Video resolver, `GOOGLE_API_KEY` takes precedence over `GEMINI_API_KEY` when both are non-empty.
 - Treat `403`, `API_KEY_SERVICE_BLOCKED`, and project/service restrictions as authentication or Google-project configuration failures, not prompt-quality failures.
 - Do not spend retries on permission failures. Resolve the credential/project path first.
 - Retry only transient rate-limit or timeout failures within the approved retry and budget policy.

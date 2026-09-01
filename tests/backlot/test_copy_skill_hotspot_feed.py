@@ -275,7 +275,7 @@ def test_reading_never_modifies_producer_pack(tmp_path: Path):
         for path in day.rglob("*")
         if path.is_file()
     }
-    load_copy_skill_hotspot_feed(root, "2026-08-28", snapshot_dir=tmp_path / "openmontage-snapshot")
+    load_copy_skill_hotspot_feed(root, "2026-08-28", snapshot_dir=tmp_path / "haike_video-snapshot")
     after = {
         path.relative_to(day).as_posix(): (path.stat().st_size, _sha(path))
         for path in day.rglob("*")

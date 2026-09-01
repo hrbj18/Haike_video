@@ -19,7 +19,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 FOOTAGE = Path(
     os.environ.get(
-        "OPENMONTAGE_PHASE2_COMPARISON_FOOTAGE",
+        "HAIKE_VIDEO_PHASE2_COMPARISON_FOOTAGE",
         PROJECT_ROOT / "tests" / "fixtures" / "phase2_comparison.mp4",
     )
 )

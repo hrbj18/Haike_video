@@ -26,7 +26,7 @@ ensure-venv:
 			exit 1; \
 		fi; \
 		"$(BASE_PYTHON)" -c "import sys; required=tuple(map(int, '$(PYTHON_VERSION)'.split('.')[:2])); raise SystemExit(0 if sys.version_info[:2] >= required else 1)" || { \
-			echo "ERROR: OpenMontage requires Python $(PYTHON_VERSION)+."; \
+			echo "ERROR: Haike Video requires Python $(PYTHON_VERSION)+."; \
 			echo "Install uv or Python $(PYTHON_VERSION)+, then run make again."; \
 			exit 1; \
 		}; \
@@ -37,7 +37,7 @@ ensure-venv:
 		}; \
 	fi
 	@$(RUN_PYTHON) -c "import sys; required=tuple(map(int, '$(PYTHON_VERSION)'.split('.')[:2])); raise SystemExit(0 if sys.version_info[:2] >= required else 1)" || { \
-		echo "ERROR: OpenMontage requires Python $(PYTHON_VERSION)+."; \
+		echo "ERROR: Haike Video requires Python $(PYTHON_VERSION)+."; \
 		echo "Current interpreter is $$($(RUN_PYTHON) -c 'import sys; print(\".\".join(map(str, sys.version_info[:3])))' 2>/dev/null || echo unavailable): $(RUN_PYTHON)"; \
 		echo "Activate a compatible environment or remove it so make can create $(VENV_DIR)."; \
 		exit 1; \

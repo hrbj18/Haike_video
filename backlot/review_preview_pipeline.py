@@ -619,7 +619,7 @@ def review_preview_preflight(
         blockers.append("请先完成人工脚本审核并通过正式脚本草案")
     frozen_voice, voice_error = _freeze_voice(capability_report)
     if not (capability_report.get("tts") or {}).get("available"):
-        blockers.append("OpenMontage 本地 Qwen3-TTS 当前不可用")
+        blockers.append("Haike Video 本地 Qwen3-TTS 当前不可用")
     if voice_error:
         blockers.append(voice_error)
     if frozen_voice is not None and not frozen_voice.get("voice_signature"):
@@ -1699,7 +1699,7 @@ def _aggregate_line_audio(
                     "source_type": "local_generated",
                     "path": str(scene_output),
                     "duration_seconds": media["duration_seconds"],
-                    "provider": "OpenMontage 本地配音",
+                    "provider": "Haike Video 本地配音",
                     "source_tool": "voicebox_tts",
                     "license": "本机 Qwen3-TTS 生成；按项目发布规范复核",
                     "generation": {

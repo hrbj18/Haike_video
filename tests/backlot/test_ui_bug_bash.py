@@ -177,7 +177,7 @@ def staged_backlot_server():
         probe.bind(("127.0.0.1", 0))
         port = int(probe.getsockname()[1])
     env = dict(os.environ)
-    env["OPENMONTAGE_PROJECTS_DIR"] = str(backlot_screenshot_stage.STAGE_DIR)
+    env["HAIKE_VIDEO_PROJECTS_DIR"] = str(backlot_screenshot_stage.STAGE_DIR)
     server = subprocess.Popen(
         [sys.executable, "-m", "backlot", "serve", "--port", str(port)],
         cwd=backlot_screenshot_stage.REPO_ROOT,

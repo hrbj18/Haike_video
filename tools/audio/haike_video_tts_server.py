@@ -1,4 +1,4 @@
-"""Local HTTP service for the OpenMontage embedded Qwen3-TTS runtime."""
+"""Local HTTP service for the Haike Video embedded Qwen3-TTS runtime."""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
-from tools.audio.openmontage_tts_engine import (
+from tools.audio.haike_video_tts_engine import (
     IdempotencyConflict,
     JobLedgerError,
     ProfileError,
@@ -43,7 +43,7 @@ class SpeakRequest(BaseModel):
 
 def create_app(data_dir: Path | None = None, jobs: SerialTTSJobs | None = None) -> FastAPI:
     service_jobs = jobs or SerialTTSJobs(data_dir or data_dir_from_env())
-    app = FastAPI(title="OpenMontage Local TTS", version="1.0.0")
+    app = FastAPI(title="Haike Video Local TTS", version="1.0.0")
     app.state.tts_jobs = service_jobs
 
     @app.get("/health")
@@ -52,7 +52,7 @@ def create_app(data_dir: Path | None = None, jobs: SerialTTSJobs | None = None) 
         missing = [name for name, available in dependencies.items() if not available]
         return {
             "status": "healthy" if not missing else "degraded",
-            "service": "openmontage-local-tts",
+            "service": "haike_video-local-tts",
             "version": "1.0.0",
             "dependencies": dependencies,
             "missing_dependencies": missing,
@@ -110,7 +110,7 @@ def create_app(data_dir: Path | None = None, jobs: SerialTTSJobs | None = None) 
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Run the OpenMontage local TTS service")
+    parser = argparse.ArgumentParser(description="Run the Haike Video local TTS service")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=17494)
     parser.add_argument("--data-dir", type=Path)
@@ -118,7 +118,7 @@ def main() -> int:
     if args.host not in {"127.0.0.1", "localhost", "::1"}:
         parser.error("The embedded TTS service may only bind to localhost")
     if args.data_dir:
-        os.environ["OPENMONTAGE_TTS_DATA_DIR"] = str(args.data_dir.resolve())
+        os.environ["HAIKE_VIDEO_TTS_DATA_DIR"] = str(args.data_dir.resolve())
     import uvicorn
 
     uvicorn.run(create_app(args.data_dir), host=args.host, port=args.port, log_level="info")

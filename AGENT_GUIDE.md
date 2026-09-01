@@ -1,4 +1,4 @@
-# OpenMontage Agent Fast Router
+# Haike Video Agent Fast Router
 
 This file is the mandatory first read for every request. It is intentionally short. Do not rebuild context by scanning the repository unless the current task requires it.
 
@@ -32,7 +32,7 @@ Do not update handoff files for ordinary questions, acknowledgements, or repeate
 
 ## 3. Video-production contract
 
-Actual media production must use the OpenMontage pipeline and its manifests. Codex may develop, diagnose, test, or recover that pipeline, but must not become an undocumented replacement producer.
+Actual media production must use the Haike Video pipeline and its manifests. Codex may develop, diagnose, test, or recover that pipeline, but must not become an undocumented replacement producer.
 
 Before a production run:
 

@@ -4,8 +4,8 @@
 
 ## 权威入口
 
-- 私有仓库：`https://github.com/hrbj18/haike`
-- 发布状态：`main` 已完成首次精简快照发布并核验；初始源码快照为 `3c35019195ac023c9a88008b9128f0a31ba4a7dd`。
+- 私有仓库：`https://github.com/hrbj18/Haike_video`
+- 发布状态：`main` 是 Haike Video 的权威精简源码快照；以远端 `main` 当前提交为准。
 - Windows 完整步骤：`docs/DEPLOYMENT_WINDOWS_ZH-CN.md`
 - 环境变量模板：`.env.example`
 - 一键安装：`scripts/setup.ps1`
@@ -14,7 +14,7 @@
 ## 新电脑顺序
 
 1. 安装 Git、64 位 Python 3.12、Node.js 22+。
-2. 克隆仓库，在根目录运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1`。
+2. 运行 `git clone https://github.com/hrbj18/Haike_video.git`，进入 `Haike_video` 根目录后执行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1`。
 3. 只在 `.env.local` 或 `.env.secrets.local` 写密钥；不要把真实值写回模板。
 4. 私下导入克隆音色、人物参考图和音乐。模型由安装器/官方加载器下载，不从 Git 获取。
 5. 配置 Pexels；有数字人路线再配置 RunningHub key、已发布 workflow ID、两位角色图与音色。
