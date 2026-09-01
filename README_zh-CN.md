@@ -42,6 +42,12 @@ npx hyperframes doctor
 
 真实密钥只能写入 `.env.local` 或 `.env.secrets.local`。
 
+GPT 中转站、豆包文本和 RunningHub 三组核心密钥可通过隐藏输入一次性配置：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\configure_core_secrets.py
+```
+
 - 无数字人路线通常需要 Pexels 和选定的文本模型。
 - 有数字人路线还需要 RunningHub 密钥/工作流、主持人参考图和对应音色。
 - 私有克隆音色、人物图、音乐、历史项目、模型缓存和付费产物不会通过 GitHub 分发。
@@ -75,6 +81,7 @@ npx hyperframes doctor
 - [Git 分支与版本管理](docs/GIT_WORKFLOW_ZH-CN.md)
 - [更新日志](CHANGELOG.md)
 - [Windows 完整部署指南](docs/DEPLOYMENT_WINDOWS_ZH-CN.md)
+- [同事与 Codex 核心密钥配置指令](docs/CORE_SECRETS_CODEX_HANDOFF_ZH-CN.md)
 - [智能体任务路由](AGENT_GUIDE.md)
 - [当前交接状态](docs/handoff/CURRENT_STATUS.md)
 - [供应商配置](docs/PROVIDERS.md)

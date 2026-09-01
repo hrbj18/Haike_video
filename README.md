@@ -42,6 +42,12 @@ npx hyperframes doctor
 
 Store credentials only in `.env.local` or `.env.secrets.local`.
 
+Configure the GPT relay, Doubao text API, and RunningHub credentials in one hidden-input session:
+
+```powershell
+.\.venv\Scripts\python.exe scripts\configure_core_secrets.py
+```
+
 - No-avatar production normally needs Pexels and the selected text model.
 - Digital-human production additionally needs the RunningHub key/workflow, presenter reference images, and compatible voices.
 - Private voice profiles, presenter images, music, projects, models, caches, and paid outputs are intentionally excluded from Git.
@@ -75,6 +81,7 @@ These checks do not submit paid RunningHub jobs or publish videos. Live provider
 - [Git branch and version workflow](docs/GIT_WORKFLOW_ZH-CN.md)
 - [Changelog](CHANGELOG.md)
 - [Windows deployment guide](docs/DEPLOYMENT_WINDOWS_ZH-CN.md)
+- [Core credential handoff for teammates and Codex](docs/CORE_SECRETS_CODEX_HANDOFF_ZH-CN.md)
 - [Agent task router](AGENT_GUIDE.md)
 - [Current handoff status](docs/handoff/CURRENT_STATUS.md)
 - [Provider configuration](docs/PROVIDERS.md)

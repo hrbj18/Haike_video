@@ -19,11 +19,11 @@
 
 ## 当前阶段
 
-产品品牌和发布仓库统一为 **Haike Video / 海客视频工厂**。权威私有仓库为 `https://github.com/hrbj18/Haike_video`；`main` 是 `v0.1.0` 稳定版，`dev` 是后续集成分支。根目录 `START_HERE.md` 是同事接手唯一入口，`VERSION`、`CHANGELOG.md` 和 `RELEASE_STATUS.md` 共同定义已发布范围。本机正式干净副本位于 `D:\codex_work\Haike_video`；旧开发目录不作为跨电脑部署入口。
+产品品牌和发布仓库统一为 **Haike Video / 海客视频工厂**。权威私有仓库为 `https://github.com/hrbj18/Haike_video`；`main` 是 `v0.1.1` 稳定版，`dev` 是后续集成分支。根目录 `START_HERE.md` 是同事接手唯一入口，`VERSION`、`CHANGELOG.md` 和 `RELEASE_STATUS.md` 共同定义已发布范围。本机正式干净副本位于 `D:\codex_work\Haike_video`；旧开发目录不作为跨电脑部署入口。
 
 GitHub 首页、README、代码标识、公开配置、测试和部署说明均使用 Haike Video 命名。AGPL 许可证要求的来源与版权信息只保留在 `LICENSE`、`UPSTREAM.md` 和 `THIRD_PARTY_NOTICES.md`，不作为产品品牌展示。密钥、私有音色、人物图、音乐、模型、缓存、项目媒体和付费产物均未进入 Git。
 
-新电脑按 `docs/DEPLOYMENT_WINDOWS_ZH-CN.md` 安装 Python 3.12、Node.js 22、核心/ASR/Remotion/本地 TTS 依赖，再运行预检、上下文审计和测试。静态通过不代表云端账号或私有素材已验收；迁移本地配置后仍需单独授权短样本真实验证。
+新电脑按 `docs/DEPLOYMENT_WINDOWS_ZH-CN.md` 安装 Python 3.12、Node.js 22、核心/ASR/Remotion/本地 TTS 依赖，再按 `docs/CORE_SECRETS_CODEX_HANDOFF_ZH-CN.md` 隐藏输入三组核心凭据，最后运行预检、上下文审计和测试。静态通过不代表云端账号或私有素材已验收；迁移本地配置后仍需单独授权短样本真实验证。
 
 ## 最近验证
 

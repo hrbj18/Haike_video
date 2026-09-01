@@ -37,6 +37,15 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1
 
 把真实值写入 `.env.local` 或 `.env.secrets.local`；两者都被 Git 忽略。不要修改 `.env.example` 填入真实值。
 
+安装完成后，可用隐藏输入一次性配置 GPT 中转站、豆包文本和 RunningHub 三组核心凭据：
+
+```powershell
+.\.venv\Scripts\python.exe scripts\configure_core_secrets.py
+.\.venv\Scripts\python.exe scripts\configure_core_secrets.py --check
+```
+
+完整的同事/Codex 安全交接指令见 [`CORE_SECRETS_CODEX_HANDOFF_ZH-CN.md`](CORE_SECRETS_CODEX_HANDOFF_ZH-CN.md)。脚本不联网、不验证余额，也不会发起付费任务。
+
 基础无数字人预览通常需要：
 
 - `PEXELS_API_KEY`：下载实拍素材；

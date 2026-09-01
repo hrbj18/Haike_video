@@ -9,6 +9,8 @@
 - 版本与分支规则：`VERSION`、`CHANGELOG.md`、`docs/GIT_WORKFLOW_ZH-CN.md`
 - Windows 完整步骤：`docs/DEPLOYMENT_WINDOWS_ZH-CN.md`
 - 环境变量模板：`.env.example`
+- 核心密钥安全交接：`docs/CORE_SECRETS_CODEX_HANDOFF_ZH-CN.md`
+- 核心密钥隐藏输入脚本：`scripts/configure_core_secrets.py`
 - 一键安装：`scripts/setup.ps1`
 - 启动与预检：`启动工作台.bat`、`scripts/preflight.ps1`
 
@@ -16,7 +18,7 @@
 
 1. 安装 Git、64 位 Python 3.12、Node.js 22+。
 2. 运行 `git clone https://github.com/hrbj18/Haike_video.git`，进入 `Haike_video` 根目录后执行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1`。
-3. 只在 `.env.local` 或 `.env.secrets.local` 写密钥；不要把真实值写回模板。
+3. 运行 `scripts/configure_core_secrets.py` 隐藏输入 GPT 中转站、豆包文本与 RunningHub 密钥；只在 `.env.local` 或 `.env.secrets.local` 写密钥，不要把真实值写回模板。
 4. 私下导入克隆音色、人物参考图和音乐。模型由安装器/官方加载器下载，不从 Git 获取。
 5. 配置 Pexels；有数字人路线再配置 RunningHub key、已发布 workflow ID、两位角色图与音色。
 6. 运行 `scripts/preflight.ps1`、上下文审计，以及 `tests/backlot tests/contracts tests/lib tests/tools tests/unit` 自动套件；pytest 必须带 `--import-mode=importlib --basetemp=.p`，全部通过后才进行短样本真实验收。不要把旧 `tests/qa` 脚本当作默认自动套件。

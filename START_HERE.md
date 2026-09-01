@@ -12,7 +12,7 @@
 | 接手开发 | [Git 分支与版本规则](docs/GIT_WORKFLOW_ZH-CN.md) | [当前状态](docs/handoff/CURRENT_STATUS.md) |
 | Codex/智能体继续开发 | [AGENT_GUIDE.md](AGENT_GUIDE.md) | `docs/handoff/README.md` 路由的至多一个专题 |
 | 了解稳定版能力 | [发布状态](docs/handoff/RELEASE_STATUS.md) | [CHANGELOG.md](CHANGELOG.md) |
-| 配置密钥或供应商 | [Windows 部署指南](docs/DEPLOYMENT_WINDOWS_ZH-CN.md) | `.env.example` |
+| 一次性配置核心密钥 | [核心密钥配置指令](docs/CORE_SECRETS_CODEX_HANDOFF_ZH-CN.md) | [Windows 部署指南](docs/DEPLOYMENT_WINDOWS_ZH-CN.md) |
 
 ## 五分钟接手检查
 
@@ -36,6 +36,7 @@ Get-Content docs\handoff\RELEASE_STATUS.md
 git clone https://github.com/hrbj18/Haike_video.git
 Set-Location Haike_video
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\setup.ps1
+.\.venv\Scripts\python.exe scripts\configure_core_secrets.py
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\preflight.ps1
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts\start_backlot.ps1
 ```
