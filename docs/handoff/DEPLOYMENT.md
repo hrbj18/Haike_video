@@ -5,7 +5,8 @@
 ## 权威入口
 
 - 私有仓库：`https://github.com/hrbj18/Haike_video`
-- 发布状态：`main` 是 Haike Video 的权威精简源码快照；以远端 `main` 当前提交为准。
+- 发布状态：`main` 是稳定版，`dev` 是集成版；当前版本、基线与能力边界见 `RELEASE_STATUS.md`。
+- 版本与分支规则：`VERSION`、`CHANGELOG.md`、`docs/GIT_WORKFLOW_ZH-CN.md`
 - Windows 完整步骤：`docs/DEPLOYMENT_WINDOWS_ZH-CN.md`
 - 环境变量模板：`.env.example`
 - 一键安装：`scripts/setup.ps1`

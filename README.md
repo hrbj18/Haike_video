@@ -1,5 +1,7 @@
 # Haike Video
 
+> **Team handoff / new computer / continued development:** start with [START_HERE.md](START_HERE.md). It links the exact deployment steps, published-version status, branch workflow, and agent handoff without requiring a repository-wide search.
+
 Haike Video is a local-first automated video production workbench for turning a title or script into a review-ready preview. It combines editable script drafts, local narration, stock-media planning, digital-human generation, subtitles, background music, and deterministic composition in one recoverable workflow.
 
 The application stops at `review_ready`. It never approves or publishes a formal video automatically.
@@ -68,6 +70,10 @@ These checks do not submit paid RunningHub jobs or publish videos. Live provider
 
 ## Documentation
 
+- [Team handoff — start here](START_HERE.md)
+- [Published version status](docs/handoff/RELEASE_STATUS.md)
+- [Git branch and version workflow](docs/GIT_WORKFLOW_ZH-CN.md)
+- [Changelog](CHANGELOG.md)
 - [Windows deployment guide](docs/DEPLOYMENT_WINDOWS_ZH-CN.md)
 - [Agent task router](AGENT_GUIDE.md)
 - [Current handoff status](docs/handoff/CURRENT_STATUS.md)

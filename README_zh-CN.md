@@ -1,5 +1,7 @@
 # Haike Video｜海客视频工厂
 
+> **同事接手、新电脑部署或继续开发：请先打开 [START_HERE.md](START_HERE.md)。** 这一页会直接路由到已发布版本、安装步骤、分支规则和智能体交接，不需要逐个翻找文档。
+
 Haike Video 是一个本地优先的自动化视频生产工作台。用户只需提供标题或脚本，即可经过可编辑脚本草案、本地配音、画面规划、数字人、字幕、背景音乐与确定性合成，得到可人工观看的审核预览。
 
 系统终点为 `review_ready`，不会自动批准或发布正式视频。
@@ -68,6 +70,10 @@ npx hyperframes doctor
 
 ## 文档入口
 
+- [同事接手唯一入口](START_HERE.md)
+- [GitHub 已发布版本状态](docs/handoff/RELEASE_STATUS.md)
+- [Git 分支与版本管理](docs/GIT_WORKFLOW_ZH-CN.md)
+- [更新日志](CHANGELOG.md)
 - [Windows 完整部署指南](docs/DEPLOYMENT_WINDOWS_ZH-CN.md)
 - [智能体任务路由](AGENT_GUIDE.md)
 - [当前交接状态](docs/handoff/CURRENT_STATUS.md)

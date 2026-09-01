@@ -1,6 +1,6 @@
 # Haike Video 轻量交接入口
 
-更新时间：2026-08-21
+更新时间：2026-09-01
 
 ## 读取规则
 
@@ -11,7 +11,10 @@
 
 ## 当前任务入口
 
-当前优先级是完成私有 GitHub 首次发布和跨电脑部署交接；先读 `CURRENT_STATUS.md` 与 `DEPLOYMENT.md`。首次发布后再恢复视频生产。
+- 同事第一次接手：仓库根目录 `START_HERE.md`。
+- 当前开发：`CURRENT_STATUS.md`，再按任务选至多一个专题。
+- GitHub 稳定版、分支和部署：`RELEASE_STATUS.md` 与 `DEPLOYMENT.md`。
+- 版本发布步骤：`docs/GIT_WORKFLOW_ZH-CN.md`。
 
 ## 更新规则
 

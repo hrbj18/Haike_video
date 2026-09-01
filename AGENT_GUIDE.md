@@ -12,6 +12,7 @@ This file is the mandatory first read for every request. It is intentionally sho
   - code and test entrypoints: `docs/handoff/CODE_MAP.md`
   - daily technology brief: `docs/handoff/DAILY_TECH_BRIEF.md`
   - GitHub release and cross-machine setup: `docs/handoff/DEPLOYMENT.md`
+  - exact published version and branch ownership: `docs/handoff/RELEASE_STATUS.md`
 - Read `PROJECT_CONTEXT.md` only when deeper architecture or repository conventions are needed.
 - Old task guides and PRDs are historical evidence. Do not treat them as current rules when they conflict with `docs/handoff/`.
 - Do not default-scan `projects/`, `.backlot/daily-runs/`, logs, media, old guides, full Git history, or the whole dirty diff. Inspect only paths needed to answer or change the requested behavior.
