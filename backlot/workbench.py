@@ -35,7 +35,8 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from backlot.state import _collect_artifacts, _collect_checkpoints, _read_json
-from backlot.audio_center import get_default_voice, read_audio_center
+from backlot.audio_center import get_default_voice, get_voice_profile, read_audio_center
+from backlot.tts_runtime import generate_voice_audio
 from backlot.ai_text import TextAIError, plan_visual_copy, plan_visual_routes, read_text_ai_config
 from backlot.visual_director import DIRECTOR_VERSION, candidate_asset_id, decide_candidate, prepare_candidates
 from backlot.avatar_import import AvatarImportError, initialize_avatar_package, read_avatar_package
@@ -7450,7 +7451,7 @@ def remove_surgical_directive(project_dir: Path, scene_id: str, directive_id: st
 
 def _safe_automation_error(error: object) -> str:
     message = str(error or "自动生产任务失败")
-    for variable in ("OPENAI_API_KEY", "PEXELS_API_KEY", "VOICEBOX_API_KEY"):
+    for variable in ("OPENAI_API_KEY", "PEXELS_API_KEY", "VOICEBOX_API_KEY", "DOUBAO_SPEECH_API_KEY"):
         secret = os.environ.get(variable)
         if secret:
             message = message.replace(secret, "[已隐藏]")
@@ -9584,14 +9585,14 @@ def start_project_narration(project_dir: Path, payload: dict) -> dict:
     narration_job = automation["narration_generation"]
     if narration_job.get("status") == "generating":
         raise WorkbenchError("项目旁白正在生成，请不要重复点击")
-    if VoiceboxTTS().get_status().value != "available":
-        raise WorkbenchError("Haike Video 本地配音当前不可用，请先完成安装并启动服务")
     voice = get_default_voice()
-    if not voice or not voice.get("id"):
+    if not voice or not voice.get("id") or voice.get("available") is False:
         raise WorkbenchError("尚未在通用配音中心设置可用默认音色，请先选择并试听")
+    provider_id = str(voice.get("provider_id") or "voicebox_tts")
+    provider_name = str(voice.get("provider_name") or "Haike Video 本地配音")
     automation["status"] = "generating_narration"
     automation["voice"] = {
-        "provider": "voicebox_tts", "source": "audio_center", "label": voice["name"],
+        "provider": provider_id, "provider_name": provider_name, "source": "audio_center", "label": voice["name"],
         "profile_id": voice["id"], "profile_name": voice["name"],
         "default_engine": voice.get("default_engine"),
     }
@@ -9602,7 +9603,7 @@ def start_project_narration(project_dir: Path, payload: dict) -> dict:
     }
     _mark_render_needs_refresh(state, "项目旁白将重新生成，原全片预览与正式成片会在新时间线下过期")
     automation["render"] = {"status": "awaiting_narration", "runtime": "ffmpeg", "output_path": None, "error": ""}
-    _decision(state, "voice_selection", "旁白配音", f"Haike Video 本地配音 / {voice['name']}", "引用通用配音中心的当前默认音色；项目只记录引用与生成结果。")
+    _decision(state, "voice_selection", "旁白配音", f"{provider_name} / {voice['name']}", "引用通用配音中心的当前默认音色；任务已冻结供应商和音色，后续修改通用默认不会影响本次生成。")
     _activity(state, "narration_generation_started", f"开始用通用音色“{voice['name']}”生成项目旁白；完成后将以真实时长建立时间线")
     return _save(project_dir, state)
 
@@ -9632,7 +9633,20 @@ def generate_project_narration(project_dir: Path) -> dict:
     profile_id = automation["voice"].get("profile_id")
     if not profile_id:
         raise WorkbenchError("项目未记录有效的通用音色引用，请重新开始生成旁白")
-    voice_tool = VoiceboxTTS()
+    profile = get_voice_profile(str(profile_id))
+    if not profile and str(automation["voice"].get("provider") or "voicebox_tts") == "voicebox_tts":
+        profile = {
+            "id": str(profile_id),
+            "name": str(automation["voice"].get("profile_name") or profile_id),
+            "provider_id": "voicebox_tts",
+            "provider_name": "Haike Video 本地配音",
+        }
+    if not profile:
+        raise WorkbenchError("项目冻结的配音音色已不存在，请回到配音中心重新选择")
+    frozen_provider = str(automation["voice"].get("provider") or "voicebox_tts")
+    if str(profile.get("provider_id") or "voicebox_tts") != frozen_provider:
+        raise WorkbenchError("项目冻结的配音供应商与当前音色配置不一致，请重新开始旁白任务")
+    provider_name = str(profile.get("provider_name") or automation["voice"].get("provider_name") or "Haike Video 本地配音")
     natural_audio: list[Path] = []
     ffmpeg = _ffmpeg_available()
     if not ffmpeg:
@@ -9644,11 +9658,9 @@ def generate_project_narration(project_dir: Path) -> dict:
         if not text:
             raise WorkbenchError(f"{scene.get('id')} 缺少可配音的脚本内容")
         source_audio = project_dir / "assets" / "audio" / "voicebox" / f"{scene['id']}.wav"
-        result = voice_tool.execute({
-            "text": text, "profile_id": profile_id, "language": "zh", "output_path": str(source_audio),
-        })
+        result = generate_voice_audio(text=text, profile=profile, output_path=source_audio, language="zh")
         if not result.success or not source_audio.is_file():
-            raise WorkbenchError(_safe_automation_error(result.error or f"{scene['id']} 的本地配音未生成"))
+            raise WorkbenchError(_safe_automation_error(result.error or f"{scene['id']} 的配音未生成"))
         duration_seconds = _probe_duration_seconds(source_audio, ffmpeg, 0)
         if duration_seconds <= 0:
             raise WorkbenchError(f"无法读取 {scene['id']} 的本地配音时长")
@@ -9656,8 +9668,8 @@ def generate_project_narration(project_dir: Path) -> dict:
         audio_asset = _append_asset(project_dir, state, {
             "name": f"{scene.get('title') or scene['id']} · {automation['voice']['label']}旁白", "type": "audio", "source_type": "local_generated",
             "path": str(source_audio), "duration_seconds": duration_seconds,
-            "provider": "Haike Video 本地配音", "source_tool": "voicebox_tts", "license": "本机 Qwen3-TTS 生成；按项目发布规范复核",
-            "generation": {"profile_id": profile_id, "profile_name": automation["voice"]["profile_name"], "voice_label": automation["voice"]["label"], "scene_id": scene["id"], "generated_at": _now(), "timing_mode": "natural"},
+            "provider": provider_name, "source_tool": frozen_provider, "license": "由所选配音供应商生成；请按项目发布规范复核",
+            "generation": {"provider_id": frozen_provider, "profile_id": profile_id, "profile_name": automation["voice"]["profile_name"], "voice_label": automation["voice"]["label"], "scene_id": scene["id"], "generated_at": _now(), "timing_mode": "natural", "metadata_path": (result.data or {}).get("metadata_path")},
         })
         scene_narration = scene.get("narration") if isinstance(scene.get("narration"), dict) else _scene_narration_default(text)
         scene["narration"] = scene_narration
@@ -9738,9 +9750,6 @@ def start_scene_narration_candidate(project_dir: Path, scene_id: str, payload: d
     narration["job"] = job
     if job.get("status") == "generating":
         raise WorkbenchError("这个片段的候选配音正在生成，请等待完成后再试")
-    if VoiceboxTTS().get_status().value != "available":
-        raise WorkbenchError("Haike Video 本地配音当前不可用，请先完成安装并启动服务")
-
     catalog = voice_catalog()
     profiles = catalog.get("profiles") if isinstance(catalog.get("profiles"), list) else []
     requested_profile = str(payload.get("profile_id") or "").strip()
@@ -9748,7 +9757,9 @@ def start_scene_narration_candidate(project_dir: Path, scene_id: str, payload: d
     if selected is None:
         selected = catalog.get("default_voice") if not requested_profile else None
     if not selected or not selected.get("id"):
-        raise WorkbenchError("请先在通用配音中心确认可用音色，或在这里选择一个本地音色")
+        raise WorkbenchError("请先在通用配音中心确认可用音色，或在这里选择一个音色")
+    if selected.get("available") is False:
+        raise WorkbenchError(f"{selected.get('provider_name') or '所选配音服务'}当前不可用，请先完成配置")
 
     text = str(payload.get("text") or narration.get("text") or _scene_text(project_dir, state, scene)).strip()
     if not text:
@@ -9761,6 +9772,7 @@ def start_scene_narration_candidate(project_dir: Path, scene_id: str, payload: d
     narration["job"] = {
         "id": f"NJOB-{uuid4().hex[:10]}", "status": "generating", "version_id": version_id,
         "text": text, "profile_id": selected["id"], "profile_name": selected.get("name") or selected["id"],
+        "provider_id": selected.get("provider_id") or "voicebox_tts", "provider_name": selected.get("provider_name") or "Haike Video 本地配音",
         "started_at": _now(), "error": "",
     }
     _activity(state, "scene_narration_started", f"开始生成 {scene_id} 的候选配音 {version_id}", scene_id=scene_id, narration_version_id=version_id)
@@ -9781,15 +9793,23 @@ def generate_scene_narration_candidate(project_dir: Path, scene_id: str) -> dict
     if not version_id:
         raise WorkbenchError("片段候选配音缺少版本编号")
     raw_audio = project_dir / "assets" / "audio" / "voicebox" / scene_id / f"{version_id}-raw.wav"
-    result = VoiceboxTTS().execute({
-        "text": job["text"], "profile_id": job["profile_id"], "language": "zh", "output_path": str(raw_audio),
-    })
+    profile = get_voice_profile(str(job["profile_id"]))
+    if not profile and str(job.get("provider_id") or "voicebox_tts") == "voicebox_tts":
+        profile = {
+            "id": str(job["profile_id"]),
+            "name": str(job.get("profile_name") or job["profile_id"]),
+            "provider_id": "voicebox_tts",
+            "provider_name": "Haike Video 本地配音",
+        }
+    if not profile or str(profile.get("provider_id") or "voicebox_tts") != str(job.get("provider_id") or "voicebox_tts"):
+        raise WorkbenchError("候选配音冻结的音色配置已变化，请重新发起候选生成")
+    result = generate_voice_audio(text=str(job["text"]), profile=profile, output_path=raw_audio, language="zh")
     state = _load_for_write(project_dir)
     scene = _find(state["scenes"], scene_id, "场景")
     narration = scene.get("narration") if isinstance(scene.get("narration"), dict) else {}
     job = narration.get("job") if isinstance(narration.get("job"), dict) else {}
     if not result.success or not raw_audio.is_file():
-        message = _safe_automation_error(result.error or "本地配音没有返回可试听的音频文件")
+        message = _safe_automation_error(result.error or "配音服务没有返回可试听的音频文件")
         narration["status"] = "candidate_failed"
         narration["job"] = {**job, "status": "failed", "finished_at": _now(), "error": message}
         _activity(state, "scene_narration_failed", f"{scene_id} 候选配音生成失败：{message}", scene_id=scene_id)
@@ -9810,10 +9830,11 @@ def generate_scene_narration_candidate(project_dir: Path, scene_id: str) -> dict
     audio_asset = _append_asset(project_dir, state, {
         "name": f"{scene.get('title') or scene_id} · {job.get('profile_name') or '本地音色'} 候选配音",
         "type": "audio", "source_type": "local_generated", "path": str(raw_audio), "duration_seconds": duration_seconds,
-        "provider": "Haike Video 本地配音", "source_tool": "voicebox_tts", "license": "本机 Qwen3-TTS 生成；请按项目发布规范复核",
+        "provider": job.get("provider_name") or "Haike Video 本地配音", "source_tool": job.get("provider_id") or "voicebox_tts", "license": "由所选配音供应商生成；请按项目发布规范复核",
         "generation": {
-            "profile_id": job["profile_id"], "profile_name": job.get("profile_name"), "scene_id": scene_id,
+            "provider_id": job.get("provider_id") or "voicebox_tts", "profile_id": job["profile_id"], "profile_name": job.get("profile_name"), "scene_id": scene_id,
             "narration_version_id": version_id, "generated_at": _now(), "timing_mode": "natural",
+            "metadata_path": (result.data or {}).get("metadata_path"),
         },
     })
     version = {

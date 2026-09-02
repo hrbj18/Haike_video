@@ -391,7 +391,9 @@ class DoubaoTTS(BaseTool):
     @staticmethod
     def _safe_error(exc: Exception) -> str:
         # Avoid ever echoing request headers or secrets in user-visible errors.
-        return str(exc).replace(os.environ.get("DOUBAO_SPEECH_API_KEY", ""), "[redacted]")
+        message = str(exc)
+        secret = os.environ.get("DOUBAO_SPEECH_API_KEY", "")
+        return message.replace(secret, "[redacted]") if secret else message
 
     @staticmethod
     def _extension_for_format(fmt: str) -> str:

@@ -3236,6 +3236,26 @@ def test_separated_voicebox_narration_and_video_render_create_a_reviewable_final
     assert all(segment["versions"][0].get("artifact_path") for segment in completed["segments"])
 
 
+def test_project_narration_freezes_cloud_provider_and_profile(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    workbench_mod.bootstrap_workbench(project)
+    monkeypatch.setattr(workbench_mod, "get_default_voice", lambda: {
+        "id": "doubao:yaya",
+        "name": "雅雅",
+        "provider_id": "doubao",
+        "provider_name": "豆包云端配音",
+        "default_engine": "doubao_speech_2_0",
+        "available": True,
+    })
+
+    queued = workbench_mod.start_project_narration(project, {"confirmed": True})
+
+    assert queued["automation"]["voice"]["provider"] == "doubao"
+    assert queued["automation"]["voice"]["provider_name"] == "豆包云端配音"
+    assert queued["automation"]["voice"]["profile_id"] == "doubao:yaya"
+    assert queued["automation"]["narration_generation"]["status"] == "generating"
+
+
 def test_full_preview_is_independent_from_approvals_and_batch_confirmation(projects_root, monkeypatch):
     project = make_project(projects_root)
     state = workbench_mod.bootstrap_workbench(project)

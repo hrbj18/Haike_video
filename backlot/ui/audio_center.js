@@ -46,17 +46,19 @@ function profileCard(profile) {
   const isDefault = center.default_voice && profile.id === center.default_voice.id;
   const card = el("article", { class: `voice-card${isSelected ? " selected" : ""}` },
     el("div", { class: "voice-card-top" },
-      el("div", {}, el("h3", {}, profile.name), el("p", {}, profile.description || "Haike Video 本地音色")),
-      isDefault ? el("span", { class: "badge default" }, "通用默认") : el("span", { class: "badge" }, profile.voice_type === "cloned" ? "克隆音色" : "预设音色"),
+      el("div", {}, el("h3", {}, profile.name), el("p", {}, profile.description || profile.provider_name || "Haike Video 音色")),
+      isDefault ? el("span", { class: "badge default" }, "通用默认") : el("span", { class: "badge" }, profile.voice_type === "cloud" ? "云端音色" : (profile.voice_type === "cloned" ? "克隆音色" : "预设音色")),
     ),
     el("dl", { class: "voice-facts" },
       el("div", {}, el("dt", {}, "引擎"), el("dd", {}, profile.default_engine || "自动")),
       el("div", {}, el("dt", {}, "语言"), el("dd", {}, profile.language || "中文")),
+      el("div", {}, el("dt", {}, "来源"), el("dd", {}, profile.provider_name || "本地")),
+      el("div", {}, el("dt", {}, "状态"), el("dd", {}, profile.available === false ? "尚未配置" : "可用")),
     ),
     el("p", { class: "profile-id" }, `音色编号：${profile.id}`),
     el("div", { class: "card-actions" },
-      button(isSelected ? "已选作试听" : "选择试听", isSelected ? "quiet" : "", () => { selectedProfileId = profile.id; render(); }),
-      !isDefault ? button("设为通用默认", "quiet", () => setDefault(profile.id)) : null,
+      button(isSelected ? "已选作试听" : "选择试听", isSelected ? "quiet" : "", () => { selectedProfileId = profile.id; render(); }, profile.available === false),
+      !isDefault ? button("设为通用默认", "quiet", () => setDefault(profile.id), profile.available === false) : null,
     ),
   );
   return card;
@@ -76,7 +78,7 @@ async function generatePreview() {
   try {
     center = await request("/previews/jobs", { method: "POST", body: { text, profile_id: selectedProfileId } });
     render();
-    showToast("试听已进入本机队列，生成期间会自动刷新状态。");
+    showToast("试听已进入配音队列，生成期间会自动刷新状态。");
     schedulePoll();
   } catch (error) { showToast(error.message || "试听任务未能启动", true); }
 }
@@ -102,9 +104,10 @@ function render() {
   const textarea = el("textarea", { id: "previewText", maxlength: "500", placeholder: "例如：今天的内容，用三个步骤帮你建立一套高效阅读的方法。" });
   textarea.value = job.status === "generating" ? job.text || "" : "这是一段通用配音试听。语速自然、咬字清晰，适合中文知识类短视频旁白。";
 
+  const providerSummary = (center.providers || []).map((item) => `${item.name}：${statusText[item.status] || "未知"}`).join("；");
   const service = el("section", { class: "service-strip" },
-    el("div", {}, el("p", { class: "eyebrow" }, "本机服务"), el("h2", {}, provider.name || "Haike Video 本地配音"), el("p", {}, provider.detail || "")),
-    el("div", { class: "service-state" }, el("span", { class: `status ${provider.status || "unavailable"}` }, statusText[provider.status] || "未知"), el("span", {}, "不会把音色写死到某一个视频里")),
+    el("div", {}, el("p", { class: "eyebrow" }, "可切换配音服务"), el("h2", {}, provider.name || "Haike Video 配音服务"), el("p", {}, provider.detail || "")),
+    el("div", { class: "service-state" }, el("span", { class: `status ${provider.status || "unavailable"}` }, statusText[provider.status] || "未知"), el("span", {}, providerSummary || "尚未发现可用服务")),
   );
   const defaultCard = el("section", { class: "default-card" },
     el("div", {}, el("p", { class: "eyebrow" }, "软件通用默认"), el("h2", {}, center.default_voice ? center.default_voice.name : "尚未选择音色"), el("p", {}, center.default_voice ? `${center.default_voice.description || "可用于所有新项目"}` : "请从下方选择一个可用音色。")),
@@ -112,11 +115,11 @@ function render() {
   );
   const audition = el("section", { class: "panel audition" },
     el("div", { class: "panel-head" }, el("div", {}, el("p", { class: "eyebrow" }, "独立试听"), el("h2", {}, "先听音色，再用到视频"), el("p", {}, selected ? `当前试听：${selected.name}。此音频属于软件级试听，不写入任何项目。` : "请先选择一个音色。")), isGenerating ? el("span", { class: "status generating" }, "正在生成") : null),
-    el("div", { class: "panel-body" }, textarea, el("div", { class: "audition-actions" }, button(isGenerating ? "正在生成试听…" : "生成试听", "primary", generatePreview, isGenerating || provider.status !== "available"), selected && center.default_voice && selected.id !== center.default_voice.id ? button("将当前试听音色设为默认", "quiet", () => setDefault(selected.id), isGenerating) : null)),
+    el("div", { class: "panel-body" }, textarea, el("div", { class: "audition-actions" }, button(isGenerating ? "正在生成试听…" : "生成试听", "primary", generatePreview, isGenerating || !selected || selected.available === false), selected && center.default_voice && selected.id !== center.default_voice.id ? button("将当前试听音色设为默认", "quiet", () => setDefault(selected.id), isGenerating || selected.available === false) : null)),
     job.status === "failed" ? el("p", { class: "error" }, job.error || "试听生成失败") : null,
-    job.status === "generating" ? el("p", { class: "hint" }, "Haike Video 正在本机生成音频，页面会自动刷新。") : null,
+    job.status === "generating" ? el("p", { class: "hint" }, `Haike Video 正在通过${job.provider_name || "所选服务"}生成音频，页面会自动刷新。`) : null,
   );
-  const voiceGrid = el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("p", { class: "eyebrow" }, "音色目录"), el("h2", {}, "选择一个真实可用的本地音色"), el("p", {}, "预设与克隆音色都由 Haike Video 私有目录管理；项目只保存音色编号。"))), el("div", { class: "voice-grid" }, (center.profiles || []).map(profileCard)));
+  const voiceGrid = el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("p", { class: "eyebrow" }, "音色目录"), el("h2", {}, "选择本地或云端音色"), el("p", {}, "任务启动时会冻结供应商和音色；切换通用默认不会影响正在运行的视频。"))), el("div", { class: "voice-grid" }, (center.profiles || []).map(profileCard)));
   const previews = el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("p", { class: "eyebrow" }, "近期试听"), el("h2", {}, "可重复试听的通用音频"))), (center.previews || []).length ? el("div", { class: "preview-list" }, center.previews.map(previewRow)) : el("div", { class: "empty" }, "还没有试听记录。先选一个音色，输入一句文案即可。"));
 
   app.replaceChildren(

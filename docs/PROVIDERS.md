@@ -302,7 +302,7 @@ No subscription — pure pay-as-you-go, no minimum spend.
 > **Strong Mandarin narration.** Volcengine Doubao Speech is a good choice for Chinese explainer voiceovers and long-form narration that needs subtitle timing metadata.
 
 **Tools unlocked:** `doubao_tts`
-**Env vars:** `DOUBAO_SPEECH_API_KEY`, `DOUBAO_SPEECH_VOICE_TYPE`
+**Env vars:** `DOUBAO_SPEECH_API_KEY`, `DOUBAO_SPEECH_VOICE_TYPE`, role-specific `*_VOICE_TYPE` / `*_RESOURCE_ID` / `*_ENABLED` variables, and `HAIKE_VIDEO_TTS_PROVIDER`
 
 #### Setup
 
@@ -313,7 +313,27 @@ No subscription — pure pay-as-you-go, no minimum spend.
    ```bash
    DOUBAO_SPEECH_API_KEY=your-api-key
    DOUBAO_SPEECH_VOICE_TYPE=zh_female_vv_uranus_bigtts
+   DOUBAO_SPEECH_YAYA_VOICE_TYPE=your-yaya-voice-id
+   DOUBAO_SPEECH_YAYA_RESOURCE_ID=seed-icl-2.0
+   DOUBAO_SPEECH_MENGMENG_VOICE_TYPE=your-mengmeng-voice-id
+   DOUBAO_SPEECH_MENGMENG_RESOURCE_ID=seed-icl-2.0
+   DOUBAO_SPEECH_PUBLIC_VOICE_TYPE=zh_female_vv_uranus_bigtts
+   DOUBAO_SPEECH_PUBLIC_RESOURCE_ID=seed-tts-2.0
+   HAIKE_VIDEO_TTS_PROVIDER=auto
    ```
+
+The generic voice variable remains supported by the provider tool. The two
+role variables populate the audio centre and let a dual-host project route
+雅雅 and 檬檬 independently. `auto` keeps local Qwen3-TTS and cloud Doubao
+available at the same time; selecting a default voice in the audio centre is
+the normal user-facing switch.
+
+`S_` voice ids are cloned voices and default to `seed-icl-2.0`; they cannot be
+called through `seed-tts-2.0`. The owning Volcengine project must separately
+enable the matching Voice Cloning resource. Set a role's `*_ENABLED=0` after a
+live preflight reports `requested resource not granted`, so the unavailable
+voice cannot be selected accidentally. A public fallback stays a distinct
+profile and is never relabelled as a cloned role.
 
 #### API Notes
 
@@ -321,7 +341,8 @@ Haike Video uses the new-console API key flow:
 
 ```text
 X-Api-Key: ${DOUBAO_SPEECH_API_KEY}
-X-Api-Resource-Id: seed-tts-2.0
+X-Api-Resource-Id: seed-tts-2.0      # public Speech 2.0 voices
+X-Api-Resource-Id: seed-icl-2.0      # S_ cloned voices trained on ICL 2.0
 ```
 
 Do not pass a new-console API Key as `X-Api-App-Id` or `X-Api-Access-Key`. That mismatch can produce `load grant: requested grant not found`.
