@@ -1,9 +1,9 @@
 import React from "react";
-import { loadFont } from "@remotion/google-fonts/SpaceGrotesk";
 import {
   AbsoluteFill,
   Audio,
   CalculateMetadataFunction,
+  Img,
   OffthreadVideo,
   Sequence,
   interpolate,
@@ -12,16 +12,19 @@ import {
   useVideoConfig,
 } from "remotion";
 
-import { CinematicRendererProps, CinematicTone, CinematicVideoScene } from "./cinematic/types";
+import {
+  CinematicLayeredScene,
+  CinematicMediaLayer,
+  CinematicOverlayLayer,
+  CinematicRendererProps,
+  CinematicTone,
+  CinematicVideoScene,
+} from "./cinematic/types";
 import { CaptionOverlay } from "./components/CaptionOverlay";
 import { resolveAsset } from "./lib/resolveAsset";
 
 const FPS = 30;
-
-const { fontFamily } = loadFont("normal", {
-  weights: ["400", "500", "700"],
-  subsets: ["latin"],
-});
+const fontFamily = '"Microsoft YaHei", "Segoe UI", Arial, sans-serif';
 
 const toneGradient = (tone: CinematicTone) => {
   switch (tone) {
@@ -110,6 +113,165 @@ const SceneVideo: React.FC<{ scene: CinematicVideoScene }> = ({ scene }) => {
           opacity: 0.6,
         }}
       />
+    </AbsoluteFill>
+  );
+};
+
+const LayerMedia: React.FC<{
+  media: CinematicMediaLayer;
+  style?: React.CSSProperties;
+}> = ({ media, style }) => {
+  const { fps } = useVideoConfig();
+  // Composition JSON can intentionally omit an exclusive trim bound. JSON
+  // represents that as null, which must remain undefined for Remotion rather
+  // than becoming Math.round(null * fps) === 0.
+  const trimBefore = typeof media.trimBeforeFrame === "number"
+    ? Math.max(0, Math.round(media.trimBeforeFrame))
+    : typeof media.trimBeforeSeconds === "number"
+      ? Math.max(0, Math.round(media.trimBeforeSeconds * fps))
+      : undefined;
+  const trimAfter = typeof media.trimAfterFrame === "number" && media.trimAfterFrame > 0
+    ? Math.round(media.trimAfterFrame)
+    : typeof media.trimAfterSeconds === "number" && media.trimAfterSeconds > 0
+      ? Math.round(media.trimAfterSeconds * fps)
+      : undefined;
+  const mediaStyle: React.CSSProperties = {
+    width: "100%",
+    height: "100%",
+    objectFit: media.fit ?? "cover",
+    ...style,
+  };
+  if (media.mediaType === "image") {
+    return <Img src={resolveAsset(media.src)} style={mediaStyle} />;
+  }
+  return (
+    <OffthreadVideo
+      muted={media.muted !== false}
+      src={resolveAsset(media.src)}
+      trimBefore={trimBefore}
+      trimAfter={trimAfter}
+      playbackRate={media.playbackRate}
+      style={mediaStyle}
+    />
+  );
+};
+
+const focusCardProgress = (frame: number, durationInFrames: number): number => {
+  const lastFrame = Math.max(0, durationInFrames - 1);
+  const transitionFrames = Math.max(1, Math.min(8, Math.floor(lastFrame / 3)));
+  const entrance = interpolate(frame, [0, transitionFrames], [0, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const exitStart = Math.max(transitionFrames, lastFrame - transitionFrames);
+  const exit = interpolate(frame, [exitStart, lastFrame], [1, 0], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  return Math.min(entrance, exit);
+};
+
+const FocusCard: React.FC<{
+  overlay: CinematicOverlayLayer;
+  durationInFrames: number;
+  scene: CinematicLayeredScene;
+}> = ({ overlay, durationInFrames, scene }) => {
+  const frame = useCurrentFrame();
+  const { width, height } = useVideoConfig();
+  const progress = focusCardProgress(frame, durationInFrames);
+  const scale = interpolate(progress, [0, 1], [0.965, 1], {
+    extrapolateLeft: "clamp",
+    extrapolateRight: "clamp",
+  });
+  const style = scene.frameStyle ?? {};
+  const placement = overlay.placement;
+  const sourceAspect = Math.max(0.05, placement?.sourceAspectRatio ?? 1);
+  const requestedWidthRatio = placement?.sizeRatio ?? style.widthRatio ?? 0.82;
+  const maxHeightRatio = placement?.maxHeightRatio ?? 0.78;
+  const widthRatio = placement
+    ? Math.min(requestedWidthRatio, maxHeightRatio * (height / width) * sourceAspect)
+    : requestedWidthRatio;
+  const heightRatio = placement
+    ? widthRatio * (width / height) / sourceAspect
+    : style.heightRatio ?? 0.56;
+  const cardWidth = Math.round(width * widthRatio);
+  const cardHeight = Math.round(height * heightRatio);
+  const centerX = Math.round(width * (placement?.positionXRatio ?? 0.5));
+  const centerY = Math.round(height * (placement?.positionYRatio ?? 0.5));
+  const radius = Math.max(8, Math.round(Math.min(width, height) * (style.borderRadiusRatio ?? 0.025)));
+  const shadow = style.shadow === "none"
+    ? "none"
+    : "0 28px 80px rgba(0,0,0,0.48), 0 8px 28px rgba(0,0,0,0.34)";
+
+  return (
+    <AbsoluteFill style={{ pointerEvents: "none" }}>
+      <div
+        style={{
+          position: "absolute",
+          left: centerX - cardWidth / 2,
+          top: centerY - cardHeight / 2,
+          width: cardWidth,
+          height: cardHeight,
+          borderRadius: radius,
+          overflow: "hidden",
+          border: `2px solid ${style.borderColor ?? "#D9F3FF"}`,
+          backgroundColor: "#020407",
+          boxShadow: shadow,
+          opacity: progress,
+          transform: `scale(${scale}) translateY(${(1 - progress) * 10}px)`,
+        }}
+      >
+        <LayerMedia media={overlay} />
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+const LayeredScene: React.FC<{ scene: CinematicLayeredScene }> = ({ scene }) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  const bounds = scene.overlays.map((overlay) => {
+    const startFrame = overlay.startFrame ?? Math.round(overlay.startSeconds * fps);
+    const endFrame = Math.max(startFrame + 1, overlay.endFrame ?? Math.round(overlay.endSeconds * fps));
+    return { overlay, startFrame, endFrame };
+  });
+  const effectProgress = bounds.reduce((maximum, { startFrame, endFrame }) => {
+    if (frame < startFrame || frame >= endFrame) {
+      return maximum;
+    }
+    return Math.max(maximum, focusCardProgress(frame - startFrame, endFrame - startFrame));
+  }, 0);
+  const brightness = 1 - effectProgress * 0.3;
+  const saturation = 1 - effectProgress * 0.14;
+  const blur = effectProgress * 2;
+  const backgroundScale = 1 + effectProgress * 0.012;
+
+  return (
+    <AbsoluteFill style={{ backgroundColor: "#020407" }}>
+      <AbsoluteFill
+        style={{
+          filter: `brightness(${brightness}) saturate(${saturation}) blur(${blur}px)`,
+          transform: `scale(${backgroundScale})`,
+        }}
+      >
+        <LayerMedia media={scene.background} />
+      </AbsoluteFill>
+      {effectProgress > 0 ? (
+        <AbsoluteFill style={{ backgroundColor: `rgba(2, 6, 12, ${effectProgress * 0.12})` }} />
+      ) : null}
+      {bounds.map(({ overlay, startFrame, endFrame }) => {
+        const durationInFrames = endFrame - startFrame;
+        return (
+          <Sequence
+            key={overlay.id}
+            from={startFrame}
+            durationInFrames={durationInFrames}
+            premountFor={Math.min(Math.round(0.5 * fps), startFrame)}
+          >
+            <FocusCard overlay={overlay} durationInFrames={durationInFrames} scene={scene} />
+          </Sequence>
+        );
+      })}
     </AbsoluteFill>
   );
 };
@@ -219,14 +381,12 @@ const TitleCard: React.FC<{
     extrapolateRight: "clamp",
   });
 
-  const bgTrimBefore =
-    backgroundTrimBeforeSeconds !== undefined
-      ? Math.round(backgroundTrimBeforeSeconds * fps)
-      : undefined;
-  const bgTrimAfter =
-    backgroundTrimAfterSeconds !== undefined
-      ? Math.round(backgroundTrimAfterSeconds * fps)
-      : undefined;
+  const bgTrimBefore = typeof backgroundTrimBeforeSeconds === "number"
+    ? Math.max(0, Math.round(backgroundTrimBeforeSeconds * fps))
+    : undefined;
+  const bgTrimAfter = typeof backgroundTrimAfterSeconds === "number" && backgroundTrimAfterSeconds > 0
+    ? Math.round(backgroundTrimAfterSeconds * fps)
+    : undefined;
 
   const plateBg =
     variant === "overlay"
@@ -440,18 +600,19 @@ const Soundtrack: React.FC<{
 
 export const calculateCinematicMetadata: CalculateMetadataFunction<CinematicRendererProps> =
   async ({ props }) => {
-    const totalSeconds =
-      props.scenes.length === 0
-        ? 30
-        : Math.max(
-            ...props.scenes.map((scene) => scene.startSeconds + scene.durationSeconds),
-          );
+    const fps = Math.max(1, Math.round(props.frameRate ?? FPS));
+    const durationInFrames = props.durationFrames ?? (props.scenes.length === 0
+      ? 30 * fps
+      : Math.max(
+          1,
+          ...props.scenes.map((scene) => (scene.startFrame ?? Math.round(scene.startSeconds * fps)) + (scene.durationFrames ?? Math.max(1, Math.round((scene.startSeconds + scene.durationSeconds) * fps) - Math.round(scene.startSeconds * fps)))),
+        ));
 
     return {
-      durationInFrames: Math.max(1, Math.ceil(totalSeconds * FPS)),
-      fps: FPS,
-      width: 1920,
-      height: 1080,
+      durationInFrames,
+      fps,
+      width: Math.max(16, Math.round(props.canvasWidth ?? 1920)),
+      height: Math.max(16, Math.round(props.canvasHeight ?? 1080)),
     };
   };
 
@@ -464,6 +625,7 @@ export const CinematicRenderer: React.FC<CinematicRendererProps> = ({
   music,
   captions,
 }) => {
+  const { fps } = useVideoConfig();
   return (
     <AbsoluteFill style={{ backgroundColor: "#000000" }}>
       {/* Layer 1: Narration audio */}
@@ -492,11 +654,16 @@ export const CinematicRenderer: React.FC<CinematicRendererProps> = ({
       {scenes.map((scene) => (
         <Sequence
           key={scene.id}
-          from={Math.round(scene.startSeconds * FPS)}
-          durationInFrames={Math.round(scene.durationSeconds * FPS)}
+          from={scene.startFrame ?? Math.round(scene.startSeconds * fps)}
+          durationInFrames={scene.durationFrames ?? Math.max(
+            1,
+            Math.round((scene.startSeconds + scene.durationSeconds) * fps) - Math.round(scene.startSeconds * fps),
+          )}
         >
           {scene.kind === "video" ? (
             <SceneVideo scene={scene} />
+          ) : scene.kind === "layered" ? (
+            <LayeredScene scene={scene} />
           ) : (
             <TitleCard
               text={scene.text}

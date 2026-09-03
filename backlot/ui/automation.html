@@ -3,16 +3,47 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Haike Video — 自动生产中心</title>
+<title>海客视频 — 自动生产中心</title>
+<script>
+  // 暖纸张是默认主题；仅用户明确选择深色时显示深色，不修改自动生产开关或任务数据。
+  try {
+    const themeKey = "backlot.theme";
+    const storedTheme = localStorage.getItem(themeKey);
+    const theme = storedTheme === "dark" ? "dark" : "light";
+    if (storedTheme !== theme) localStorage.setItem(themeKey, theme);
+    document.documentElement.dataset.theme = theme;
+  } catch (_) {
+    document.documentElement.dataset.theme = "light";
+  }
+</script>
 <link rel="stylesheet" href="/ui/board.css">
 <link rel="stylesheet" href="/ui/automation.css">
+<link rel="stylesheet" href="/ui/navigation.css">
 </head>
 <body class="automation-page">
-<main class="automation-shell">
+<div class="app-frame automation-app-frame">
+  <aside class="global-sidebar" aria-label="主导航">
+    <a class="global-brand" href="/">
+      <span>HAIKE VIDEO</span>
+      <strong>海客视频</strong>
+      <small>项目、素材与审核制作工具</small>
+    </a>
+    <nav class="global-nav" aria-label="全局工作区">
+      <div class="global-nav-group">
+        <p>项目</p>
+        <a class="global-nav-link" href="/">项目库</a>
+      </div>
+      <div class="global-nav-group">
+        <p>通用工具</p>
+        <a class="global-nav-link" href="/audio">配音中心</a>
+        <a class="global-nav-link" href="/automation" aria-current="page">自动生产中心</a>
+      </div>
+    </nav>
+  </aside>
+  <main class="automation-shell">
   <header class="automation-header">
     <div>
-      <a class="backlink" href="/">← 返回项目库</a>
-      <span class="wordmark">Haike Video / 自动生产</span>
+      <span class="wordmark">HAIKE VIDEO / 自动生产</span>
       <h1>每日科技快报生产中心</h1>
       <p>由工作台在每天凌晨 03:00 调度项目内置大模型与视频流水线；Codex 不参与生产。</p>
     </div>
@@ -78,6 +109,7 @@
     <div class="history-list" id="historyList"></div>
   </section>
 </main>
+</div>
 <script type="module" src="/ui/automation.js"></script>
 </body>
 </html>

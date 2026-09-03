@@ -28,10 +28,15 @@ from fastapi.staticfiles import StaticFiles
 
 from backlot.audio_center import (
     AudioCenterError,
+    add_custom_cloud_voice,
     generate_preview,
     mark_preview_failed,
     preview_audio_path,
     read_audio_center,
+    remove_custom_cloud_voice,
+    set_cloud_voice_playback_rate,
+    get_voice_profile,
+    set_cloud_playback_rate,
     set_default_voice,
     start_preview,
 )
@@ -124,6 +129,7 @@ from backlot.avatar_roles import (
     avatar_role_asset_file,
     create_avatar_role,
     finalize_role_reference_upload,
+    set_avatar_role_voice_binding,
     list_avatar_roles,
     prepare_role_reference_upload,
 )
@@ -160,11 +166,14 @@ from backlot.avatar_review_preview_pipeline import (
     start_avatar_review_preview_job,
 )
 from backlot.workbench import (
+    MAX_PROJECT_ASSET_BYTES,
+    WorkbenchConflict,
     WorkbenchError,
     add_annotation,
     add_asset,
     audit_asset_library,
     adopt_ai_scene_visual,
+    adopt_local_material_orchestration_scene,
     apply_avatar_package_to_timeline,
     assign_usage,
     add_surgical_directive,
@@ -172,6 +181,8 @@ from backlot.workbench import (
     cleanup_unused_assets,
     bootstrap_workbench,
     freeze_segment,
+    generate_asset_media_index,
+    generate_asset_media_index_batch,
     generate_avatar_scene_keyframes,
     generate_scene_review_preview,
     generate_scene_motion_visual,
@@ -190,6 +201,8 @@ from backlot.workbench import (
     generate_script_draft,
     import_avatar_user_script,
     import_avatar_script_template,
+    mark_asset_media_index_failed,
+    mark_asset_media_index_batch_failed,
     mark_scene_keyframe_generation_failed,
     mark_scene_motion_visual_failed,
     mark_scene_ppt_card_failed,
@@ -205,8 +218,14 @@ from backlot.workbench import (
     mark_patch_render_failed,
     mark_scene_narration_candidate_failed,
     prepare_patch,
+    prepare_project_asset_upload,
     promote_patch,
+    complete_project_asset_upload,
+    create_local_material_orchestration,
     read_workbench,
+    read_asset_media_index_job,
+    read_asset_media_index_batch,
+    read_asset_material_vision,
     read_music_catalog,
     read_task_center,
     read_scene_keyframe_generation,
@@ -217,11 +236,14 @@ from backlot.workbench import (
     render_patch,
     rollback_patch,
     restore_trashed_asset,
+    recommend_asset_media_segments,
     remove_surgical_directive,
     review_scene_keyframes,
     review_script_draft,
     reopen_script_draft,
     start_scene_keyframe_generation,
+    start_asset_media_index,
+    start_asset_media_index_batch,
     start_scene_motion_visual_generation,
     start_scene_ppt_card_generation,
     start_scene_network_asset_refresh,
@@ -243,15 +265,18 @@ from backlot.workbench import (
     retry_scene_ppt_card_generation,
     approve_full_preview_scenes,
     approve_music_sample,
+    adopt_asset_media_candidate,
     update_scene,
     update_scene_subtitles,
     update_scene_ppt_card_brief,
     update_scene_visual_plan,
+    update_scene_visual_composition,
     update_scene_visual_timeline,
     update_visual_block_lock,
     preview_visual_batch_plan,
     apply_presenter_layout_to_selected_scenes,
     update_presenter_layout_template,
+    update_story_headline_layout,
     update_subtitle_style_template,
     update_subtitle_preferences_settings,
     update_intake,
@@ -680,6 +705,69 @@ def _launch_avatar_review_preview_worker(app: FastAPI, project_dir: Path, job_id
     return _track_background_task(app, run_parent())
 
 
+def _launch_media_index_worker(app: FastAPI, project_dir: Path, job_id: str) -> asyncio.Task:
+    """Resume one local cached media-index job without duplicating its runtime."""
+    registry = getattr(app.state, "media_index_tasks", None)
+    if registry is None:
+        registry = {}
+        app.state.media_index_tasks = registry
+    key = (os.path.normcase(str(project_dir.resolve())), str(job_id))
+    existing = registry.get(key)
+    if isinstance(existing, asyncio.Task) and not existing.done():
+        return existing
+
+    async def run_index() -> None:
+        try:
+            await asyncio.to_thread(generate_asset_media_index, project_dir, job_id)
+        except Exception as exc:
+            try:
+                await asyncio.to_thread(mark_asset_media_index_failed, project_dir, job_id, exc)
+            except Exception:
+                pass
+        finally:
+            registry.pop(key, None)
+            _invalidate_summary(project_dir.name)
+            hub.publish(project_dir.name)
+
+    task = _track_background_task(app, run_index())
+    registry[key] = task
+    return task
+
+
+def _launch_media_index_batch_worker(app: FastAPI, project_dir: Path, job_id: str) -> asyncio.Task:
+    """Resume one durable serial local-material vision queue.
+
+    The batch runner invokes the existing single-media implementation one item
+    at a time.  Keeping this registry separate avoids launching a duplicate
+    queue after a browser refresh or a server recovery.
+    """
+    registry = getattr(app.state, "media_index_batch_tasks", None)
+    if registry is None:
+        registry = {}
+        app.state.media_index_batch_tasks = registry
+    key = (os.path.normcase(str(project_dir.resolve())), str(job_id))
+    existing = registry.get(key)
+    if isinstance(existing, asyncio.Task) and not existing.done():
+        return existing
+
+    async def run_batch() -> None:
+        try:
+            await asyncio.to_thread(generate_asset_media_index_batch, project_dir, job_id)
+        except Exception as exc:
+            try:
+                await asyncio.to_thread(mark_asset_media_index_batch_failed, project_dir, job_id, exc)
+            except Exception:
+                pass
+        finally:
+            registry.pop(key, None)
+            _invalidate_summary(project_dir.name)
+            hub.publish(project_dir.name)
+
+    task = _track_background_task(app, run_batch())
+    registry[key] = task
+    return task
+
+
 def _cached_summaries() -> list[dict]:
     if not PROJECTS_DIR.is_dir():
         return []
@@ -903,6 +991,31 @@ async def _recover_workbench_background_jobs(app: FastAPI) -> None:
 
             _track_background_task(app, run_sync_recovery())
 
+        try:
+            media_batch = await asyncio.to_thread(read_asset_media_index_batch, project_dir)
+            media_batch_id = str(media_batch.get("job_id") or "")
+            should_resume_media_batch = bool(media_batch_id) and media_batch.get("status") in {"queued", "generating"}
+        except Exception:
+            should_resume_media_batch = False
+            media_batch_id = ""
+
+        # A batch owns the shared single-media state.  Never also resume the
+        # child job here, otherwise a restart could run the same video twice.
+        if should_resume_media_batch:
+            _launch_media_index_batch_worker(app, project_dir, media_batch_id)
+            continue
+
+        try:
+            media_job = await asyncio.to_thread(read_asset_media_index_job, project_dir)
+            media_job_id = str(media_job.get("job_id") or "")
+            should_resume_media_index = bool(media_job_id) and media_job.get("status") in {"queued", "generating"}
+        except Exception:
+            should_resume_media_index = False
+            media_job_id = ""
+
+        if should_resume_media_index:
+            _launch_media_index_worker(app, project_dir, media_job_id)
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -911,6 +1024,8 @@ async def _lifespan(app: FastAPI):
     task = asyncio.create_task(_watch_projects())
     app.state.watch_task = task
     app.state.recovery_tasks = set()
+    app.state.media_index_tasks = {}
+    app.state.media_index_batch_tasks = {}
     app.state.review_preview_recovery_errors = {}
     await _recover_avatar_background_jobs(app)
     await _recover_workbench_background_jobs(app)
@@ -1158,6 +1273,21 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         return FileResponse(path)
 
+    @app.put("/api/avatar-roles/{role_id}/voice-binding")
+    async def put_avatar_role_voice_binding(role_id: str, payload: dict = Body(...)) -> dict:
+        profile_id = str(payload.get("profile_id") or "").strip()
+        profile = None
+        if profile_id:
+            profile = await asyncio.to_thread(get_voice_profile, profile_id)
+            if not profile:
+                raise HTTPException(status_code=422, detail="所选音色已不存在，请刷新配音中心后再试")
+            if profile.get("available") is False:
+                raise HTTPException(status_code=422, detail="所选音色当前不可用，不能绑定为数字人配音")
+        try:
+            return await asyncio.to_thread(set_avatar_role_voice_binding, role_id, profile)
+        except AvatarRoleError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
     # ---- Global audio centre (software-wide; not tied to a project) -----
 
     @app.get("/api/audio-center")
@@ -1168,6 +1298,34 @@ def create_app() -> FastAPI:
     async def put_default_voice(payload: dict = Body(...)) -> dict:
         try:
             return await asyncio.to_thread(set_default_voice, payload)
+        except AudioCenterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.put("/api/audio-center/cloud-playback-rate")
+    async def put_cloud_playback_rate(payload: dict = Body(...)) -> dict:
+        try:
+            return await asyncio.to_thread(set_cloud_playback_rate, payload)
+        except AudioCenterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/audio-center/cloud-voices", status_code=201)
+    async def post_custom_cloud_voice(payload: dict = Body(...)) -> dict:
+        try:
+            return await asyncio.to_thread(add_custom_cloud_voice, payload)
+        except AudioCenterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.put("/api/audio-center/cloud-voices/{profile_id}/playback-rate")
+    async def put_cloud_voice_playback_rate(profile_id: str, payload: dict = Body(...)) -> dict:
+        try:
+            return await asyncio.to_thread(set_cloud_voice_playback_rate, profile_id, payload)
+        except AudioCenterError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/api/audio-center/cloud-voices/{profile_id}")
+    async def delete_custom_cloud_voice(profile_id: str) -> dict:
+        try:
+            return await asyncio.to_thread(remove_custom_cloud_voice, profile_id)
         except AudioCenterError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -1255,6 +1413,8 @@ def create_app() -> FastAPI:
         project_dir = _safe_project_dir(project_id)
         try:
             result = await asyncio.to_thread(fn, project_dir, *args, **kwargs)
+        except WorkbenchConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         except WorkbenchError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         _invalidate_summary(project_id)
@@ -1301,6 +1461,54 @@ def create_app() -> FastAPI:
         _invalidate_summary(project_id)
         hub.publish(project_id)
         return {"track": track, "catalog": catalog}
+
+    async def receive_project_asset_upload(
+        project_id: str,
+        request: Request,
+        filename: str,
+        display_name: str,
+        license_notice: str,
+    ) -> dict:
+        """Stream a large local visual into project storage without buffering it in RAM."""
+        project_dir = _safe_project_dir(project_id)
+        try:
+            temporary = await asyncio.to_thread(prepare_project_asset_upload, project_dir, filename)
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        received = 0
+        digest = hashlib.sha256()
+        try:
+            raw_length = request.headers.get("content-length")
+            if raw_length and int(raw_length) > MAX_PROJECT_ASSET_BYTES:
+                raise HTTPException(status_code=413, detail="单个本地素材不能超过 8GB")
+            with temporary.open("wb") as output:
+                async for chunk in request.stream():
+                    received += len(chunk)
+                    if received > MAX_PROJECT_ASSET_BYTES:
+                        raise HTTPException(status_code=413, detail="单个本地素材不能超过 8GB")
+                    digest.update(chunk)
+                    output.write(chunk)
+            state = await asyncio.to_thread(
+                complete_project_asset_upload,
+                project_dir,
+                temporary,
+                filename,
+                display_name=display_name,
+                license_notice=license_notice,
+                content_sha256=digest.hexdigest(),
+            )
+        except HTTPException:
+            raise
+        except (OSError, ValueError, WorkbenchError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        finally:
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        _invalidate_summary(project_id)
+        hub.publish(project_id)
+        return state
 
     async def avatar_call(fn, project_id: str, *args, **kwargs) -> dict:
         project_dir = _safe_project_dir(project_id)
@@ -2074,6 +2282,10 @@ def create_app() -> FastAPI:
     async def put_workbench_scene_visual_timeline(project_id: str, scene_id: str, payload: dict = Body(...)) -> dict:
         return await workbench_call(update_scene_visual_timeline, project_id, scene_id, payload)
 
+    @app.put("/api/project/{project_id}/workbench/scenes/{scene_id}/visual-composition")
+    async def put_workbench_scene_visual_composition(project_id: str, scene_id: str, payload: dict = Body(...)) -> dict:
+        return await workbench_call(update_scene_visual_composition, project_id, scene_id, payload)
+
     @app.patch("/api/project/{project_id}/workbench/scenes/{scene_id}/visual-blocks/{block_id}")
     async def patch_workbench_visual_block(project_id: str, scene_id: str, block_id: str, payload: dict = Body(...)) -> dict:
         return await workbench_call(update_visual_block_lock, project_id, scene_id, block_id, payload)
@@ -2374,6 +2586,10 @@ def create_app() -> FastAPI:
     async def save_workbench_presenter_layout(project_id: str, payload: dict = Body(...)) -> dict:
         return await workbench_call(update_presenter_layout_template, project_id, payload)
 
+    @app.post("/api/project/{project_id}/workbench/story-headline-layout")
+    async def save_workbench_story_headline_layout(project_id: str, payload: dict = Body(...)) -> dict:
+        return await workbench_call(update_story_headline_layout, project_id, payload)
+
     @app.post("/api/project/{project_id}/workbench/subtitle-styles")
     async def save_workbench_subtitle_style(project_id: str, payload: dict = Body(...)) -> dict:
         return await workbench_call(update_subtitle_style_template, project_id, payload)
@@ -2418,6 +2634,109 @@ def create_app() -> FastAPI:
     @app.post("/api/project/{project_id}/workbench/assets")
     async def post_workbench_asset(project_id: str, payload: dict = Body(...)) -> dict:
         return await workbench_call(add_asset, project_id, payload)
+
+    @app.put("/api/project/{project_id}/workbench/assets/uploads")
+    async def put_workbench_asset_upload(
+        project_id: str,
+        request: Request,
+        filename: str,
+        name: str = "",
+        license: str = "",
+    ) -> dict:
+        return await receive_project_asset_upload(project_id, request, filename, name, license)
+
+    @app.post("/api/project/{project_id}/workbench/local-material-orchestration")
+    async def post_workbench_local_material_orchestration(project_id: str, payload: dict = Body(default={})) -> dict:
+        """Create a local-only composition draft; it never starts a provider job."""
+        return await workbench_call(create_local_material_orchestration, project_id, payload)
+
+    @app.post("/api/project/{project_id}/workbench/local-material-orchestration/scenes/{scene_id}/adopt")
+    async def post_workbench_local_material_orchestration_adopt(
+        project_id: str,
+        scene_id: str,
+        payload: dict = Body(...),
+    ) -> dict:
+        return await workbench_call(adopt_local_material_orchestration_scene, project_id, scene_id, payload)
+
+    @app.post("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/jobs")
+    async def start_workbench_asset_media_index(project_id: str, asset_id: str, payload: dict = Body(default={})) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        try:
+            state = await asyncio.to_thread(start_asset_media_index, project_dir, asset_id, payload)
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _invalidate_summary(project_id)
+        hub.publish(project_id)
+        job_id = str((((state.get("automation") or {}).get("media_index") or {}).get("job_id") or ""))
+
+        _launch_media_index_worker(app, project_dir, job_id)
+        return state
+
+    @app.post("/api/project/{project_id}/workbench/assets/media-index/vision-batch")
+    async def start_workbench_asset_media_index_batch(project_id: str, payload: dict = Body(default={})) -> dict:
+        """Start a confirmed, serial visual-understanding queue for local videos."""
+        project_dir = _safe_project_dir(project_id)
+        try:
+            state = await asyncio.to_thread(start_asset_media_index_batch, project_dir, payload)
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _invalidate_summary(project_id)
+        hub.publish(project_id)
+        job_id = str((((state.get("automation") or {}).get("media_index_batch") or {}).get("job_id") or ""))
+        _launch_media_index_batch_worker(app, project_dir, job_id)
+        return state
+
+    @app.get("/api/project/{project_id}/workbench/automation/media-index/jobs/current")
+    async def get_workbench_asset_media_index_job(project_id: str) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        try:
+            return await asyncio.to_thread(read_asset_media_index_job, project_dir)
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/project/{project_id}/workbench/automation/media-index/vision-batch/current")
+    async def get_workbench_asset_media_index_batch(project_id: str) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        try:
+            return await asyncio.to_thread(read_asset_media_index_batch, project_dir)
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/recommendations")
+    async def get_workbench_asset_media_recommendations(
+        project_id: str,
+        asset_id: str,
+        query: str = "",
+        limit: int = 6,
+    ) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        try:
+            return await asyncio.to_thread(recommend_asset_media_segments, project_dir, asset_id, query, limit)
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/recommendations/{shot_id}/adopt")
+    async def adopt_workbench_asset_media_recommendation(
+        project_id: str,
+        asset_id: str,
+        shot_id: str,
+        payload: dict = Body(...),
+    ) -> dict:
+        return await workbench_call(
+            adopt_asset_media_candidate, project_id, asset_id, shot_id, payload,
+        )
+
+    @app.get("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/vision")
+    async def get_workbench_asset_material_vision(
+        project_id: str,
+        asset_id: str,
+        limit: int = 80,
+    ) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        try:
+            return await asyncio.to_thread(read_asset_material_vision, project_dir, asset_id, limit=limit)
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/project/{project_id}/workbench/asset-library/audit")
     async def get_workbench_asset_library_audit(project_id: str) -> dict:

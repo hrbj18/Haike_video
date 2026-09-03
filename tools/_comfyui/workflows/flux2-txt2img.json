@@ -90,7 +90,7 @@
     "class_type": "SaveImage",
     "inputs": {
       "images": ["12", 0],
-      "filename_prefix": "haike_video"
+      "filename_prefix": "openmontage"
     }
   }
 }

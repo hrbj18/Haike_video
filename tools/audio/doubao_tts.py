@@ -320,7 +320,7 @@ class DoubaoTTS(BaseTool):
             "disable_markdown_filter": bool(inputs.get("disable_markdown_filter", False)),
         }
         return {
-            "user": {"uid": inputs.get("user_id", "haike_video")},
+            "user": {"uid": inputs.get("user_id", "openmontage")},
             "unique_id": request_id,
             "req_params": {
                 "text": inputs["text"],
@@ -391,7 +391,9 @@ class DoubaoTTS(BaseTool):
     @staticmethod
     def _safe_error(exc: Exception) -> str:
         # Avoid ever echoing request headers or secrets in user-visible errors.
-        return str(exc).replace(os.environ.get("DOUBAO_SPEECH_API_KEY", ""), "[redacted]")
+        message = str(exc)
+        secret = os.environ.get("DOUBAO_SPEECH_API_KEY", "")
+        return message.replace(secret, "[redacted]") if secret else message
 
     @staticmethod
     def _extension_for_format(fmt: str) -> str:

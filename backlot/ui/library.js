@@ -1,4 +1,4 @@
-import { el, fmtAgo, getJSON, subscribe, thumbURL } from "/ui/lib.js";
+import { el, fmtAgo, getJSON, subscribe } from "/ui/lib.js";
 
 const grid = document.getElementById("grid");
 const form = document.getElementById("projectForm");
@@ -32,7 +32,7 @@ const dailyStartButton = document.getElementById("startDailyRun");
 const dailyRefreshButton = document.getElementById("refreshDailyStatus");
 const dailyPresenterShape = document.getElementById("dailyPresenterShape");
 const THEME_KEY = "backlot.theme";
-let currentTheme = localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
+let currentTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 let deleteTarget = null;
 let deletePreview = null;
 let dailyStatusTimer = null;
@@ -261,16 +261,6 @@ function renderThemeToggle() {
   }, el("span", { class: "theme-toggle-icon", "aria-hidden": "true" }, currentTheme === "light" ? "☀" : "☾"));
 }
 
-function statusText(status) {
-  return {
-    completed: "已完成",
-    in_progress: "进行中",
-    awaiting_human: "等待你确认",
-    pending: "待执行",
-    failed: "需处理",
-  }[status] || status;
-}
-
 function pipelineLabel(pipeline) {
   return {
     "animated-explainer": "无数字人口播",
@@ -288,47 +278,42 @@ function stageLabel(stage) {
   }[stage] || stage;
 }
 
-function miniRail(states) {
-  const rail = el("div", { class: "mini-rail" });
-  for (const state of states) {
-    const cls = state.status === "completed" ? "d"
-      : state.status === "in_progress" ? "a"
-        : state.status === "awaiting_human" ? "w" : "";
-    rail.append(el("i", { class: cls, title: `${stageLabel(state.name)}：${statusText(state.status)}` }));
-  }
-  return rail;
+function projectRowState(project) {
+  const states = project.stage_states || [];
+  const active = states.find((state) => state.status === "in_progress");
+  const failed = states.find((state) => state.status === "failed");
+  const completed = states.filter((state) => state.status === "completed").length;
+
+  if (project.awaiting_human) return { tone: "awaiting", label: "等待审核" };
+  if (failed) return { tone: "needs-attention", label: `需处理 · ${stageLabel(failed.name)}` };
+  if (active) return { tone: "in-progress", label: `进行中 · ${stageLabel(active.name)}` };
+  if (states.length && completed === states.length) return { tone: "completed", label: "已完成" };
+  if (completed) return { tone: "in-progress", label: `制作中 · ${completed}/${states.length}` };
+  if (project.live) return { tone: "in-progress", label: "制作中" };
+  return { tone: "draft", label: "草案" };
+}
+
+function projectRowFacts(project) {
+  return [
+    pipelineLabel(project.pipeline_type),
+    project.scene_count ? `${project.scene_count} 个场景` : null,
+    project.render_count ? `${project.render_count} 个成片` : null,
+  ].filter(Boolean).join(" · ");
 }
 
 function card(project) {
-  const poster = el("div", { class: "lib-poster" });
-  if (project.poster) {
-    poster.append(el("img", { src: thumbURL(project.project_id, project.poster, 640), loading: "lazy", alt: "" }));
-  } else {
-    poster.append(el("span", { class: "lp-txt" }, "尚无预览画面"));
-  }
-  if (project.live && project.active_stage) {
-    poster.append(el("span", { class: "lp-live" },
-      el("span", { class: "dot" }),
-      project.awaiting_human ? "等待你确认" : `进行中 · ${project.active_stage}`));
-  } else if (project.awaiting_human) {
-    poster.append(el("span", { class: "lp-live" }, "等待你确认"));
-  }
-
-  const meta = el("div", { class: "lb-meta" },
-    el("span", { class: "chip" }, pipelineLabel(project.pipeline_type)),
-    project.scene_count ? el("span", { class: "chip" }, `${project.scene_count} 个场景`) : null,
-    project.render_count ? el("span", { class: "chip" }, `${project.render_count} 个成片`) : null,
-    el("span", { class: "when" }, fmtAgo(project.last_activity)),
-  );
+  const state = projectRowState(project);
 
   const staticSuffix = new URLSearchParams(location.search).has("static") ? "?static=1" : "";
-  const openProject = el("a", { class: "lib-card-link", href: `/p/${project.project_id}${staticSuffix}`, style: "text-decoration:none;color:inherit" },
-    poster,
-    el("div", { class: "lib-body" },
+  const openProject = el("a", { class: "lib-card-link lib-project-row-link", href: `/p/${project.project_id}${staticSuffix}` },
+    el("span", { class: "project-row-key" }, `#${project.project_id}`),
+    el("div", { class: "project-row-copy" },
       el("h3", {}, project.title || project.project_id),
-      meta,
-      project.stage_states.length ? miniRail(project.stage_states) : null,
+      el("p", {}, projectRowFacts(project)),
     ),
+    el("span", { class: `project-row-state ${state.tone}` }, state.label),
+    el("time", { class: "project-row-time", dateTime: new Date(Number(project.last_activity || 0) * 1000).toISOString() }, fmtAgo(project.last_activity)),
+    el("span", { class: "project-row-enter" }, "进入工作区"),
   );
   const manage = el("button", {
     class: "project-manage",
@@ -337,7 +322,7 @@ function card(project) {
     title: "管理项目",
     onclick: () => showDeleteDialog(project),
   }, "管理");
-  return el("article", { class: `lib-card${project.live ? " live-card" : ""}` }, openProject, manage);
+  return el("article", { class: `lib-card lib-project-row${project.live ? " live-card" : ""}` }, openProject, manage);
 }
 
 function formatBytes(bytes) {

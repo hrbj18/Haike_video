@@ -262,7 +262,7 @@ def _snapshot_feed(feed: dict[str, Any], snapshot_dir: Path) -> dict[str, str]:
     if not read_at:
         read_at = datetime.now(timezone.utc).astimezone().isoformat(timespec="seconds")
     source_index = {
-        "schema": "haike_video-copy-skill-hotspot-source-index-v1",
+        "schema": "openmontage-copy-skill-hotspot-source-index-v1",
         "business_date": feed["business_date"],
         "run_id": feed["run_id"],
         "feed_status": feed["feed_status"],
@@ -279,7 +279,7 @@ def _snapshot_feed(feed: dict[str, Any], snapshot_dir: Path) -> dict[str, str]:
         "producer_modified": False,
     }
     candidate_snapshot = {
-        "schema": "haike_video-copy-skill-hotspot-candidates-v1",
+        "schema": "openmontage-copy-skill-hotspot-candidates-v1",
         "business_date": feed["business_date"],
         "run_id": feed["run_id"],
         "feed_status": feed["feed_status"],
@@ -290,7 +290,7 @@ def _snapshot_feed(feed: dict[str, Any], snapshot_dir: Path) -> dict[str, str]:
         "candidates": feed["candidates"],
     }
     top10 = {
-        "schema": "haike_video-copy-skill-hotspot-top10-v1",
+        "schema": "openmontage-copy-skill-hotspot-top10-v1",
         "business_date": feed["business_date"],
         "run_id": feed["run_id"],
         "feed_status": feed["feed_status"],
@@ -434,7 +434,7 @@ def load_copy_skill_hotspot_feed(
     ]
     normalized.sort(key=lambda item: (item["rank"] or 999, -item["heat_score"]))
     feed = {
-        "schema": "haike_video-copy-skill-hotspot-feed-v1",
+        "schema": "openmontage-copy-skill-hotspot-feed-v1",
         "feed_status": "partial" if package_status == "partial" else "loaded",
         "package_status": package_status,
         "contract_version": CONTRACT_VERSION,
@@ -483,7 +483,7 @@ def try_load_copy_skill_hotspot_feed(
         return load_copy_skill_hotspot_feed(root, business_date_value, snapshot_dir=snapshot_dir)
     except CopySkillHotspotFeedError as exc:
         return {
-            "schema": "haike_video-copy-skill-hotspot-feed-v1",
+            "schema": "openmontage-copy-skill-hotspot-feed-v1",
             "feed_status": "missing" if exc.code == "missing" else "invalid",
             "business_date": business_date_value,
             "source_root": str(Path(root)),

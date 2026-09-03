@@ -323,6 +323,16 @@ def _resolved_credentials(provider: str = "default") -> tuple[str, str, str]:
     return api_key, base_url, model
 
 
+def resolve_text_ai_credentials(provider: str = "default") -> tuple[str, str, str]:
+    """Return the configured credential triple for internal text consumers.
+
+    The workbench stores its AI configuration in the ignored local secret file.
+    Consumers must use this resolver instead of assuming the launcher copied
+    every value into the process environment.
+    """
+    return _resolved_credentials(provider)
+
+
 def doubao_configured() -> bool:
     """Whether the Doubao daily-editorial model is available.
 
@@ -506,7 +516,7 @@ def evaluate_visual_candidates(context: dict[str, Any]) -> tuple[dict[str, Any],
     model.  Callers still own candidate whitelisting and score validation: this
     function only makes a structured recommendation, never performs a download.
     """
-    system = """你是 Haike Video 的自动视觉导演。请从输入的候选素材中，为一个已经绑定音频时间轴的画面格选择最合适的一条。
+    system = """你是 OpenMontage 的自动视觉导演。请从输入的候选素材中，为一个已经绑定音频时间轴的画面格选择最合适的一条。
 只输出 JSON，不要 Markdown：
 {
   "selected_asset_id": "必须是输入候选的 asset_id，或空字符串",
@@ -743,7 +753,7 @@ def _normalize_visual_routes(raw: dict[str, Any], context: dict[str, Any], *, al
             **layout,
             "graphic_copy": graphic_copy,
             "fallback_route": fallback,
-            # Timing is owned by Haike Video. Never trust model-generated cuts.
+            # Timing is owned by OpenMontage. Never trust model-generated cuts.
             "start_seconds": slot.get("start_seconds"),
             "end_seconds": slot.get("end_seconds"),
         })
@@ -758,7 +768,7 @@ def _normalize_visual_routes(raw: dict[str, Any], context: dict[str, Any], *, al
 def plan_visual_routes(context: dict[str, Any], *, allow_missing: bool = False) -> dict[str, Any]:
     """Route every pre-cut visual slot to one explicit production engine.
 
-    The model is a planner only. Haike Video owns slot ids/timing, validates
+    The model is a planner only. OpenMontage owns slot ids/timing, validates
     the response, presents it to the reviewer, and executes only the reviewed
     immutable contract.
     """
@@ -789,7 +799,7 @@ def plan_visual_routes(context: dict[str, Any], *, allow_missing: bool = False) 
 1. 真实地点、设备运动、制造过程、产品操作优先 stock_video。
 2. 稳定的具体物件、档案、单一产品特写可用 stock_image；需要专门构图且事实不会被误画时才用 ai_image。
 3. 抽象关系、流程、对比、概念变化、数据结构优先 hyperframes。
-4. 每格先根据当前台词、前后文和镜头职责独立判断；同时严格服从 preferences.allowed_routes，不得输出未允许的路线。整片比例由 Haike Video 在返回后按时长复核。
+4. 每格先根据当前台词、前后文和镜头职责独立判断；同时严格服从 preferences.allowed_routes，不得输出未允许的路线。整片比例由 OpenMontage 在返回后按时长复核。
 5. 已有独立数字人、模块化字幕和按 story_id 统一的新闻小标题层，主体画面禁止再生成主播；HyperFrames 不烧录字幕，也不得在右上角渲染新闻标题。graphic_copy.headline 仅用于 HY 内部语义构图，不能占用右上角标题安全区。
 6. 不得修改 scene_id、block_id、起止时间；必须为输入中的每个槽位恰好返回一项。
 7. search_query 使用 3 到 8 个英文实体/动作词，不使用 no people 等负面词。

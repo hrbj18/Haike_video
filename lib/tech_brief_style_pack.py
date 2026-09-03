@@ -1,4 +1,4 @@
-"""Versioned, local style-pack contract for Haike Video tech briefs.
+"""Versioned, local style-pack contract for OpenMontage tech briefs.
 
 The source Open Design export is intentionally *not* read at render time.
 This module only consumes the small, reviewed contract under
@@ -7,7 +7,7 @@ portable HyperFrames context.  The resulting context is also written into
 the HyperFrames workspace, so a rendered candidate remains reproducible even
 if a later style pack is introduced.
 
-Captions deliberately stay out of this module's graphic copy: Haike Video's
+Captions deliberately stay out of this module's graphic copy: OpenMontage's
 subtitle renderer owns phrase timing, text editing and final overlay.
 """
 
@@ -322,6 +322,11 @@ def build_style_context(
         int(recipe.get("max_nodes") or 4),
         int(aspect.get("node_max_chars") or 10),
     )
+    # A story_id means the workbench owns one persistent, independently
+    # positioned story headline.  Infer this at the style boundary as well as
+    # accepting the explicit flag so every HyperFrames entrypoint follows the
+    # same no-duplicate-title contract.
+    external_headline = spec.get("external_headline") is True or bool(str(scene.get("story_id") or "").strip())
     speaker = ""
     presenter = scene.get("presenter") if isinstance(scene.get("presenter"), dict) else {}
     speaker = _clip(presenter.get("speaker_name") or presenter.get("role_name") or scene.get("speaker"), 12)
@@ -361,12 +366,12 @@ def build_style_context(
         },
         "forbidden": list(_DEFAULT_FORBIDDEN),
         "caption_policy": {
-            "owner": "haike_video-subtitle-module",
+            "owner": "openmontage-subtitle-module",
             "baked_into_hyperframes": False,
             "subtitle_template_id": str(pack["subtitle"].get("id") or "subtitle-tech-brief-v1"),
         },
         "headline_policy": {
-            "owner": "haike_video-story-overlay" if spec.get("external_headline") is True else "hyperframes",
-            "render_in_hyperframes": spec.get("external_headline") is not True,
+            "owner": "openmontage-story-overlay" if external_headline else "hyperframes",
+            "render_in_hyperframes": not external_headline,
         },
     }

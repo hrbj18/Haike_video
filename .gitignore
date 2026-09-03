@@ -15,6 +15,7 @@ build/
 .pytest-*/
 .pytest_*/
 .p/
+/.p-*/
 .test-*/
 .tmp*/
 _docx_qa_*/
@@ -106,6 +107,9 @@ venv/
 
 # Backlot local cache (thumbnails)
 .backlot/
+
+# Worktree-local pytest bases (synthetic media and temporary project fixtures)
+.codex-test-tmp-*/
 
 # Release exclusions: private/user-owned inputs, generated evidence, and
 # workstation-only tool copies. These files stay on disk but never enter Git.

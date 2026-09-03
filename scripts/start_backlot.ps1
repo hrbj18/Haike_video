@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [ValidateRange(1024, 65535)]
     [int]$Port = 4754,
@@ -11,35 +11,99 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $workbenchUrl = "http://127.0.0.1:$Port/"
 
+function Repair-ProcessPathEnvironment {
+    # Some launch hosts expose both `Path` and `PATH` with different values.
+    # Windows PowerShell's Start-Process copies them into a case-insensitive
+    # dictionary and then fails before the child process is created.  Merge the
+    # variants for this launcher and its children only; do not touch the user's
+    # persistent machine or account environment.
+    $environment = [Environment]::GetEnvironmentVariables('Process')
+    $pathKeys = @($environment.Keys | Where-Object { [string]$_ -ieq 'Path' })
+    if ($pathKeys.Count -lt 2) { return }
+
+    $orderedKeys = @($pathKeys | Sort-Object {
+        if ([string]$_ -ceq 'Path') { 0 }
+        elseif ([string]$_ -ceq 'PATH') { 1 }
+        else { 2 }
+    })
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+    $parts = New-Object System.Collections.Generic.List[string]
+    foreach ($key in $orderedKeys) {
+        foreach ($part in ([string]$environment[$key] -split ';')) {
+            $trimmed = $part.Trim()
+            if ($trimmed -and $seen.Add($trimmed)) {
+                [void]$parts.Add($trimmed)
+            }
+        }
+    }
+    $mergedPath = $parts -join ';'
+    [Environment]::SetEnvironmentVariable('Path', $mergedPath, 'Process')
+    [Environment]::SetEnvironmentVariable('PATH', $mergedPath, 'Process')
+}
+
+Repair-ProcessPathEnvironment
+
 if (-not (Test-Path -LiteralPath $python)) {
     Write-Host "未找到项目虚拟环境：$python" -ForegroundColor Red
     Write-Host "请先按 README_zh-CN.md 完成一次依赖安装，再双击“启动工作台.bat”。" -ForegroundColor Yellow
     exit 1
 }
 
-function Stop-VerifiedBacklotServer {
+function Get-ListeningProcessIds {
     param([int]$TargetPort)
 
     $listeners = @(Get-NetTCPConnection -LocalPort $TargetPort -State Listen -ErrorAction SilentlyContinue)
-    if (-not $listeners.Count) { return }
-    $ownerIds = @($listeners | ForEach-Object { $_.OwningProcess } | Select-Object -Unique)
+    $ownerIds = @($listeners | ForEach-Object { [int]$_.OwningProcess } | Where-Object { $_ -gt 0 } | Select-Object -Unique)
+    if ($ownerIds.Count) { return $ownerIds }
+
+    # Get-NetTCPConnection may return nothing in a normal non-elevated shell.
+    # netstat is available on supported Windows versions and still exposes the
+    # owning PID without requiring administrator privileges.
+    $netstat = Join-Path $env:SystemRoot 'System32\netstat.exe'
+    if (-not (Test-Path -LiteralPath $netstat)) { $netstat = 'netstat.exe' }
+    $pattern = "^\s*TCP\s+(?:127\.0\.0\.1|\[::1\]):$TargetPort\s+\S+\s+LISTENING\s+(\d+)\s*$"
+    $fallbackIds = New-Object System.Collections.Generic.List[int]
+    foreach ($line in (& $netstat -ano -p tcp 2>$null)) {
+        if ($line -match $pattern) {
+            [void]$fallbackIds.Add([int]$matches[1])
+        }
+    }
+    return @($fallbackIds | Select-Object -Unique)
+}
+
+function Stop-VerifiedBacklotServer {
+    param([int]$TargetPort)
+
+    $ownerIds = @(Get-ListeningProcessIds -TargetPort $TargetPort)
+    if (-not $ownerIds.Count) { return }
+
+    try {
+        $health = Invoke-RestMethod -Uri "http://127.0.0.1:$TargetPort/api/health" -Method Get -TimeoutSec 3
+    } catch {
+        throw "端口 $TargetPort 有监听程序，但无法确认它是 OpenMontage；为保护该程序，未执行重启。"
+    }
+    if ($health.ok -ne $true -or $health.app -ne 'backlot') {
+        throw "端口 $TargetPort 的健康响应不属于 OpenMontage；为保护该程序，未执行重启。"
+    }
+
     $verifiedIds = New-Object System.Collections.Generic.List[int]
     foreach ($ownerId in $ownerIds) {
         $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ownerId" -ErrorAction SilentlyContinue
-        if (-not $process -or $process.CommandLine -notmatch '(^|\s)-m\s+backlot\s+serve(\s|$)' -or $process.CommandLine -notmatch "--port\s+$TargetPort(\s|$)") {
-            throw "端口 $TargetPort 正被非 Haike Video 服务使用；为保护该程序，未执行重启。"
+        if ($process -and ($process.CommandLine -notmatch '(^|\s)-m\s+backlot\s+serve(\s|$)' -or $process.CommandLine -notmatch "--port\s+$TargetPort(\s|$)")) {
+            throw "端口 $TargetPort 正被非 OpenMontage 服务使用；为保护该程序，未执行重启。"
+        }
+        if (-not (Get-Process -Id $ownerId -ErrorAction SilentlyContinue)) {
+            throw "端口 $TargetPort 的监听进程已经变化；为保护新进程，未执行重启。"
         }
         [void]$verifiedIds.Add([int]$ownerId)
-        $parentId = [int]$process.ParentProcessId
-        if ($parentId -gt 0) {
-            $parent = Get-CimInstance Win32_Process -Filter "ProcessId = $parentId" -ErrorAction SilentlyContinue
-            if ($parent -and $parent.CommandLine -match '(^|\s)-m\s+backlot\s+serve(\s|$)' -and $parent.CommandLine -match "--port\s+$TargetPort(\s|$)") {
-                [void]$verifiedIds.Add($parentId)
-            }
-        }
+    }
+
+    $currentOwnerIds = @(Get-ListeningProcessIds -TargetPort $TargetPort)
+    if (@(Compare-Object -ReferenceObject $ownerIds -DifferenceObject $currentOwnerIds).Count) {
+        throw "端口 $TargetPort 的监听进程已经变化；为保护新进程，未执行重启。"
     }
     $targets = @($verifiedIds | Select-Object -Unique)
-    Write-Host "正在停止旧版 Haike Video 服务（端口 $TargetPort）…" -ForegroundColor Yellow
+    Write-Host "正在停止旧版 OpenMontage 服务（端口 $TargetPort）…" -ForegroundColor Yellow
     Stop-Process -Id $targets -Force -ErrorAction Stop
     Start-Sleep -Milliseconds 700
 }

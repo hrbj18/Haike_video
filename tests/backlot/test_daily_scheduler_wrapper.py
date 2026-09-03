@@ -7,7 +7,7 @@ import sys
 
 def _module():
     path = Path(__file__).resolve().parents[2] / "scripts" / "run_daily_automation.py"
-    spec = importlib.util.spec_from_file_location("haike_video_daily_wrapper_test", path)
+    spec = importlib.util.spec_from_file_location("openmontage_daily_wrapper_test", path)
     module = importlib.util.module_from_spec(spec)
     assert spec and spec.loader
     spec.loader.exec_module(module)

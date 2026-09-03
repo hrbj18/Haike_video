@@ -1,0 +1,60 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://haike.local/schemas/material_vision_index.schema.json",
+  "title": "素材视觉理解索引 V2",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["version", "status", "source", "signature", "config", "probe", "shots", "index_path"],
+  "properties": {
+    "version": {"const": 2},
+    "status": {"enum": ["frames_ready", "completed"]},
+    "source": {
+      "type": "object",
+      "required": ["path", "fingerprint", "name"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "fingerprint": {"type": "string", "minLength": 8},
+        "name": {"type": "string", "minLength": 1}
+      }
+    },
+    "signature": {"type": "string", "minLength": 16},
+    "config": {"type": "object"},
+    "probe": {"type": "object"},
+    "vision": {"type": "object"},
+    "shots": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["shot_id", "start_seconds", "end_seconds", "frames"],
+        "properties": {
+          "shot_id": {"type": "string", "pattern": "^SHOT-[0-9]{4,}$"},
+          "start_seconds": {"type": "number", "minimum": 0},
+          "end_seconds": {"type": "number", "exclusiveMinimum": 0},
+          "frames": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": 5,
+            "items": {
+              "type": "object",
+              "additionalProperties": true,
+              "required": ["frame_id", "time_seconds", "path", "content_sha256", "dhash", "sharpness", "selected_for_vision"],
+              "properties": {
+                "frame_id": {"type": "string", "pattern": "^FRAME-[0-9]{5,}$"},
+                "time_seconds": {"type": "number", "minimum": 0},
+                "path": {"type": "string", "minLength": 1},
+                "content_sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+                "dhash": {"type": "string", "pattern": "^[a-f0-9]{16}$"},
+                "sharpness": {"type": "number", "minimum": 0},
+                "selected_for_vision": {"type": "boolean"}
+              }
+            }
+          },
+          "description": {"type": ["object", "null"]}
+        }
+      }
+    },
+    "index_path": {"type": "string", "minLength": 1}
+  }
+}

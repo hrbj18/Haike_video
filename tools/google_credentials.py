@@ -1,4 +1,4 @@
-"""Shared Google service-account authentication for Haike Video tools.
+"""Shared Google service-account authentication for OpenMontage tools.
 
 Lets the Google provider tools (``google_tts``, ``google_imagen``)
 authenticate with a service-account JSON key file via OAuth Bearer tokens —

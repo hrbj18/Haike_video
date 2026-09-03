@@ -31,8 +31,8 @@ class OpenAIScript(BaseTool):
     determinism = Determinism.STOCHASTIC
     runtime = ToolRuntime.API
 
-    dependencies = ["python:openai", "env:OPENAI_API_KEY"]
-    install_instructions = "配置 OPENAI_API_KEY；可通过 OPENAI_BASE_URL 使用兼容接口。"
+    dependencies = ["python:openai", "config:.env.secrets.local"]
+    install_instructions = "在工作台“AI 配置”中保存 OpenAI 兼容接口；密钥存放在本机 .env.secrets.local。"
     agent_skills = ["openai-docs"]
     capabilities = ["draft_script", "expand_idea", "organize_script"]
     supports = {"chinese": True, "structured_json": True, "openai_compatible_base_url": True}
@@ -64,9 +64,12 @@ class OpenAIScript(BaseTool):
     user_visible_verification = ["人工审核脚本结构、时长、表达和画面意图"]
 
     def get_status(self) -> ToolStatus:
-        if os.environ.get("OPENAI_API_KEY"):
+        try:
+            from backlot.ai_text import resolve_text_ai_credentials
+            resolve_text_ai_credentials()
             return ToolStatus.AVAILABLE
-        return ToolStatus.UNAVAILABLE
+        except Exception:
+            return ToolStatus.UNAVAILABLE
 
     def estimate_cost(self, inputs: dict[str, Any]) -> float:
         return 0.02
@@ -129,14 +132,15 @@ class OpenAIScript(BaseTool):
         return 0.75
 
     def execute(self, inputs: dict[str, Any]) -> ToolResult:
-        if not os.environ.get("OPENAI_API_KEY"):
-            return ToolResult(success=False, error="未配置 OPENAI_API_KEY")
         model = self._model_name(inputs)
         try:
             from openai import OpenAI
+            from backlot.ai_text import resolve_text_ai_credentials
 
-            base_url = os.environ.get("OPENAI_BASE_URL", "").strip()
-            client = OpenAI(base_url=base_url) if base_url else OpenAI()
+            api_key, configured_base_url, configured_model = resolve_text_ai_credentials()
+            model = str(inputs.get("model") or os.environ.get("OPENAI_SCRIPT_MODEL") or configured_model or model)
+            base_url = str(configured_base_url or "").strip()
+            client = OpenAI(api_key=api_key, base_url=base_url or None)
             context = {
                 key: inputs.get(key, "")
                 for key in (
@@ -154,7 +158,7 @@ class OpenAIScript(BaseTool):
                 "temperature": self._temperature(mode, organize_strength),
                 "messages": [
                     {"role": "system", "content": self._system_prompt(mode, organize_strength)},
-                    *([{"role": "system", "content": "这是双主持数字人脚本。sections 必须与 avatar_turn_contract 一一对应，数量、顺序、turn_id、speaker_id、speaker_name 均不得改变、合并、删除或新增；每个 section 只包含一个轮次。"}] if avatar_contract else []),
+                    *([{"role": "system", "content": "这是数字人口播脚本，可能包含一位或两位主持人。sections 必须与 avatar_turn_contract 一一对应，数量、顺序、turn_id、speaker_id、speaker_name 均不得改变、合并、删除或新增；每个 section 只包含一个轮次。"}] if avatar_contract else []),
                     {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
                 ],
             }

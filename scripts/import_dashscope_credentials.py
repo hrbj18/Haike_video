@@ -1,7 +1,7 @@
 """Safely import Alibaba Bailian credentials from an exported CSV.
 
 The exporter writes a two-column key/value document whose first row is a
-heading rather than data.  This utility only copies the fields Haike Video
+heading rather than data.  This utility only copies the fields OpenMontage
 needs and never prints credential values.
 """
 

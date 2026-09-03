@@ -4,10 +4,43 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>通用配音中心</title>
+<script>
+  // 暖纸张是默认主题；仅用户明确选择深色时显示深色，不触及音色或服务配置。
+  try {
+    const themeKey = "backlot.theme";
+    const storedTheme = localStorage.getItem(themeKey);
+    const theme = storedTheme === "dark" ? "dark" : "light";
+    if (storedTheme !== theme) localStorage.setItem(themeKey, theme);
+    document.documentElement.dataset.theme = theme;
+  } catch (_) {
+    document.documentElement.dataset.theme = "light";
+  }
+</script>
 <link rel="stylesheet" href="/ui/audio_center.css">
+<link rel="stylesheet" href="/ui/navigation.css">
 </head>
 <body>
-<main id="app" class="audio-app" aria-live="polite"></main>
+<div class="app-frame audio-app-frame">
+  <aside class="global-sidebar" aria-label="主导航">
+    <a class="global-brand" href="/">
+      <span>HAIKE VIDEO</span>
+      <strong>海客视频</strong>
+      <small>项目、素材与审核制作工具</small>
+    </a>
+    <nav class="global-nav" aria-label="全局工作区">
+      <div class="global-nav-group">
+        <p>项目</p>
+        <a class="global-nav-link" href="/">项目库</a>
+      </div>
+      <div class="global-nav-group">
+        <p>通用工具</p>
+        <a class="global-nav-link" href="/audio" aria-current="page">配音中心</a>
+        <a class="global-nav-link" href="/automation">自动生产中心</a>
+      </div>
+    </nav>
+  </aside>
+  <main id="app" class="audio-app" aria-live="polite"></main>
+</div>
 <div id="toast" class="toast" role="status"></div>
 <script type="module" src="/ui/audio_center.js"></script>
 </body>

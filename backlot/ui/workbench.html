@@ -3,16 +3,21 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#0b1220">
-<title>海客视频工厂</title>
+<meta name="theme-color" content="#f4ede0">
+<title>海客导演台</title>
 <script>
   try {
-    document.documentElement.dataset.theme = localStorage.getItem("backlot.theme") === "light" ? "light" : "dark";
+    const themeKey = "backlot.theme";
+    const storedTheme = localStorage.getItem(themeKey);
+    const theme = storedTheme === "dark" ? "dark" : "light";
+    if (storedTheme !== theme) localStorage.setItem(themeKey, theme);
+    document.documentElement.dataset.theme = theme;
   } catch (_) {
-    document.documentElement.dataset.theme = "dark";
+    document.documentElement.dataset.theme = "light";
   }
 </script>
 <link rel="stylesheet" href="/ui/workbench.css">
+<link rel="stylesheet" href="/ui/navigation.css">
 </head>
 <body>
 <a class="skip-link" href="#main-content">跳到主要内容</a>
@@ -21,14 +26,15 @@
 <dialog id="assetDialog" class="dialog">
   <form id="assetForm" method="dialog">
     <div class="dialog-heading"><div><p class="eyebrow">素材登记</p><h2>新增可追溯素材</h2></div><button type="button" class="icon-button" data-dialog-close="assetDialog" aria-label="关闭">关闭</button></div>
-    <label>素材名称<input name="name" required maxlength="160" placeholder="例如：产品正面特写"></label>
+    <label>素材名称（单文件可选）<input name="name" maxlength="160" placeholder="例如：产品正面特写；多文件时默认使用文件名"></label>
+    <label>从电脑导入（可多选）<input name="upload_files" type="file" multiple accept=".mp4,.mov,.mkv,.webm,.m4v,.png,.jpg,.jpeg,.webp"></label>
     <div class="form-grid">
       <label>类型<select name="type"><option value="video">视频</option><option value="image">图片</option><option value="audio">音频</option><option value="animation">动画</option></select></label>
       <label>来源<select name="source_type"><option value="human_provided">人工提供</option><option value="web_download">网络下载</option><option value="project_library">项目素材库</option><option value="ai_generated">AI 生成</option><option value="local_generated">本地生成</option></select></label>
     </div>
-    <label>项目内相对路径<input name="path" placeholder="assets/video/candidate.mp4"></label>
+    <label>或登记已有的项目内相对路径<input name="path" placeholder="assets/video/candidate.mp4"></label>
     <div class="form-grid"><label>授权/许可<input name="license" placeholder="例如：已授权 / CC BY"></label><label>来源链接<input name="source_url" placeholder="https://…"></label></div>
-    <p class="form-note">素材文件必须先位于本项目目录内。系统会分配稳定素材编号 S-xxx；每次用于场景时另分配 U-xxx。</p>
+    <p class="form-note">选择电脑文件时会流式复制到项目，单文件最多 8GB；也可只登记已经位于项目目录内的路径。系统会分配稳定素材编号 S-xxx。</p>
     <div class="dialog-actions"><button type="button" data-dialog-close="assetDialog" class="button quiet">取消</button><button type="submit" class="button primary">登记素材</button></div>
   </form>
 </dialog>

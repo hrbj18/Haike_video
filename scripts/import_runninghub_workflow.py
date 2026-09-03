@@ -1,4 +1,4 @@
-"""Freeze and validate a RunningHub ComfyUI API workflow for Haike Video."""
+"""Freeze and validate a RunningHub ComfyUI API workflow for OpenMontage."""
 
 from __future__ import annotations
 

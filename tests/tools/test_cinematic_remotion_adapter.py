@@ -175,3 +175,59 @@ def test_remotion_render_preserves_direct_cinematic_scenes(monkeypatch, tmp_path
 
     assert result.success, result.error
     assert captured["props"]["scenes"] == [scene]
+
+
+def test_layered_content_routes_to_cinematic_renderer_and_stages_nested_media(monkeypatch, tmp_path) -> None:
+    base = tmp_path / "base.mp4"
+    hero = tmp_path / "hero.png"
+    base.write_bytes(b"base")
+    hero.write_bytes(b"hero")
+    output = tmp_path / "layered.mp4"
+    captured = {}
+
+    def fake_run_command(self, command, **kwargs):
+        captured["command"] = command
+        props_arg = next(arg for arg in command if arg.startswith("--props="))
+        captured["props"] = json.loads(Path(props_arg.split("=", 1)[1]).read_text())
+        output.write_bytes(b"rendered")
+
+    monkeypatch.setattr(VideoCompose, "run_command", fake_run_command)
+    result = VideoCompose()._remotion_render({
+        "composition_data": {
+            "renderer_family": "layered-content",
+            "canvasWidth": 1080,
+            "canvasHeight": 1920,
+            "frameRate": 24,
+            "scenes": [{
+                "id": "layered",
+                "kind": "layered",
+                "startSeconds": 0,
+                "durationSeconds": 2,
+                "layoutRecipe": "focus_card",
+                "background": {"src": str(base), "mediaType": "video", "fit": "cover"},
+                "overlays": [{
+                    "id": "VL-001", "role": "hero", "src": str(hero), "mediaType": "image",
+                    "startSeconds": .5, "endSeconds": 1.5, "fit": "contain",
+                    "muted": True, "playbackRate": 1,
+                    "placement": {
+                        "presetId": "landscape_hero_center", "positionXRatio": .5,
+                        "positionYRatio": .47, "sizeRatio": .74,
+                        "aspectMode": "source", "maxHeightRatio": .78,
+                        "sourceAspectRatio": 16 / 9,
+                    },
+                }],
+            }],
+        },
+        "output_path": str(output),
+    })
+
+    assert result.success, result.error
+    assert "CinematicRenderer" in captured["command"]
+    scene = captured["props"]["scenes"][0]
+    assert scene["background"]["src"] != str(base)
+    assert scene["overlays"][0]["src"] != str(hero)
+    assert scene["overlays"][0]["muted"] is True
+    assert scene["overlays"][0]["playbackRate"] == 1
+    assert scene["overlays"][0]["placement"]["positionXRatio"] == .5
+    assert scene["overlays"][0]["placement"]["sourceAspectRatio"] == 16 / 9
+    assert result.data["staged_media_count"] == 2

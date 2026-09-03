@@ -53,6 +53,31 @@ def test_rejected_draft_preserves_input_and_exposes_regeneration() -> None:
     assert "按意见重新生成草案" in WORKBENCH_JS
 
 
+def test_story_headline_position_has_project_level_editor_and_api_contract() -> None:
+    editor = _function_body("renderStoryHeadlineLayoutEditor")
+    assert '"小标题左右位置"' in editor
+    assert '"小标题上下位置"' in editor
+    assert 'saveStoryHeadlineLayout(draft())' in editor
+    assert 'mutate("/story-headline-layout"' in _function_body("saveStoryHeadlineLayout")
+    assert ".story-headline-layout-preview" in WORKBENCH_CSS
+
+
+def test_story_headline_editor_shows_real_copy_and_reuse_scope() -> None:
+    editor = _function_body("renderStoryHeadlineLayoutEditor")
+    groups = _function_body("storyHeadlineReuseGroups")
+    scope = _function_body("renderStoryHeadlineReuseScope")
+    assert "renderStoryHeadlineText((scene || {}).headline_overlay)" in editor
+    assert "renderStoryHeadlineReuseScope(scene)" in editor
+    assert "scene.story_id" in groups
+    assert "scene.headline_overlay" in groups
+    assert '"标题复用范围"' in scope
+    assert '"应用片段"' in scope
+    assert 'class: `story-headline-scope-item ${group.story_id === activeStoryId ? "current" : ""}`' in scope
+    assert 'class: `story-headline-scene-chip ${item.id === (scene || {}).id ? "selected" : ""}`' in scope
+    assert ".story-headline-scope-item.current" in WORKBENCH_CSS
+    assert ".story-headline-scene-chip.selected" in WORKBENCH_CSS
+
+
 def test_script_draft_generation_has_an_honest_in_flight_feedback_contract() -> None:
     generator = _function_body("renderScriptGeneratorForm")
     feedback = _function_body("updateScriptDraftGenerationFeedback")
@@ -93,6 +118,10 @@ def test_primary_action_is_limited_to_approved_supported_projects() -> None:
     assert "RunningHub Standard 24GB" in WORKBENCH_JS
     assert "Whisper 只记录诊断，不覆盖精确帧切点" in WORKBENCH_JS
     assert "不会因低置信度打断流程" in WORKBENCH_JS
+    assert "renderReviewPreviewAvatarBindings" in WORKBENCH_JS
+    assert "台词 ${Number(item.turn_count || 0)} 句" in WORKBENCH_JS
+    assert "服务：${item.provider_name || item.provider_id || \"未识别\"}" in WORKBENCH_JS
+    assert "角色图：${item.role_name || \"未关联\"}" in WORKBENCH_JS
 
 
 def test_preflight_is_truthful_and_covers_all_frozen_fields() -> None:
@@ -103,7 +132,8 @@ def test_preflight_is_truthful_and_covers_all_frozen_fields() -> None:
         "预计句数",
         "预计补画面",
         "冻结音色",
-        "本地 TTS",
+        "双主持配音服务",
+        "配音服务",
         "FFmpeg",
         "ffprobe",
         "Pexels",
@@ -660,6 +690,69 @@ def test_background_music_supports_project_upload_progress_and_source_range() ->
         ".music-range-status",
     ):
         assert selector in WORKBENCH_CSS
+
+
+def test_visual_composition_exposes_bounded_focus_card_workflow() -> None:
+    body = _function_body("renderVisualCompositionEditor")
+    assert "/visual-composition" in body
+    assert "expected_revision: original.revision" in body
+    assert "full_bleed" in body
+    assert "focus_card" in body
+    for label in (
+        "全屏画面（保持现有方式）",
+        "重点素材卡片（背景 + 中间素材）",
+        "本段开始（秒）",
+        "本段结束（秒）",
+        "源视频入点（秒）",
+        "源视频出点（秒）",
+        "主角左右",
+        "主角上下",
+        "主角大小",
+        "恢复推荐位置",
+        "锁定草案",
+        "保存画面组合",
+    ):
+        assert label in body
+    assert "自由剪辑轨道" in body
+    assert "新增图层" not in body
+    assert ".visual-layer-time-grid" in WORKBENCH_CSS
+    assert ".visual-hero-placement-preview" in WORKBENCH_CSS
+    assert "playback_rate: 1" in body
+    assert "muted: true" in body
+
+
+def test_vision_v2_candidates_can_only_be_adopted_to_the_selected_scene_with_evidence() -> None:
+    request = _function_body("requestAssetMediaRecommendations")
+    adopt = _function_body("adoptVisionCandidateToSelectedScene")
+    assets = _function_body("renderAssets")
+
+    assert "selectedScene()" in adopt
+    assert "/media-index/recommendations/" in adopt
+    assert "expected_revision" in adopt
+    assert "采用到当前片段" in assets
+    assert "SHOT-" in assets or "candidate.segment_id" in assets
+    assert "evidence_source" in assets
+    assert "vision_v2" in request or "vision_v2" in assets
+
+
+def test_local_visual_assets_can_be_uploaded_then_indexed_without_hidden_network_work() -> None:
+    assert 'name="upload_files"' in WORKBENCH_HTML
+    assert 'type="file" multiple' in WORKBENCH_HTML
+    assert "单文件最多 8GB" in WORKBENCH_HTML
+    upload = _function_body("uploadProjectAssetFile")
+    assert "XMLHttpRequest" in upload
+    assert "/workbench/assets/uploads?" in upload
+    assert 'xhr.upload.addEventListener("progress"' in upload
+    assert "Content-Type" in upload
+    for function_name in (
+        "startAssetMediaCoarseIndex",
+        "startAssetMediaFineIndex",
+        "requestAssetMediaRecommendations",
+    ):
+        assert _function_body(function_name)
+    assert "本地语音识别" in WORKBENCH_JS
+    assert "按本段台词查看 V2 候选" in WORKBENCH_JS
+    assert "系统不会用粗筛结果冒充画面理解" in WORKBENCH_JS
 
 
 def test_full_preview_failure_shows_reason_and_retry_action() -> None:

@@ -1,9 +1,21 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Backlot</title>
+<title>海客视频 · 旧版看板</title>
+<script>
+  // 旧看板仍复用原有观察逻辑；暖纸张为默认，深色仅在用户明确选择后显示。
+  try {
+    const themeKey = "backlot.theme";
+    const storedTheme = localStorage.getItem(themeKey);
+    const theme = storedTheme === "dark" ? "dark" : "light";
+    if (storedTheme !== theme) localStorage.setItem(themeKey, theme);
+    document.documentElement.dataset.theme = theme;
+  } catch (_) {
+    document.documentElement.dataset.theme = "light";
+  }
+</script>
 <link rel="stylesheet" href="/ui/board.css">
 </head>
 <body>

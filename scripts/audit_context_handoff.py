@@ -1,4 +1,4 @@
-"""Validate the lightweight Haike Video handoff package."""
+"""Validate the lightweight OpenMontage handoff package."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ def audit(policy_path: Path = DEFAULT_POLICY, *, root: Path = REPO_ROOT) -> list
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Audit the Haike Video lightweight context package")
+    parser = argparse.ArgumentParser(description="Audit the OpenMontage lightweight context package")
     parser.add_argument("--policy", type=Path, default=DEFAULT_POLICY)
     parser.add_argument("--json", action="store_true", dest="as_json")
     args = parser.parse_args(argv)

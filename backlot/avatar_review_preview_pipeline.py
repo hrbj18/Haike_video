@@ -1,7 +1,7 @@
 """Recoverable one-click review preview for long-form avatar projects.
 
-This parent job owns the project-local path from an approved two-presenter
-script through Voicebox, two sequential RunningHub long-form videos, local ASR
+This parent job owns the project-local path from an approved one- or two-presenter
+script through TTS, one sequential RunningHub long-form video per active role, local ASR
 alignment, supporting visuals and a human-review preview.  It deliberately
 shares the workbench's existing ``review_preview_pipeline`` slot so manual
 media mutations remain mutually exclusive and the task center has one source
@@ -15,6 +15,7 @@ import json
 import shutil
 import time
 import wave
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from copy import deepcopy
 from datetime import UTC, datetime
 from pathlib import Path
@@ -22,6 +23,7 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from backlot import workbench as wb
+from backlot.audio_center import get_voice_profile
 from backlot.avatar_audio_clock import (
     AVATAR_VIDEO_FPS,
     AvatarAudioClockError,
@@ -37,6 +39,7 @@ from backlot.avatar_import import (
     approve_high_confidence_longform_cuts,
     apply_longform_timing_manifest,
     assemble_avatar_package,
+    ensure_exact_clock_assembly_duration_limit,
     finalize_upload,
     initialize_avatar_package,
     list_local_whisper_models,
@@ -55,16 +58,22 @@ from backlot.daily_pipeline import (
     ROLE_LABELS,
     ROLE_RESERVATION_CNY,
     STANDARD_RATE_CNY_PER_HOUR,
-    _presenter_images,
     _voicebox_profiles,
+)
+from backlot.avatar_roles import (
+    AvatarRoleError,
+    avatar_role_asset_file,
+    find_avatar_role_by_voice_profile,
+    list_avatar_roles,
+    role_front_reference,
 )
 from backlot.review_preview_pipeline import _probe_preview_evidence, collect_review_preview_capabilities
 from backlot.runninghub_config import read_runninghub_config
-from tools.audio.voicebox_tts import VoiceboxTTS
+from backlot.tts_runtime import generate_voice_audio
 from tools.avatar.runninghub_avatar import RunningHubLongCatClient
 
 
-PIPELINE_VERSION = "avatar-review-preview-v1.4"
+PIPELINE_VERSION = "avatar-review-preview-v1.5"
 TURN_TIMING_MANIFEST_VERSION = "avatar-turn-timing-v2"
 AVATAR_RECOVERY_POLICY_VERSION = "runninghub-oom-recovery-v1"
 OPENING_SILENCE_MS = 100
@@ -77,9 +86,18 @@ ABSOLUTE_BUDGET_LIMIT_CNY = 8.0
 PLUS_RATE_CNY_PER_HOUR = 6.0
 POLL_INTERVAL_SECONDS = 20.0
 POLL_TIMEOUT_SECONDS = 8 * 60 * 60
+MAX_TRANSIENT_POLL_ERRORS = 3
+MAX_TRANSIENT_POLL_BACKOFF_SECONDS = 5.0
 MAX_TRAILING_CLOCK_PAD_FRAMES = 5
+ONE_CLICK_AVATAR_MAX_DURATION_SECONDS = 300.0
+# The configured text relay may keep an SSE connection alive with heartbeat
+# events even after it stops producing a usable plan. A visual plan is
+# advisory; never let that one call hold the paid-avatar parent job forever.
+VISUAL_AI_PLANNING_TIMEOUT_SECONDS = 75.0
 VOICE_DIRECTORY = Path("assets/audio/avatar-review-preview")
 AVATAR_DIRECTORY = Path("assets/video/avatar-review-preview")
+PRESENTER_BINDINGS_PATH = Path("artifacts/avatar-review-presenter-bindings.json")
+PRESENTER_BINDINGS_VERSION = "1.0"
 ALLOWED_PROJECT_TYPE = "avatar-spokesperson"
 
 
@@ -224,35 +242,231 @@ def _approved_script(project_dir: Path, state: dict[str, Any]) -> dict[str, Any]
         if not turn_id or turn_id in seen_turns:
             raise AvatarReviewPreviewError("正式脚本的 Txxx 轮次编号缺失或重复")
         if speaker_id not in ROLE_LABELS:
-            raise AvatarReviewPreviewError("当前 V1 只支持雅雅/檬檬双主持；请先确认说话人映射")
+            raise AvatarReviewPreviewError("当前一键路线只支持雅雅或檬檬；请先确认说话人映射")
         if not str(section.get("text") or "").strip():
             raise AvatarReviewPreviewError(f"{turn_id} 台词为空")
         seen_turns.add(turn_id)
         seen_speakers.add(speaker_id)
-    if seen_speakers != set(ROLE_LABELS):
-        raise AvatarReviewPreviewError("正式脚本必须同时包含雅雅和檬檬两位主持人")
+    if not seen_speakers:
+        raise AvatarReviewPreviewError("正式脚本至少需要一位已映射的主持人")
     return script
 
 
-def _role_texts(script: dict[str, Any]) -> dict[str, str]:
+def _active_roles(script: dict[str, Any]) -> tuple[str, ...]:
+    """Return the supported presenters actually present in script order."""
+    seen = {
+        str(section.get("speaker_id") or "").lower()
+        for section in (script.get("sections") or [])
+        if isinstance(section, dict)
+    }
+    return tuple(role for role in ROLE_LABELS if role in seen)
+
+
+def _role_texts(script: dict[str, Any], roles: tuple[str, ...] | None = None) -> dict[str, str]:
     sections = script.get("sections") or []
+    active_roles = roles or _active_roles(script)
     return {
         role: "\n".join(
             str(section.get("text") or "").strip()
             for section in sections
             if isinstance(section, dict) and str(section.get("speaker_id") or "").lower() == role
         ).strip()
-        for role in ROLE_LABELS
+        for role in active_roles
     }
 
 
-def _role_evidence(script: dict[str, Any], profiles: dict[str, dict[str, Any]], images: dict[str, Path]) -> dict[str, Any]:
-    texts = _role_texts(script)
+def _requested_voice_profile_ids(payload: dict[str, Any] | None) -> dict[str, str]:
+    raw = (payload or {}).get("voice_profiles")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        role: str(raw.get(role) or "").strip()
+        for role in ROLE_LABELS
+        if str(raw.get(role) or "").strip()
+    }
+
+
+def _bound_role_voice_candidates() -> dict[str, list[dict[str, Any]]]:
+    """Return complete, available voice/avatar pairs without exposing secrets."""
+    candidates: dict[str, list[dict[str, Any]]] = {role: [] for role in ROLE_LABELS}
+    roles = list_avatar_roles().get("roles") or []
+    for avatar_role in roles:
+        if not isinstance(avatar_role, dict):
+            continue
+        matched_role = next(
+            (
+                role
+                for role, label in ROLE_LABELS.items()
+                if str(avatar_role.get("name") or "").strip() == label
+            ),
+            None,
+        )
+        binding = avatar_role.get("voice_binding") if isinstance(avatar_role.get("voice_binding"), dict) else {}
+        profile_id = str(binding.get("profile_id") or "").strip()
+        if not matched_role or not profile_id:
+            continue
+        try:
+            role_front_reference(avatar_role)
+        except AvatarRoleError:
+            continue
+        profile = get_voice_profile(profile_id)
+        if not profile or profile.get("available") is False:
+            continue
+        candidates[matched_role].append(profile)
+    return candidates
+
+
+def _avatar_voice_profiles(
+    payload: dict[str, Any] | None = None,
+    *,
+    roles: tuple[str, ...] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Resolve the deliberate role voices used by an avatar parent job."""
+    requested = _requested_voice_profile_ids(payload)
+    candidates = _bound_role_voice_candidates()
+    resolved: dict[str, dict[str, Any]] = {}
+    legacy: dict[str, dict[str, Any]] | None = None
+    active_roles = tuple(ROLE_LABELS) if roles is None else roles
+    for role in active_roles:
+        label = ROLE_LABELS[role]
+        requested_id = requested.get(role)
+        if requested_id:
+            profile = get_voice_profile(requested_id)
+            if not profile:
+                raise AvatarReviewPreviewError(f"{label}选择的配音中心音色已不存在")
+            if profile.get("available") is False:
+                raise AvatarReviewPreviewError(f"{label}选择的{profile.get('provider_name') or '配音服务'}当前不可用")
+            avatar_role = find_avatar_role_by_voice_profile(requested_id)
+            if not avatar_role or str(avatar_role.get("name") or "").strip() != label:
+                raise AvatarReviewPreviewError(f"{label}选择的音色尚未关联同名数字人角色")
+            role_front_reference(avatar_role)
+            resolved[role] = profile
+            continue
+        role_candidates = candidates.get(role) or []
+        if len(role_candidates) == 1:
+            resolved[role] = role_candidates[0]
+            continue
+        if len(role_candidates) > 1:
+            names = "、".join(str(item.get("name") or item.get("id")) for item in role_candidates)
+            raise AvatarReviewPreviewError(f"{label}存在多个完整角色音色（{names}），请明确选择本次音色")
+        # Preserve existing local-only installs. The presenter-binding check
+        # below still prevents an unbound or image-less local profile running.
+        if legacy is None:
+            legacy = _voicebox_profiles()
+        resolved[role] = legacy[role]
+    return resolved
+
+
+def _presenter_binding_path(project_dir: Path) -> Path:
+    return project_dir / PRESENTER_BINDINGS_PATH
+
+
+def _read_presenter_bindings(project_dir: Path) -> dict[str, Any]:
+    value = _read_json(_presenter_binding_path(project_dir))
+    if not isinstance(value.get("roles"), dict):
+        value["roles"] = {}
+    value.setdefault("version", PRESENTER_BINDINGS_VERSION)
+    return value
+
+
+def _materialize_role_presenter(project_dir: Path, role: str, profile: dict[str, Any]) -> tuple[Path, dict[str, Any]]:
+    label = ROLE_LABELS[role]
+    profile_id = str(profile.get("id") or "").strip()
+    try:
+        avatar_role = find_avatar_role_by_voice_profile(profile_id)
+    except AvatarRoleError as exc:
+        raise AvatarReviewPreviewError(str(exc)) from exc
+    if not avatar_role:
+        raise AvatarReviewPreviewError(
+            f"配音中心尚未为{label}当前音色“{profile.get('name') or profile_id}”关联数字人角色档案"
+        )
+    try:
+        reference = role_front_reference(avatar_role)
+        source = avatar_role_asset_file(str(avatar_role["role_id"]), str(reference["path"]))
+    except AvatarRoleError as exc:
+        raise AvatarReviewPreviewError(str(exc)) from exc
+    digest = _sha256_file(source)
+    if digest != str(reference.get("sha256") or ""):
+        raise AvatarReviewPreviewError(f"角色“{avatar_role.get('name') or label}”的正面出镜图已变化，请重新上传后再试")
+    extension = source.suffix.lower()
+    target = project_dir / "assets" / "images" / "avatar-review-presenters" / role / f"presenter_{digest[:12]}{extension}"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if not target.is_file() or _sha256_file(target) != digest:
+        temporary = target.parent / f".{target.name}.{uuid4().hex}.tmp"
+        try:
+            shutil.copy2(source, temporary)
+            if _sha256_file(temporary) != digest:
+                raise AvatarReviewPreviewError(f"{label}角色图复制校验失败")
+            temporary.replace(target)
+        finally:
+            if temporary.exists():
+                temporary.unlink(missing_ok=True)
+    return target, {
+        "role_id": str(avatar_role["role_id"]),
+        "role_name": str(avatar_role.get("name") or label),
+        "voice_profile_id": profile_id,
+        "voice_profile_name": str(profile.get("name") or profile_id),
+        "voice_signature": str(profile.get("voice_signature") or "") or None,
+        "reference_slot": "front",
+        "reference_path": str(reference["path"]),
+        "reference_sha256": digest,
+        "presenter_path": str(target.relative_to(project_dir)).replace("\\", "/"),
+        "presenter_filename": target.name,
+        "presenter_sha256": digest,
+        "materialized_at": _now(),
+    }
+
+
+def _resolve_presenter_images(
+    project_dir: Path,
+    profiles: dict[str, dict[str, Any]],
+    *,
+    refresh_from_role_library: bool,
+) -> tuple[dict[str, Path], dict[str, dict[str, Any]]]:
+    """Resolve explicit voice-to-role bindings into immutable project inputs."""
+    store = _read_presenter_bindings(project_dir)
+    records = store["roles"]
+    images: dict[str, Path] = {}
+    resolved: dict[str, dict[str, Any]] = {}
+    changed = False
+    for role in profiles:
+        profile = profiles[role]
+        existing = records.get(role) if isinstance(records.get(role), dict) else None
+        profile_id = str(profile.get("id") or "")
+        if refresh_from_role_library or not existing:
+            image, binding = _materialize_role_presenter(project_dir, role, profile)
+            records[role] = binding
+            existing = binding
+            changed = True
+        else:
+            if str(existing.get("voice_profile_id") or "") != profile_id:
+                raise AvatarInputDriftError(f"{ROLE_LABELS[role]}的音色已变化；请启动新任务")
+            candidate = project_dir / str(existing.get("presenter_path") or "")
+            if not candidate.is_file() or _sha256_file(candidate) != str(existing.get("presenter_sha256") or ""):
+                raise AvatarInputDriftError(f"{ROLE_LABELS[role]}的项目内角色图缺失或已变化；请启动新任务")
+            image = candidate
+        images[role] = image
+        resolved[role] = dict(existing or {})
+    if changed:
+        store["updated_at"] = _now()
+        wb._atomic_write(_presenter_binding_path(project_dir), store)
+    return images, resolved
+
+
+def _role_evidence(
+    script: dict[str, Any],
+    profiles: dict[str, dict[str, Any]],
+    images: dict[str, Path],
+    presenter_bindings: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    texts = _role_texts(script, tuple(profiles))
     evidence: dict[str, Any] = {}
-    for role, label in ROLE_LABELS.items():
+    for role in profiles:
+        label = ROLE_LABELS[role]
         text = texts.get(role) or ""
         profile = profiles[role]
         image = images[role]
+        binding = presenter_bindings[role]
         evidence[role] = {
             "role": role,
             "label": label,
@@ -264,6 +478,13 @@ def _role_evidence(script: dict[str, Any], profiles: dict[str, dict[str, Any]], 
             "character_count": len(text.replace("\n", "")),
             "profile_id": str(profile.get("id") or ""),
             "profile_name": str(profile.get("name") or label),
+            "provider_id": str(profile.get("provider_id") or "voicebox_tts"),
+            "provider_name": str(profile.get("provider_name") or "Haike Video 本地配音"),
+            "voice_signature": str(profile.get("voice_signature") or "") or None,
+            "role_id": binding.get("role_id"),
+            "role_name": binding.get("role_name"),
+            "presenter_path": binding.get("presenter_path"),
+            "presenter_source": "audio_center_role_binding",
             "presenter_filename": image.name,
             "presenter_sha256": _sha256_file(image),
         }
@@ -367,6 +588,7 @@ def avatar_review_preview_preflight(
     except AvatarReviewPreviewError as exc:
         script = {}
         blockers.append(str(exc))
+    active_roles = _active_roles(script) if script else ()
     planning_mode = str(((payload.get("visual") or {}).get("planning_mode") or "ai_director"))
     if planning_mode not in {"ai_director", "rule_mix"}:
         blockers.append("画面规划方式只能是 AI 智能导演或规则混合")
@@ -393,14 +615,25 @@ def avatar_review_preview_preflight(
         asr = {"status": "blocked", "local_only": True, "load_tested": False}
         blockers.append(str(exc))
     try:
-        images = _presenter_images()
-        profiles = _voicebox_profiles()
-        roles = _role_evidence(script, profiles, images) if script else {}
+        profiles = _avatar_voice_profiles(payload, roles=active_roles)
+        images, presenter_bindings = _resolve_presenter_images(
+            project_dir, profiles, refresh_from_role_library=True,
+        )
+        roles = _role_evidence(script, profiles, images, presenter_bindings) if script else {}
     except Exception as exc:  # noqa: BLE001 - converted to safe Chinese blocker
-        images, profiles, roles = {}, {}, {}
+        images, profiles, presenter_bindings, roles = {}, {}, {}, {}
         blockers.append(str(exc))
-    if not (capabilities.get("tts") or {}).get("available"):
-        blockers.append("本地 Voicebox TTS 当前不可用")
+    selected_providers = sorted({
+        str(profile.get("provider_name") or profile.get("provider_id") or "配音服务")
+        for profile in profiles.values()
+        if isinstance(profile, dict)
+    })
+    capabilities["tts"] = {
+        "available": bool(active_roles) and len(profiles) == len(active_roles),
+        "status": "available" if active_roles and len(profiles) == len(active_roles) else "unavailable",
+        "provider": "、".join(selected_providers),
+        "user_message": "本次使用：" + "、".join(selected_providers) if selected_providers else "尚未解析脚本主持人音色",
+    }
     capabilities["asr"] = asr
     capabilities["avatar"] = {
         "available": runninghub["ready"],
@@ -425,6 +658,7 @@ def avatar_review_preview_preflight(
         "script_hash": script_hash,
         "line_count": len(script.get("sections") or []) if script else 0,
         "speaker_count": len(roles),
+        "active_roles": list(active_roles),
         "roles": roles,
         "capabilities": capabilities,
         "asr": asr,
@@ -502,14 +736,18 @@ def start_avatar_review_preview_job(project_dir: Path, payload: dict[str, Any]) 
                 return _public(current, launch_required=False)
             raise AvatarReviewPreviewConflict("当前项目已有另一条一键审核预览任务，不能并发启动")
         script = _approved_script(project_dir, state)
-        profiles = _voicebox_profiles()
-        images = _presenter_images()
-        roles = _role_evidence(script, profiles, images)
+        active_roles = _active_roles(script)
+        profiles = _avatar_voice_profiles(payload, roles=active_roles)
+        images, presenter_bindings = _resolve_presenter_images(
+            project_dir, profiles, refresh_from_role_library=True,
+        )
+        roles = _role_evidence(script, profiles, images, presenter_bindings)
         model = preflight["asr"]
         frozen = {
             "project_type": ALLOWED_PROJECT_TYPE,
             "script": script,
             "script_hash": preflight["script_hash"],
+            "active_roles": list(active_roles),
             "roles": roles,
             "asr": model,
             "provider": preflight["avatar_contract"],
@@ -561,12 +799,27 @@ def _assert_frozen(project_dir: Path, job: dict[str, Any], *, load_whisper: bool
     script = _approved_script(project_dir, state)
     if _json_hash(script) != frozen.get("script_hash"):
         raise AvatarInputDriftError("正式脚本在任务启动后发生变化；请创建新的审核预览任务")
-    images = _presenter_images()
-    profiles = _voicebox_profiles()
-    current_roles = _role_evidence(script, profiles, images)
+    frozen_profile_ids = {
+        role: str(expected.get("profile_id") or "")
+        for role, expected in (frozen.get("roles") or {}).items()
+        if isinstance(expected, dict)
+    }
+    active_roles = tuple(
+        role for role in frozen.get("active_roles") or tuple(frozen_profile_ids)
+        if role in ROLE_LABELS
+    )
+    if not active_roles:
+        raise AvatarInputDriftError("冻结任务缺少有效主持人清单；请创建新的审核预览任务")
+    if tuple(_active_roles(script)) != active_roles:
+        raise AvatarInputDriftError("正式脚本中的主持人集合在任务启动后发生变化；请创建新的审核预览任务")
+    profiles = _avatar_voice_profiles({"voice_profiles": frozen_profile_ids}, roles=active_roles)
+    images, presenter_bindings = _resolve_presenter_images(
+        project_dir, profiles, refresh_from_role_library=False,
+    )
+    current_roles = _role_evidence(script, profiles, images, presenter_bindings)
     for role, expected in (frozen.get("roles") or {}).items():
         current = current_roles.get(role) or {}
-        for key in ("text_sha256", "profile_id", "presenter_sha256"):
+        for key in ("text_sha256", "profile_id", "provider_id", "voice_signature", "presenter_sha256", "role_id"):
             if str(current.get(key) or "") != str(expected.get(key) or ""):
                 raise AvatarInputDriftError(f"{ROLE_LABELS.get(role, role)} 的台词、音色或角色图已变化；请启动新任务")
     recovery = frozen.get("avatar_recovery") or _avatar_recovery_policy(
@@ -804,7 +1057,7 @@ def _generate_voice_tracks(
     worker_token: str,
     context: dict[str, Any],
     *,
-    tts_factory: Callable[[], Any] = VoiceboxTTS,
+    tts_factory: Callable[[], Any] | None = None,
 ) -> dict[str, Any]:
     script = context["script"]
     profiles = context["profiles"]
@@ -813,7 +1066,7 @@ def _generate_voice_tracks(
     turns = output.setdefault("turns", {})
     timing_contract = ((_read_internal(project_dir).get("frozen_input") or {}).get("turn_timing") or {})
     sections = [item for item in script.get("sections") or [] if isinstance(item, dict)]
-    tts = tts_factory()
+    tts = tts_factory() if tts_factory is not None else None
     for section in sections:
         turn_id = str(section["turn_id"]).upper()
         role = str(section["speaker_id"]).lower()
@@ -822,21 +1075,42 @@ def _generate_voice_tracks(
         profile = profiles[role]
         target = _turn_voice_output_path(project_dir, turn_id, role)
         text_sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
-        turn_signature = _json_hash({"turn_id": turn_id, "speaker_id": role, "text_sha256": text_sha256, "profile_id": profile["id"], "timing_signature": timing_contract.get("signature")})
+        provider_id = str(profile.get("provider_id") or "voicebox_tts")
+        voice_signature = str(profile.get("voice_signature") or "") or _json_hash({
+            "profile_id": profile["id"], "profile_name": profile.get("name") or label,
+            "provider_id": provider_id,
+        })
+        turn_signature = _json_hash({
+            "turn_id": turn_id,
+            "speaker_id": role,
+            "text_sha256": text_sha256,
+            "profile_id": profile["id"],
+            "provider_id": provider_id,
+            "voice_signature": voice_signature,
+            "timing_signature": timing_contract.get("signature"),
+        })
         record = turns.get(turn_id) or {}
         reusable = record.get("status") == "completed" and record.get("input_signature") == turn_signature and target.is_file() and record.get("wav_sha256") == _sha256_file(target)
         if reusable:
             continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        result = tts.execute({
-            "text": text,
-            "profile_id": profile["id"],
-            "profile_name": profile.get("name") or label,
-            "language": "zh",
-            "output_path": str(target),
-            "timeout_seconds": 7200,
-            "poll_seconds": 3,
-        })
+        if tts is None:
+            result = generate_voice_audio(
+                text=text,
+                profile=profile,
+                output_path=target,
+                language="zh",
+            )
+        else:
+            result = tts.execute({
+                "text": text,
+                "profile_id": profile["id"],
+                "profile_name": profile.get("name") or label,
+                "language": "zh",
+                "output_path": str(target),
+                "timeout_seconds": 7200,
+                "poll_seconds": 3,
+            })
         if getattr(result, "success", None) is False or not target.is_file():
             raise AvatarReviewPreviewError(str(getattr(result, "error", None) or f"{label}本地配音失败"))
         record = {
@@ -847,7 +1121,9 @@ def _generate_voice_tracks(
             "text_sha256": text_sha256,
             "profile_id": profile["id"],
             "profile_name": profile.get("name") or label,
-            "voice_signature": _json_hash({"profile_id": profile["id"], "profile_name": profile.get("name") or label}),
+            "provider_id": provider_id,
+            "provider_name": profile.get("provider_name") or "Haike Video 本地配音",
+            "voice_signature": voice_signature,
             "input_signature": turn_signature,
             "wav_sha256": _sha256_file(target),
             "completed_at": _now(),
@@ -860,11 +1136,20 @@ def _generate_voice_tracks(
             job["current"] = {"kind": "turn", "id": current_turn, "label": f"{current_turn} {current_label}配音已完成"}
         _mutate(project_dir, job_id, worker_token, persist)
     manifest = {"version": TURN_TIMING_MANIFEST_VERSION, "contract": timing_contract, "roles": {}, "turns": []}
-    for role, label in ROLE_LABELS.items():
+    for role in _active_roles(script):
+        label = ROLE_LABELS[role]
         role_records = [turns[str(item["turn_id"]).upper()] for item in sections if str(item["speaker_id"]).lower() == role]
         role_record, timed_turns = _compose_role_track(project_dir, role, role_records)
         expected = ((_read_internal(project_dir).get("frozen_input") or {}).get("roles") or {}).get(role) or {}
-        roles[role] = {**role_record, "text_sha256": expected.get("text_sha256"), "profile_id": expected.get("profile_id"), "profile_name": expected.get("profile_name")}
+        roles[role] = {
+            **role_record,
+            "text_sha256": expected.get("text_sha256"),
+            "profile_id": expected.get("profile_id"),
+            "profile_name": expected.get("profile_name"),
+            "provider_id": expected.get("provider_id"),
+            "provider_name": expected.get("provider_name"),
+            "voice_signature": expected.get("voice_signature"),
+        }
         manifest["roles"][role] = {
             key: role_record[key]
             for key in (
@@ -1150,7 +1435,11 @@ def _verified_voice_timing_manifest(project_dir: Path, voice_output: dict[str, A
         or str(manifest.get("input_signature") or "") != str(metadata.get("input_signature") or "")
     ):
         raise AvatarInputDriftError("逐轮时间清单版本或输入签名已变化")
-    for role in ROLE_LABELS:
+    voice_roles = voice_output.get("roles") if isinstance(voice_output.get("roles"), dict) else {}
+    active_roles = tuple(role for role in ROLE_LABELS if role in voice_roles)
+    if not active_roles:
+        raise AvatarInputDriftError("逐轮时间清单没有有效主持人音频，不能继续")
+    for role in active_roles:
         persisted_role = (manifest.get("roles") or {}).get(role) or {}
         phase_role = (voice_output.get("roles") or {}).get(role) or {}
         for key in ("path", "sha256", "sample_rate", "sample_frame_count", "video_frame_count"):
@@ -1190,6 +1479,55 @@ def _verified_voice_timing_manifest(project_dir: Path, voice_output: dict[str, A
             raise AvatarInputDriftError(f"{ROLE_LABELS[role]}时间清单末端没有覆盖完整冻结音频")
     manifest["sha256"] = manifest_sha256
     return manifest
+
+
+def _validate_one_click_avatar_duration(project_dir: Path, voice_output: dict[str, Any]) -> dict[str, Any]:
+    """Block overlong exact-frame plans before any new RunningHub submission."""
+    manifest = _verified_voice_timing_manifest(project_dir, voice_output)
+    roles = manifest.get("roles") or {}
+    turns = manifest.get("turns") or []
+    if not isinstance(roles, dict) or not isinstance(turns, list) or not turns:
+        raise AvatarInputDriftError("逐轮时间清单不完整，不能提交数字人任务")
+    role_duration = 0.0
+    active_roles = tuple(role for role in ROLE_LABELS if role in roles)
+    if not active_roles:
+        raise AvatarInputDriftError("逐轮时间清单没有有效主持人，不能提交数字人任务")
+    for role in active_roles:
+        record = roles.get(role) or {}
+        try:
+            frames = int(record.get("video_frame_count") or 0)
+        except (TypeError, ValueError) as exc:
+            raise AvatarInputDriftError(f"{ROLE_LABELS[role]}精确帧时长账本无效") from exc
+        if frames <= 0:
+            raise AvatarInputDriftError(f"{ROLE_LABELS[role]}精确帧时长账本为空")
+        role_duration += frames / AVATAR_VIDEO_FPS
+    gap_duration = 0.0
+    previous_role: str | None = None
+    for turn in turns:
+        if not isinstance(turn, dict):
+            raise AvatarInputDriftError("逐轮时间清单包含无效轮次")
+        role = str(turn.get("speaker_id") or "").lower()
+        if role not in ROLE_LABELS:
+            raise AvatarInputDriftError("逐轮时间清单包含未知角色")
+        if previous_role is not None:
+            gap_duration += (SAME_SPEAKER_GAP_MS if role == previous_role else SPEAKER_CHANGE_GAP_MS) / 1000
+        previous_role = role
+    planned = role_duration + gap_duration
+    if planned > ONE_CLICK_AVATAR_MAX_DURATION_SECONDS + 1e-6:
+        raise AvatarReviewPreviewError(
+            f"精确帧音频计划约 {planned:.2f} 秒，超过有数字人一键生成 "
+            f"{ONE_CLICK_AVATAR_MAX_DURATION_SECONDS:.0f} 秒安全上限；未提交 RunningHub"
+        )
+    duration_plan = {
+        "status": "passed",
+        "planned_master_seconds": round(planned, 6),
+        "role_track_seconds": round(role_duration, 6),
+        "inter_turn_gap_seconds": round(gap_duration, 6),
+        "maximum_seconds": ONE_CLICK_AVATAR_MAX_DURATION_SECONDS,
+        "timing_manifest_sha256": manifest["sha256"],
+    }
+    voice_output["avatar_duration_plan"] = duration_plan
+    return duration_plan
 
 
 def _verify_contiguous_video_prefix(path: Path, expected_frames: int) -> dict[str, Any]:
@@ -1517,8 +1855,11 @@ def _generate_runninghub_avatars(
     max_attempts = standard_max + (plus_max if plus_authorized else 0)
     output_dir = project_dir / AVATAR_DIRECTORY
     output_dir.mkdir(parents=True, exist_ok=True)
+    active_roles = tuple(role for role in ROLE_LABELS if role in (voice_output.get("roles") or {}))
+    if not active_roles:
+        raise AvatarReviewPreviewError("没有可提交的主持人长音频")
     role_order = sorted(
-        ROLE_LABELS,
+        active_roles,
         key=lambda role: float((((voice_output.get("roles") or {}).get(role) or {}).get("duration_seconds") or 0)),
     )
     for role in role_order:
@@ -1837,8 +2178,26 @@ def _generate_runninghub_avatars(
                     result = client.poll(str(record["task_id"]))
                 except Exception as exc:  # noqa: BLE001
                     record["status"] = "running"
-                    _persist_avatar_records(project_dir, job_id, worker_token, records, f"{label}状态查询中断；保留任务号并等待安全恢复")
-                    raise AvatarReviewPreviewError(f"{label}状态查询失败；任务号已保存，只会继续轮询同一任务：{exc}") from exc
+                    error_count = int(record.get("transient_poll_error_count") or 0) + 1
+                    record.update({
+                        "transient_poll_error_count": error_count,
+                        "last_transient_poll_error": str(exc)[:500],
+                    })
+                    _persist_avatar_records(
+                        project_dir,
+                        job_id,
+                        worker_token,
+                        records,
+                        f"{label}状态查询短暂中断（{error_count}/{MAX_TRANSIENT_POLL_ERRORS}）；只会继续查询原任务",
+                    )
+                    if error_count < MAX_TRANSIENT_POLL_ERRORS:
+                        time.sleep(max(0.0, min(MAX_TRANSIENT_POLL_BACKOFF_SECONDS, poll_interval)))
+                        continue
+                    raise AvatarReviewPreviewError(
+                        f"{label}状态查询连续 {error_count} 次失败；任务号已保存，只会继续轮询同一任务：{exc}"
+                    ) from exc
+                record.pop("transient_poll_error_count", None)
+                record.pop("last_transient_poll_error", None)
                 provider_status = str(result.get("status") or "").upper()
                 if provider_status in {"RUNNING", "QUEUED", "PENDING"}:
                     record["status"] = "running"
@@ -2017,11 +2376,12 @@ def _prepare_longform_package(
             "require_asr": True,
             "speaker_change_gap_seconds": SPEAKER_CHANGE_GAP_MS / 1000,
             "same_speaker_gap_seconds": SAME_SPEAKER_GAP_MS / 1000,
-            "default_treatment": "pip_top_left",
+            "default_treatment": "custom",
             "background_mode": "opaque",
         })
     records = avatar_output.get("roles") or {}
-    for role, label in ROLE_LABELS.items():
+    for role in tuple(role for role in ROLE_LABELS if role in records):
+        label = ROLE_LABELS[role]
         source = project_dir / str((records.get(role) or {}).get("output_path") or "")
         if not source.is_file():
             raise AvatarReviewPreviewError(f"{label}数字人长视频不存在")
@@ -2122,6 +2482,12 @@ def _assemble_and_apply(project_dir: Path) -> dict[str, Any]:
     package = read_avatar_package(project_dir) or {}
     if not _cut_plan_ready(package):
         raise AvatarReviewPreviewError("仍有数字人切点未批准")
+    timing_manifest = (((package.get("asr") or {}).get("summary") or {}).get("timing_manifest") or {})
+    if str(timing_manifest.get("version") or "") == TURN_TIMING_MANIFEST_VERSION:
+        package = ensure_exact_clock_assembly_duration_limit(
+            project_dir,
+            maximum_seconds=ONE_CLICK_AVATAR_MAX_DURATION_SECONDS,
+        )
     # A freshly approved script can enter the one-click avatar pipeline before
     # the user has visited the scene-planning step.  Applying the finished
     # avatar master requires those scene records, so create the ordinary
@@ -2133,7 +2499,17 @@ def _assemble_and_apply(project_dir: Path) -> dict[str, Any]:
         if package.get("assembly", {}).get("status") != "running":
             start_avatar_assembly(project_dir)
         package = assemble_avatar_package(project_dir)
-    state = wb.apply_avatar_package_to_timeline(project_dir, {"default_treatment": "pip_top_left"})
+    if package.get("assembly", {}).get("status") != "passed":
+        issues = package.get("assembly", {}).get("issues") or []
+        detail = next(
+            (str(item.get("message") or "") for item in issues if isinstance(item, dict) and item.get("message")),
+            "数字人原声母版未通过本地媒体检查",
+        )
+        raise AvatarReviewPreviewError(f"数字人原声母版合成未通过：{detail}")
+    # ``pip_top_right`` is a geometry template, not an avatar-package
+    # treatment.  ``custom`` preserves the project's default right-top
+    # template while remaining valid in the avatar import contract.
+    state = wb.apply_avatar_package_to_timeline(project_dir, {"default_treatment": "custom"})
     return {
         "assembly": package.get("assembly"),
         "timeline_revision": (state.get("timeline") or {}).get("revision"),
@@ -2147,6 +2523,60 @@ def _visuals_complete(state: dict[str, Any]) -> bool:
         any(block.get("status") == "ready" and block.get("asset_id") for block in ((scene.get("visual_timeline") or {}).get("blocks") or []))
         for scene in scenes
     )
+
+
+def _preview_supporting_visual_plan(
+    project_dir: Path,
+    policy: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], str | None]:
+    """Return a bounded AI plan or a recorded deterministic fallback.
+
+    The parent job must remain recoverable when a compatible text relay sends
+    endless SSE heartbeats. Planning is read-only up to this point, so a
+    timed-out planner thread cannot alter the project after the fallback has
+    continued. The actual execution policy and the reason are persisted into
+    the visual-batch contract for later review.
+    """
+    if policy.get("planning_mode") != "ai_director":
+        return wb.preview_visual_batch_plan(project_dir, policy), policy, None
+
+    executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="avatar-visual-plan")
+    fallback_reason: str | None = None
+    try:
+        future = executor.submit(wb.preview_visual_batch_plan, project_dir, policy)
+        try:
+            return future.result(timeout=VISUAL_AI_PLANNING_TIMEOUT_SECONDS), policy, None
+        except FutureTimeout:
+            fallback_reason = (
+                f"AI 智能导演在 {int(VISUAL_AI_PLANNING_TIMEOUT_SECONDS)} 秒内未返回可执行计划，"
+                "已自动改用规则混合规划；数字人、本地素材和时间轴均未改变"
+            )
+        except wb.WorkbenchError as exc:
+            if not str(exc).startswith("AI 画面规划失败："):
+                raise
+            fallback_reason = (
+                f"{exc}；已自动改用规则混合规划；"
+                "数字人、本地素材和时间轴均未改变"
+            )
+    finally:
+        # ``wait=False`` is intentional: an SSE relay can ignore the client
+        # deadline. The planner only reads project state, while the parent
+        # continues with an explicit, auditable non-AI plan.
+        executor.shutdown(wait=False, cancel_futures=True)
+
+    fallback_policy = {
+        **policy,
+        "planning_mode": "rule_mix",
+        "ai_planning_confirmed": False,
+    }
+    reviewed = wb.preview_visual_batch_plan(project_dir, fallback_policy)
+    planner = reviewed.setdefault("planner", {})
+    planner.update({
+        "mode": "rule_mix",
+        "fallback_from": "ai_director",
+        "fallback_reason": fallback_reason,
+    })
+    return reviewed, fallback_policy, fallback_reason
 
 
 def _generate_supporting_visuals(project_dir: Path, job_id: str, worker_token: str, frozen: dict[str, Any]) -> dict[str, Any]:
@@ -2168,10 +2598,12 @@ def _generate_supporting_visuals(project_dir: Path, job_id: str, worker_token: s
     child = (state.get("automation") or {}).get("visual_batch") or {}
     if child.get("status") in {"queued", "generating"} and child.get("parent_job_id") == job_id:
         child_job_id = str(child.get("job_id") or "")
+        execution_policy = policy
+        planning_fallback = None
     else:
-        reviewed = wb.preview_visual_batch_plan(project_dir, policy)
+        reviewed, execution_policy, planning_fallback = _preview_supporting_visual_plan(project_dir, policy)
         started = wb.start_visual_batch_generation(project_dir, {
-            **policy,
+            **execution_policy,
             "confirmed": True,
             "reviewed_plan": reviewed,
             "copy_presenter_layout": False,
@@ -2199,7 +2631,8 @@ def _generate_supporting_visuals(project_dir: Path, job_id: str, worker_token: s
         "total_slots": batch.get("total_slots"),
         "completed_slots": batch.get("completed_slots"),
         "failed_slots": batch.get("failed_slots"),
-        "planning_mode": policy["planning_mode"],
+        "planning_mode": execution_policy["planning_mode"],
+        "planning_fallback": planning_fallback,
     }
 
 
@@ -2311,8 +2744,9 @@ def run_avatar_review_preview_job(
             _phase_begin(project_dir, job_id, worker_token, "voice", "正在串行生成雅雅、檬檬长配音")
             voice = _generate_voice_tracks(
                 project_dir, job_id, worker_token, context,
-                tts_factory=overrides.get("tts_factory", VoiceboxTTS),
+                tts_factory=overrides.get("tts_factory"),
             )
+            _validate_one_click_avatar_duration(project_dir, voice)
             _phase_complete(project_dir, job_id, worker_token, "voice", "avatar_generation", voice)
         else:
             voice = (((_read_internal(project_dir).get("phases") or {}).get("voice") or {}).get("output") or {})

@@ -1,4 +1,4 @@
-"""Export and import private Haike Video local TTS profile packs."""
+"""Export and import private OpenMontage local TTS profile packs."""
 
 from __future__ import annotations
 
@@ -54,7 +54,7 @@ def export_pack(data_dir: Path, output: Path, profile_ids: list[str] | None = No
     if not selected:
         raise ValueError("没有可导出的本地音色")
     output.parent.mkdir(parents=True, exist_ok=True)
-    manifest = {"version": 1, "format": "haike_video-tts-profile-pack", "profiles": selected}
+    manifest = {"version": 1, "format": "openmontage-tts-profile-pack", "profiles": selected}
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         archive.writestr("manifest.json", json.dumps(manifest, ensure_ascii=False, indent=2) + "\n")
         written: set[str] = set()
@@ -83,8 +83,8 @@ def import_pack(data_dir: Path, package: Path) -> dict[str, Any]:
             if path.is_absolute() or ".." in path.parts:
                 raise ValueError(f"音色包包含不安全路径：{name}")
         manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
-        if manifest.get("format") != "haike_video-tts-profile-pack":
-            raise ValueError("不是 Haike Video 本地音色包")
+        if manifest.get("format") != "openmontage-tts-profile-pack":
+            raise ValueError("不是 OpenMontage 本地音色包")
         incoming = [item for item in manifest.get("profiles", []) if isinstance(item, dict) and item.get("id")]
         if not incoming:
             raise ValueError("音色包没有任何音色")
@@ -105,7 +105,7 @@ def import_pack(data_dir: Path, package: Path) -> dict[str, Any]:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Manage private Haike Video local TTS profile packs")
+    parser = argparse.ArgumentParser(description="Manage private OpenMontage local TTS profile packs")
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_DATA_DIR)
     subparsers = parser.add_subparsers(dest="command", required=True)
     export = subparsers.add_parser("export")

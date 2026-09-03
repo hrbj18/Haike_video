@@ -9,7 +9,6 @@ import {
   useCurrentFrame,
   useVideoConfig,
 } from "remotion";
-import { loadFont } from "@remotion/google-fonts/SpaceGrotesk";
 import { TextCard } from "./components/TextCard";
 import { StatCard } from "./components/StatCard";
 import { CalloutBox } from "./components/CalloutBox";
@@ -34,11 +33,8 @@ import { resolveAsset } from "./lib/resolveAsset";
 import type { ParticleType } from "./components/ParticleOverlay";
 import { resolveTheme, type ThemeConfig, DEFAULT_THEME } from "./Root";
 
-// Load Space Grotesk font for cinematic typography
-const { fontFamily } = loadFont("normal", {
-  weights: ["400", "700"],
-  subsets: ["latin"],
-});
+// Keep renders fully local. Browser bundling must not depend on fonts.gstatic.com.
+const fontFamily = '"Microsoft YaHei", "Segoe UI", Arial, sans-serif';
 
 // ---------------------------------------------------------------------------
 // Animated Background — Gradient Mesh + Floating Orbs

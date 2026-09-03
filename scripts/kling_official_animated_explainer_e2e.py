@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Kling Official animated-explainer E2E smoke script.
 
-This script validates the official Kling provider path through Haike Video
+This script validates the official Kling provider path through OpenMontage
 selectors and the animated-explainer asset/compose surface.
 
 Default mode is a no-cost dry run. Use --live-tts for one paid TTS sample,
@@ -269,7 +269,7 @@ def _run_live_tts(
         "tts_selector -> kling_tts",
         "kling_official",
         "kling-official-tts",
-        "Validate official Kling TTS through Haike Video selector routing.",
+        "Validate official Kling TTS through OpenMontage selector routing.",
         "sample",
     )
     result = tts.execute(

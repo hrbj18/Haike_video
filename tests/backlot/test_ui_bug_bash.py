@@ -168,6 +168,39 @@ def _build_approval_projects() -> None:
     from backlot.avatar_import import _save_package
     _save_package(avatar_project, package)
 
+    layered_project = init_project(
+        "multilayer-workbench",
+        title="语义双层画面回归",
+        pipeline_type="animated-explainer",
+        pipeline_dir=root,
+    )
+    layered_script = {
+        "version": "1.0", "title": "机器鸭重点画面",
+        "sections": [{"id": "sec-01", "text": "机器鸭正在学习行走。", "start_seconds": 0, "end_seconds": 4}],
+    }
+    (layered_project / "artifacts" / "script.json").write_text(
+        json.dumps(layered_script, ensure_ascii=False), encoding="utf-8"
+    )
+    (layered_project / "artifacts" / "scene_plan.json").write_text(json.dumps({
+        "version": "1.0",
+        "scenes": [{
+            "id": "scene-01", "title": "机器鸭演示", "description": "机器鸭正在学习行走",
+            "start_seconds": 0, "end_seconds": 4, "script_section_id": "sec-01",
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+    from PIL import Image
+    hero = layered_project / "assets" / "duck.png"
+    hero.parent.mkdir(parents=True, exist_ok=True)
+    Image.new("RGB", (320, 180), (40, 180, 210)).save(hero)
+    (layered_project / "artifacts" / "asset_manifest.json").write_text(json.dumps({
+        "assets": [{
+            "id": "duck", "name": "机器鸭演示素材", "type": "image",
+            "path": "assets/duck.png", "scene_id": "scene-01", "source_tool": "provided_asset",
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+    from backlot.workbench import bootstrap_workbench
+    bootstrap_workbench(layered_project)
+
 
 @pytest.fixture(scope="module")
 def staged_backlot_server():
@@ -177,7 +210,7 @@ def staged_backlot_server():
         probe.bind(("127.0.0.1", 0))
         port = int(probe.getsockname()[1])
     env = dict(os.environ)
-    env["HAIKE_VIDEO_PROJECTS_DIR"] = str(backlot_screenshot_stage.STAGE_DIR)
+    env["OPENMONTAGE_PROJECTS_DIR"] = str(backlot_screenshot_stage.STAGE_DIR)
     server = subprocess.Popen(
         [sys.executable, "-m", "backlot", "serve", "--port", str(port)],
         cwd=backlot_screenshot_stage.REPO_ROOT,
@@ -214,6 +247,7 @@ def test_project_pages_fit_mobile_and_tablet_widths(staged_backlot_server):
         "/p/paper-boats?static=1",
         "/p/gate-proposal?static=1",
         "/p/gate-character-design?static=1",
+        "/p/multilayer-workbench",
     ]
     viewports = [
         {"width": 390, "height": 844},
@@ -370,26 +404,60 @@ def test_avatar_role_library_form_fields_are_visible_when_optional_panel_is_open
             browser.close()
 
 
-def test_workbench_theme_switch_is_visible_and_persists_after_reload(staged_backlot_server):
+def test_workbench_light_theme_is_default_and_dark_choice_persists_after_reload(staged_backlot_server):
     with sync_playwright() as pw:
         browser = pw.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1440, "height": 1000})
         try:
-            page.goto(staged_backlot_server + "/p/avatar-cloud-ready", wait_until="networkidle")
-            page.evaluate("localStorage.removeItem('backlot.theme')")
-            page.reload(wait_until="networkidle")
+            page.goto(staged_backlot_server + "/p/avatar-cloud-ready", wait_until="domcontentloaded")
+            page.evaluate("""() => {
+                localStorage.setItem('backlot.editorial-theme-v1', 'done');
+                localStorage.removeItem('backlot.theme');
+            }""")
+            page.reload(wait_until="domcontentloaded")
 
-            toggle = page.get_by_role("button", name="切换至浅色主题")
-            assert toggle.is_visible()
-            toggle.click()
             assert page.locator("html").get_attribute("data-theme") == "light"
             assert page.evaluate("localStorage.getItem('backlot.theme')") == "light"
-            assert page.locator(".sidebar").evaluate(
-                "element => getComputedStyle(element).backgroundColor"
-            ) == "rgba(255, 249, 236, 0.88)"
+            toggle = page.locator(".theme-toggle")
+            toggle.wait_for(state="visible")
+            assert toggle.get_attribute("aria-label") == "切换至深色主题"
+            assert toggle.is_visible()
+            toggle.click()
+            assert page.locator("html").get_attribute("data-theme") == "dark"
+            assert page.evaluate("localStorage.getItem('backlot.theme')") == "dark"
+
+            page.reload(wait_until="domcontentloaded")
+            assert page.locator("html").get_attribute("data-theme") == "dark"
+            toggle = page.locator(".theme-toggle")
+            toggle.wait_for(state="visible")
+            assert toggle.get_attribute("aria-label") == "切换至浅色主题"
+        finally:
+            browser.close()
+
+
+def test_workbench_focus_card_can_be_saved_and_survives_reload(staged_backlot_server):
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=True)
+        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        try:
+            page.goto(staged_backlot_server + "/p/multilayer-workbench", wait_until="networkidle")
+            page.get_by_role("button", name="片段工作台", exact=True).click()
+            layout = page.get_by_label("画面布局")
+            layout.select_option("focus_card")
+            page.get_by_role("button", name="添加重点素材").click()
+            page.get_by_label("重点素材 1").select_option("S-001")
+            page.get_by_role("button", name="保存画面组合").click()
+            page.wait_for_function("() => document.querySelector('#toast').textContent.includes('画面布局已保存')")
+
+            saved = page.evaluate("""async () => (await fetch('/api/project/multilayer-workbench/workbench')).json()""")
+            composition = saved["scenes"][0]["visual_composition"]
+            assert composition["layout_recipe"] == "focus_card"
+            assert composition["overlays"][0]["asset_id"] == "S-001"
 
             page.reload(wait_until="networkidle")
-            assert page.locator("html").get_attribute("data-theme") == "light"
-            assert page.get_by_role("button", name="切换至深色主题").is_visible()
+            page.get_by_role("button", name="片段工作台", exact=True).click()
+            assert page.get_by_label("画面布局").input_value() == "focus_card"
+            assert page.get_by_label("重点素材 1").input_value() == "S-001"
+            assert page.locator(".visual-layer-card").count() == 1
         finally:
             browser.close()

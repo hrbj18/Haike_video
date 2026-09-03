@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://haike_video.local/schemas/project_manifest.schema.json",
-  "title": "Haike Video Content Project",
+  "$id": "https://openmontage.local/schemas/project_manifest.schema.json",
+  "title": "OpenMontage Content Project",
   "type": "object",
   "required": ["id", "title", "version", "format", "speakers", "providers", "quality_gates"],
   "properties": {

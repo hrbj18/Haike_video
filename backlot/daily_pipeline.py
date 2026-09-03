@@ -92,12 +92,12 @@ from tools.avatar.runninghub_avatar import (
 
 ROLE_LABELS = {"yaya": "雅雅", "mengmeng": "檬檬"}
 ROLE_PROFILE_IDS = {
-    "yaya": os.environ.get("HAIKE_VIDEO_TTS_YAYA_PROFILE_ID", "").strip(),
-    "mengmeng": os.environ.get("HAIKE_VIDEO_TTS_MENGMENG_PROFILE_ID", "").strip(),
+    "yaya": os.environ.get("OPENMONTAGE_TTS_YAYA_PROFILE_ID", "").strip(),
+    "mengmeng": os.environ.get("OPENMONTAGE_TTS_MENGMENG_PROFILE_ID", "").strip(),
 }
 ROLE_PRESET_FALLBACK_IDS = {
-    "yaya": "haike_video-qwen-serena",
-    "mengmeng": "haike_video-qwen-dylan",
+    "yaya": "openmontage-qwen-serena",
+    "mengmeng": "openmontage-qwen-dylan",
 }
 LITE_RATE_CNY_PER_HOUR = 0.4
 STANDARD_RATE_CNY_PER_HOUR = 4.0
@@ -181,14 +181,14 @@ def ensure_voicebox_ready(*, start_if_needed: bool = True) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - converted into a Chinese preflight error below.
         first_error = str(exc)
     if not start_if_needed:
-        raise DailyAutomationError(f"Haike Video 本地配音当前不可用：{first_error}")
+        raise DailyAutomationError(f"OpenMontage 本地配音当前不可用：{first_error}")
     if os.name != "nt":
-        raise DailyAutomationError(f"Haike Video 本地配音当前不可用，且非Windows环境不能自动启动：{first_error}")
+        raise DailyAutomationError(f"OpenMontage 本地配音当前不可用，且非Windows环境不能自动启动：{first_error}")
     powershell = shutil.which("powershell.exe") or shutil.which("powershell")
     starter = Path(__file__).resolve().parents[1] / "scripts" / "start_local_tts.ps1"
     if not powershell or not starter.is_file():
         raise DailyAutomationError(
-            "Haike Video 本地配音当前不可用，自动启动器缺失；请查看 .backlot/daily-runs/scheduler.log"
+            "OpenMontage 本地配音当前不可用，自动启动器缺失；请查看 .backlot/daily-runs/scheduler.log"
         )
     result = subprocess.run(
         [
@@ -211,13 +211,13 @@ def ensure_voicebox_ready(*, start_if_needed: bool = True) -> dict[str, Any]:
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or first_error or "未知错误").strip()
         raise DailyAutomationError(
-            f"Haike Video 本地配音自动启动失败：{detail[:500]}；日志：.backlot/daily-runs/scheduler.log"
+            f"OpenMontage 本地配音自动启动失败：{detail[:500]}；日志：.backlot/daily-runs/scheduler.log"
         )
     try:
         profiles = VoiceboxTTS.list_profiles()
     except Exception as exc:  # noqa: BLE001
         raise DailyAutomationError(
-            f"Haike Video 本地配音已执行启动但仍不可用：{exc}；日志：.backlot/daily-runs/scheduler.log"
+            f"OpenMontage 本地配音已执行启动但仍不可用：{exc}；日志：.backlot/daily-runs/scheduler.log"
         ) from exc
     return {"started": True, "profiles": profiles}
 
@@ -239,7 +239,7 @@ def _voicebox_profiles() -> dict[str, dict[str, Any]]:
             # restores the original stable IDs without changing this flow.
             profile = by_id.get(ROLE_PRESET_FALLBACK_IDS[role])
         if not profile:
-            raise DailyAutomationError(f"Haike Video 本地配音中找不到与角色同名的“{ROLE_LABELS[role]}”音色")
+            raise DailyAutomationError(f"OpenMontage 本地配音中找不到与角色同名的“{ROLE_LABELS[role]}”音色")
         resolved[role] = profile
     return resolved
 

@@ -1,0 +1,144 @@
+/* ============================================================
+   FORMAL UI PHASE 3 — shared real-route navigation
+   This file only lays out links that already exist in the application.
+   It does not create a task route, alter page events, or retain page data.
+   ============================================================ */
+
+.app-frame {
+  min-height: 100vh;
+  display: grid;
+  grid-template-columns: 242px minmax(0, 1fr);
+}
+
+.global-sidebar {
+  position: sticky;
+  top: 0;
+  z-index: 8;
+  box-sizing: border-box;
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+  height: 100vh;
+  padding: 24px 14px;
+  overflow-y: auto;
+  border-right: 1px solid var(--line);
+  background: var(--surface);
+}
+
+.global-brand {
+  display: grid;
+  gap: 5px;
+  padding: 3px 10px 16px;
+  border-bottom: 1px solid var(--line);
+  color: inherit;
+  text-decoration: none;
+}
+
+.global-brand span,
+.global-nav-group > p {
+  margin: 0;
+  color: var(--subtle);
+  font-family: ui-monospace, Consolas, monospace;
+  font-size: 10px;
+  letter-spacing: .13em;
+}
+
+.global-brand strong {
+  color: var(--text);
+  font-family: Georgia, "Noto Serif SC", "Songti SC", serif;
+  font-size: 24px;
+  font-weight: 500;
+  letter-spacing: -.05em;
+}
+
+.global-brand small { color: var(--muted); font-size: 11px; line-height: 1.55; }
+.global-nav { display: grid; gap: 17px; }
+.global-nav-group { display: grid; gap: 5px; }
+
+.global-nav-link {
+  display: flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid transparent;
+  border-left-width: 3px;
+  color: var(--muted);
+  font-size: 13px;
+  text-decoration: none;
+}
+
+.global-nav-link:hover { border-color: var(--line); color: var(--text); background: var(--surface-raised, var(--raised)); }
+.global-nav-link[aria-current="page"] { border-color: var(--amber); color: var(--amber); background: var(--amber-dim); font-weight: 700; }
+
+.global-sidebar .project-nav { margin-top: -1px; }
+.global-sidebar .sidebar-foot { margin-top: auto; }
+
+.library-app-frame .library-shell { width: min(100%, 1560px); margin: 0 auto; }
+.audio-app-frame .audio-app { width: min(1280px, calc(100% - 56px)); margin: 0 auto; }
+.automation-app-frame .automation-shell {
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 1440px;
+  min-width: 0;
+  margin: 0 auto;
+  padding-right: 32px;
+  padding-left: 32px;
+}
+:root[data-theme="light"] .automation-app-frame .automation-shell { width: 100%; }
+
+:root[data-theme="light"] .global-sidebar { border-right-color: #d8cdb8; background: #f7efe1; }
+:root[data-theme="light"] .shell .global-sidebar { background: rgba(255, 249, 236, .88); }
+:root[data-theme="light"] .global-brand { border-bottom-color: #d8cdb8; }
+:root[data-theme="light"] .global-brand span,
+:root[data-theme="light"] .global-nav-group > p { color: #938875; }
+:root[data-theme="light"] .global-brand strong { color: #211d17; }
+:root[data-theme="light"] .global-brand small { color: #665d50; }
+:root[data-theme="light"] .global-nav-link { color: #51483c; }
+:root[data-theme="light"] .global-nav-link:hover { border-color: #cbbda7; color: #211d17; background: #f5ecdc; }
+:root[data-theme="light"] .global-nav-link[aria-current="page"] { border-color: #c14a2b; color: #a4472f; background: #f8e8d7; }
+
+/* The director workbench owns a long, independently scrolling canvas.  Keep
+   its route rail at the viewport edge on desktop so project navigation does
+   not disappear while a reviewer works through a segment editor. */
+@media (min-width: 861px) {
+  .shell .global-sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: 224px;
+    height: 100dvh;
+  }
+  .shell .workspace { grid-column: 2; }
+}
+
+@media (max-width: 860px) {
+  .app-frame { display: block; }
+  .global-sidebar {
+    position: static;
+    display: block;
+    height: auto;
+    padding: 14px;
+    overflow: visible;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .global-brand { display: inline-grid; min-width: 190px; padding: 2px 9px 10px; border-bottom: 0; }
+  .global-brand strong { font-size: 21px; }
+  .global-brand small { display: none; }
+  .global-nav { display: flex; flex-wrap: wrap; gap: 8px 15px; margin-top: 10px; }
+  .global-nav-group { display: flex; align-items: center; flex-wrap: wrap; gap: 4px; }
+  .global-nav-group > p { width: 100%; }
+  .global-nav-link { min-height: 32px; padding: 0 8px; }
+  .global-sidebar .sidebar-foot { display: none; }
+  .audio-app-frame .audio-app { width: min(100% - 28px, 760px); }
+  .automation-app-frame .automation-shell,
+  :root[data-theme="light"] .automation-app-frame .automation-shell { width: 100%; padding-right: 14px; padding-left: 14px; }
+}
+
+@media (max-width: 520px) {
+  .global-sidebar { padding: 12px; }
+  .global-brand { min-width: 0; }
+  .global-brand strong { font-size: 19px; }
+  .global-nav { gap: 8px; }
+  .global-nav-group { width: 100%; }
+  .global-nav-link { flex: 1 1 auto; }
+}

@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [switch]$SkipInstall,
     [switch]$MigrateVoicebox,
@@ -58,14 +58,14 @@ $pythonVersionOutput = & $venvPython -c "import struct, sys; print('.'.join(map(
 $pythonVersionExitCode = $LASTEXITCODE
 $pythonVersion = ([string]$pythonVersionOutput).Trim()
 if ($pythonVersionExitCode -ne 0 -or $pythonVersion -ne '3.12:64') {
-    throw "Haike Video 本地配音运行时要求 64 位 Python 3.12。当前环境：$pythonVersion"
+    throw "OpenMontage 本地配音运行时要求 64 位 Python 3.12。当前环境：$pythonVersion"
 }
 
 if (-not $SkipInstall) {
     & $venvPython -m pip install --disable-pip-version-check --upgrade pip
     if ($LASTEXITCODE -ne 0) { throw '升级本地配音 pip 失败。' }
     & $venvPython -m pip install --disable-pip-version-check -r (Join-Path $repoRoot 'requirements-tts.txt')
-    if ($LASTEXITCODE -ne 0) { throw '安装 Haike Video 本地配音依赖失败。' }
+    if ($LASTEXITCODE -ne 0) { throw '安装 OpenMontage 本地配音依赖失败。' }
 }
 
 $dataDir = Join-Path $repoRoot '.backlot\tts'
@@ -92,8 +92,8 @@ if ($MigrateVoicebox) {
 
 if ($ImportProfilePack) {
     & $venvPython (Join-Path $repoRoot 'scripts\local_tts_profiles.py') --data-dir $dataDir import --package $ImportProfilePack
-    if ($LASTEXITCODE -ne 0) { throw '导入 Haike Video 私有音色包失败。' }
+    if ($LASTEXITCODE -ne 0) { throw '导入 OpenMontage 私有音色包失败。' }
 }
 
-Write-Host "[OK] Haike Video 本地配音运行时已就绪：$venvPython" -ForegroundColor Green
+Write-Host "[OK] OpenMontage 本地配音运行时已就绪：$venvPython" -ForegroundColor Green
 Write-Host '模型会在第一次使用对应音色时自动下载到 .backlot\tts\models。' -ForegroundColor Cyan

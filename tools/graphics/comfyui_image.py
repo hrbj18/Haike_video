@@ -161,7 +161,7 @@ class ComfyUIImage(BaseTool):
             return ToolResult(
                 success=False,
                 error=(
-                    "Custom ComfyUI workflows require output_node so Haike Video "
+                    "Custom ComfyUI workflows require output_node so OpenMontage "
                     "knows which ComfyUI node to download artifacts from."
                 ),
             )

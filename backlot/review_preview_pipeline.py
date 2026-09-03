@@ -22,7 +22,7 @@ from backlot import audio_center
 from backlot import narration_lines
 from backlot import workbench as wb
 from backlot.ai_text import read_text_ai_config
-from tools.audio.voicebox_tts import VoiceboxTTS
+from backlot.tts_runtime import LOCAL_PROVIDER_ID, generate_voice_audio
 from tools.video.hyperframes_compose import HyperFramesCompose
 from tools.video.stock_sources.pexels import PexelsSource
 
@@ -350,14 +350,12 @@ def collect_review_preview_capabilities(
     prove that TTS and FFmpeg are ready.
     """
     persisted = audio_center._load()
-    tool = VoiceboxTTS()
-    status = _safe_status_value(tool.get_status())
-    profiles: list[dict[str, Any]] = []
-    if status == "available":
-        try:
-            profiles = list(tool.list_profiles())
-        except Exception:
-            status = "unavailable"
+    # The audio centre owns the complete voice catalogue. The previous
+    # Voicebox-only probe could not see an explicitly selected Doubao voice.
+    catalog = audio_center.read_audio_center()
+    provider = catalog.get("provider") if isinstance(catalog.get("provider"), dict) else {}
+    status = str(provider.get("status") or "unavailable")
+    profiles = [item for item in catalog.get("profiles") or [] if isinstance(item, dict)]
     ffmpeg = wb._ffmpeg_available()
     ffprobe = wb._ffprobe_available(ffmpeg)
     if include_visual_runtime:
@@ -395,6 +393,9 @@ def collect_review_preview_capabilities(
                     "voice_type": item.get("voice_type"),
                     "default_engine": item.get("default_engine"),
                     "voice_signature": item.get("voice_signature"),
+                    "provider_id": item.get("provider_id") or LOCAL_PROVIDER_ID,
+                    "provider_name": item.get("provider_name") or "Haike Video 本地配音",
+                    "available": item.get("available") is not False,
                 }
                 for item in profiles
                 if isinstance(item, dict)
@@ -462,13 +463,24 @@ def _freeze_voice(capabilities: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         selected = next((item for item in profiles if str(item.get("name") or "") == "雅雅"), None)
         if selected is None:
             return None, "未检测到精确名称为“雅雅”的内置音色；未显式选择其他音色时禁止静默回退"
+    provider_id = str(selected.get("provider_id") or LOCAL_PROVIDER_ID)
+    runtime_profile = selected
+    # Cloud profiles contain private provider data. Resolve that data only
+    # after the public catalogue has selected the exact same profile id.
+    if provider_id != LOCAL_PROVIDER_ID:
+        runtime_profile = audio_center.get_voice_profile(str(selected.get("id") or ""))
+        if runtime_profile is None:
+            return None, "通用配音中心中用户明确选择的默认音色已不存在，请重新选择后再试"
+    if runtime_profile.get("available") is False:
+        return None, f"{runtime_profile.get('provider_name') or '所选配音服务'}当前不可用，请先完成配置后再试"
     frozen = {
-        "provider": "voicebox_tts",
-        "profile_id": selected.get("id"),
-        "profile_name": selected.get("name"),
-        "engine": selected.get("default_engine") or "qwen_custom_voice",
-        "voice_type": selected.get("voice_type") or "preset",
-        "voice_signature": selected.get("voice_signature"),
+        "provider": str(runtime_profile.get("provider_id") or provider_id),
+        "provider_name": runtime_profile.get("provider_name") or selected.get("provider_name"),
+        "profile_id": runtime_profile.get("id"),
+        "profile_name": runtime_profile.get("name"),
+        "engine": runtime_profile.get("default_engine") or "qwen_custom_voice",
+        "voice_type": runtime_profile.get("voice_type") or "preset",
+        "voice_signature": runtime_profile.get("voice_signature") or selected.get("voice_signature"),
         "selection_source": "explicit_global_default" if explicit else "required_yaya_default",
     }
     frozen["fingerprint"] = narration_lines.voice_fingerprint(frozen)
@@ -619,7 +631,7 @@ def review_preview_preflight(
         blockers.append("请先完成人工脚本审核并通过正式脚本草案")
     frozen_voice, voice_error = _freeze_voice(capability_report)
     if not (capability_report.get("tts") or {}).get("available"):
-        blockers.append("Haike Video 本地 Qwen3-TTS 当前不可用")
+        blockers.append("当前没有可用的本地或云端配音服务，请检查配音中心配置")
     if voice_error:
         blockers.append(voice_error)
     if frozen_voice is not None and not frozen_voice.get("voice_signature"):
@@ -773,6 +785,27 @@ def _current_input_contract(project_dir: Path, state: dict[str, Any], script: di
                     } if path is not None and path.is_file() else None,
                 }
             )
+        composition = wb._visual_composition_render_contract(scene.get("visual_composition"))
+        for overlay in composition.get("overlays") or []:
+            if not isinstance(overlay, dict):
+                continue
+            asset = asset_lookup.get(str(overlay.get("asset_id") or "")) or {}
+            relative = str(asset.get("path") or "")
+            path = project_dir / relative if relative else None
+            asset_rows.append(
+                {
+                    "usage": {
+                        "id": str(overlay.get("id") or ""),
+                        "role": "visual_composition",
+                        "asset_id": str(overlay.get("asset_id") or ""),
+                    },
+                    "asset": {key: asset.get(key) for key in ("id", "type", "path", "duration_seconds", "source_type")},
+                    "file": {
+                        "size_bytes": path.stat().st_size,
+                        "sha256": _sha256_file(path),
+                    } if path is not None and path.is_file() else None,
+                }
+            )
         timeline = deepcopy(scene.get("visual_timeline") or {})
         if isinstance(timeline, dict):
             timeline.pop("updated_at", None)
@@ -791,6 +824,7 @@ def _current_input_contract(project_dir: Path, state: dict[str, Any], script: di
                 "scene_id": scene_id,
                 "section_id": str(scene.get("script_section_id") or ""),
                 "visual_timeline": timeline,
+                "visual_composition": composition,
                 "assets": sorted(asset_rows, key=lambda item: str((item.get("usage") or {}).get("id") or "")),
             }
         )
@@ -1373,7 +1407,7 @@ def _dependencies(overrides: dict[str, Any] | None) -> dict[str, Any]:
     defaults: dict[str, Any] = {
         "generate_scene_plan": wb.generate_scene_plan_from_script,
         "synthesize_line": None,
-        "tts_client": VoiceboxTTS(),
+        "tts_client": None,
         "concat_audio": wb._concat_audio,
         "preview_visual_plan": wb.preview_visual_batch_plan,
         "start_visual_generation": wb.start_visual_batch_generation,
@@ -1389,6 +1423,31 @@ def _dependencies(overrides: dict[str, Any] | None) -> dict[str, Any]:
     }
     defaults.update(overrides or {})
     return defaults
+
+
+def _synthesize_frozen_line(line: dict[str, Any], output: Path, voice: dict[str, Any]) -> dict[str, Any]:
+    """Generate one line through its frozen provider without a silent fallback."""
+    profile_id = str(voice.get("profile_id") or "")
+    profile = audio_center.get_voice_profile(profile_id)
+    if profile is None:
+        raise ReviewPreviewError("任务冻结的配音音色已不存在，请回到通用配音中心重新选择")
+    frozen_provider = str(voice.get("provider") or LOCAL_PROVIDER_ID)
+    if str(profile.get("provider_id") or LOCAL_PROVIDER_ID) != frozen_provider:
+        raise ReviewPreviewError("任务冻结的配音供应商与当前音色配置不一致，请重新预检后启动新任务")
+    if profile.get("available") is False:
+        raise ReviewPreviewError(f"{profile.get('provider_name') or '所选配音服务'}当前不可用，请先完成配置")
+    result = generate_voice_audio(
+        text=str(line.get("text") or ""),
+        profile=profile,
+        output_path=output,
+        language="zh",
+    )
+    if not result.success or not output.is_file():
+        raise ReviewPreviewError(str(result.error or "逐句配音未生成有效音频"))
+    payload = dict(result.data or {})
+    payload["voice_signature"] = str(voice.get("voice_signature") or "")
+    payload["provider_id"] = frozen_provider
+    return payload
 
 
 def _assert_script_unchanged(project_dir: Path, job: dict[str, Any]) -> None:
@@ -1699,9 +1758,9 @@ def _aggregate_line_audio(
                     "source_type": "local_generated",
                     "path": str(scene_output),
                     "duration_seconds": media["duration_seconds"],
-                    "provider": "Haike Video 本地配音",
-                    "source_tool": "voicebox_tts",
-                    "license": "本机 Qwen3-TTS 生成；按项目发布规范复核",
+                    "provider": frozen_voice.get("provider_name") or "Haike Video 配音",
+                    "source_tool": frozen_voice.get("provider") or LOCAL_PROVIDER_ID,
+                    "license": "由冻结的配音供应商生成；按项目发布规范复核",
                     "generation": {
                         "profile_id": frozen_voice.get("profile_id"),
                         "profile_name": frozen_voice.get("profile_name"),
@@ -1769,7 +1828,8 @@ def _aggregate_line_audio(
         visual_timing = wb._refresh_visual_timing_status(project_dir, state)
         automation = wb._automation(state)
         automation["voice"] = {
-        "provider": "voicebox_tts",
+        "provider": frozen_voice.get("provider") or LOCAL_PROVIDER_ID,
+        "provider_name": frozen_voice.get("provider_name") or "Haike Video 配音",
         "source": "review_preview_frozen_input",
         "label": frozen_voice.get("profile_name"),
         "profile_id": frozen_voice.get("profile_id"),
@@ -2167,11 +2227,15 @@ def run_review_preview_job(
                     _mutate_job(project_dir, job_id, worker_token, mutate)
 
                 _assert_worker_execution_contract(project_dir, job_id, worker_token)
+                synthesize_line = deps.get("synthesize_line")
+                tts_client = deps.get("tts_client")
+                if synthesize_line is None and tts_client is None:
+                    synthesize_line = _synthesize_frozen_line
                 ledger = narration_lines.materialize_line_audio(
                     project_dir,
                     plan,
-                    deps["synthesize_line"],
-                    tts_client=None if deps.get("synthesize_line") is not None else deps.get("tts_client"),
+                    synthesize_line,
+                    tts_client=None if synthesize_line is not None else tts_client,
                     is_current=lambda: _is_current_worker(project_dir, job_id, worker_token),
                     commit=lambda action: _commit_line_ledger(project_dir, job_id, worker_token, action),
                     parent_job_id=job_id,

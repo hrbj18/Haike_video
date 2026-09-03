@@ -35,13 +35,32 @@ from typing import Any, Callable
 from uuid import uuid4
 
 from backlot.state import _collect_artifacts, _collect_checkpoints, _read_json
-from backlot.audio_center import get_default_voice, read_audio_center
+from backlot.audio_center import get_default_voice, get_voice_profile, read_audio_center
+from backlot.tts_runtime import generate_voice_audio
 from backlot.ai_text import TextAIError, plan_visual_copy, plan_visual_routes, read_text_ai_config
+from backlot.ai_vision import describe_shots, test_vision_ai_connection, vision_runtime_identity
 from backlot.visual_director import DIRECTOR_VERSION, candidate_asset_id, decide_candidate, prepare_candidates
 from backlot.avatar_import import AvatarImportError, initialize_avatar_package, read_avatar_package
 from backlot.ppt_cards import CARD_TYPES, normalize_spec as normalize_ppt_card_spec, render_card as render_ppt_card
 from backlot.task_center import collect_tasks
 from backlot.music_library import MusicLibraryError, list_music_tracks, resolve_music_track
+from backlot.media_index import (
+    MediaIndexError,
+    build_coarse_index,
+    build_fine_index,
+    build_material_vision_index,
+    media_content_fingerprint,
+    media_fingerprint,
+    recommend_coarse_segments,
+    recommend_vision_shots,
+)
+from backlot.local_material_orchestration import (
+    LocalMaterialOrchestrationError,
+    build_orchestration_draft,
+    find_scene_plan,
+    material_indexes_fingerprint,
+    script_fingerprint as local_material_script_fingerprint,
+)
 from backlot.music_preferences import (
     DEFAULT_PLAYBACK_GAIN_DB,
     clamp_playback_gain_db,
@@ -103,6 +122,12 @@ SCRIPT_IMPORT_DIRECTORY = "artifacts/script_imports"
 SCRIPT_IMPORT_HISTORY_DIRECTORY = "artifacts/script_import_history"
 ASSET_RECYCLE_DIRECTORY = "artifacts/recycle-bin"
 MUSIC_SAMPLE_DIRECTORY = "renders/music-samples"
+PROJECT_ASSET_UPLOAD_DIRECTORY = Path("assets/uploads")
+PROJECT_ASSET_UPLOAD_TYPES = {
+    ".mp4": "video", ".mov": "video", ".mkv": "video", ".webm": "video", ".m4v": "video",
+    ".png": "image", ".jpg": "image", ".jpeg": "image", ".webp": "image",
+}
+MAX_PROJECT_ASSET_BYTES = 8 * 1024 * 1024 * 1024
 
 # Batch cleanup deliberately has a very narrow default.  Files supplied by a
 # user (and curated project-library material) are never silently selected for
@@ -131,6 +156,19 @@ VISUAL_SOURCE_MODES = {
     "human_provided", "web_download", "project_library", "openai_image",
     "hyperframes", "remotion", "local_generated", "ppt_card",
 }
+LOCAL_MATERIAL_VISUAL_ROLES = {
+    "local_full_bleed", "local_focus_card", "stock_full_bleed",
+    "hyperframes_full_bleed", "supporting_background",
+}
+LOCAL_MATERIAL_CUT_POLICIES = {"atomic", "safe_cut", "interruptible"}
+VISUAL_COMPOSITION_LAYOUTS = {"full_bleed", "focus_card"}
+VISUAL_COMPOSITION_ROLES = {"hero"}
+VISUAL_COMPOSITION_FITS = {"contain", "cover"}
+VISUAL_COMPOSITION_MAX_OVERLAYS = 8
+VISUAL_COMPOSITION_PLACEMENT_PRESETS = {
+    "landscape_hero_center", "portrait_hero_center", "source_hero_custom",
+}
+VISUAL_COMPOSITION_ASPECT_MODES = {"source"}
 VISUAL_CONSTRAINTS = {
     "no_presenter", "no_text", "no_ai_baked_text", "reserve_presenter_safe_area", "reserve_caption_safe_area",
 }
@@ -208,11 +246,18 @@ PRESENTER_LAYOUT_DEFAULTS = (
     # Approved on the 2026-08-23 daily-tech project: this framing keeps the
     # shared 4:5 avatar's full head and upper torso visible in the circle.
     {"id": "pip_top_left", "name": "左上角解说员", "geometry": {"x": 0.04, "y": 0.03, "width": 0.29}, "shape": "circle", "face_crop": {"x": .48, "y": .38, "zoom": 1.15}},
-    {"id": "pip_top_right", "name": "右上角解说员", "geometry": {"x": 0.675, "y": 0.04, "width": 0.29}, "shape": "rounded", "face_crop": {"x": .5, "y": 0, "zoom": 1}},
+    {"id": "pip_top_right", "name": "右上圆形解说员", "geometry": {"x": 0.675, "y": 0.04, "width": 0.29}, "shape": "circle", "face_crop": {"x": .48, "y": .38, "zoom": 1.15}},
     {"id": "pip_lower_left", "name": "左下留字幕", "geometry": {"x": 0.035, "y": 0.43, "width": 0.24}, "shape": "rounded", "face_crop": {"x": .5, "y": 0, "zoom": 1}},
 )
+STORY_HEADLINE_LAYOUT_DEFAULT = {"x": .04, "y": .055, "width": .56, "height": .125}
 PRESENTER_SHAPES = {"rectangle", "rounded", "circle"}
 AVATAR_PIPELINE = "avatar-spokesperson"
+# Apply a deliberately small lift to the presenter layer only. Technology
+# footage is frequently dark, and studio avatars have dark hair or clothing;
+# without local compensation the face can disappear against a valid main visual.
+# Keep this before the RGBA shape mask so FFmpeg's ``eq`` filter works on colour.
+AVATAR_PIP_FACE_LIGHTING_FILTER = "eq=brightness=0.035:contrast=1.060:gamma=1.040:gamma_weight=0.500"
+AVATAR_PIP_FACE_LIGHTING_VERSION = "avatar-pip-face-light-v1"
 # ``strict_freeze`` is retained for genuinely fixed-duration deliveries.  It
 # must never become the default for narration: a natural voice take owns its
 # duration, so replacing it needs a ripple edit rather than time stretching.
@@ -245,6 +290,10 @@ _DEFER_VISUAL_SLOT_STATE_SAVE = "_defer_visual_slot_state_save"
 
 class WorkbenchError(ValueError):
     """A validation failure which should be presented to a workbench user."""
+
+
+class WorkbenchConflict(WorkbenchError):
+    """A compare-and-swap conflict that requires the client to refresh."""
 
 
 def _project_transaction_lock(project_dir: Path) -> threading.RLock:
@@ -360,6 +409,11 @@ def _rounded_seconds(value: Any, fallback: float = 0.0) -> float:
 
 def _rounded_signed_seconds(value: Any, fallback: float = 0.0) -> float:
     return round(_as_number(value, fallback), 3)
+
+
+def _nonnegative_frame(value: Any, fps: int) -> int:
+    """Match JavaScript Math.round for the non-negative media-time contract."""
+    return max(0, int(math.floor(max(0.0, _as_number(value)) * max(1, int(fps)) + .5)))
 
 
 def _scene_duration(scene: dict) -> float:
@@ -631,6 +685,204 @@ def _visual_source_mode(asset: dict | None) -> str:
     return source_type if source_type in VISUAL_SOURCE_MODES else "human_provided"
 
 
+def _default_visual_composition() -> dict:
+    """Return the backwards-compatible semantic layer contract for one scene."""
+    return {
+        "version": 1,
+        "revision": 1,
+        "layout_recipe": "full_bleed",
+        "background": {"source": "visual_timeline", "treatment": "normal"},
+        "overlays": [],
+        "frame_style": {
+            "width_ratio": .82,
+            "height_ratio": .56,
+            "border_radius_ratio": .025,
+            "border_color": "#D9F3FF",
+            "shadow": "soft",
+        },
+        "updated_at": _now(),
+    }
+
+
+def _asset_resolution(asset: dict) -> tuple[int, int]:
+    """Read the imported media dimensions without probing during composition saves."""
+    raw = asset.get("resolution")
+    if isinstance(raw, dict):
+        width = int(_as_number(raw.get("width"), 0))
+        height = int(_as_number(raw.get("height"), 0))
+        if width > 0 and height > 0:
+            return width, height
+    match = re.fullmatch(r"\s*(\d+)\s*[xX×]\s*(\d+)\s*", str(raw or ""))
+    if match:
+        width, height = int(match.group(1)), int(match.group(2))
+        if width > 0 and height > 0:
+            return width, height
+    return 0, 0
+
+
+def _recommended_visual_placement(asset: dict, canvas_width: int, canvas_height: int) -> dict:
+    """Return a source-aspect recommendation for a bounded 16:9 hero window."""
+    source_width, source_height = _asset_resolution(asset)
+    source_aspect = source_width / source_height if source_width > 0 and source_height > 0 else canvas_width / canvas_height
+    if source_aspect >= 1:
+        preset_id = "landscape_hero_center"
+        size_ratio = .74
+        position_y_ratio = .47
+        max_height_ratio = .78
+    else:
+        preset_id = "portrait_hero_center"
+        position_y_ratio = .44
+        max_height_ratio = .68
+        size_ratio = min(.42, max_height_ratio * (canvas_height / canvas_width) * source_aspect)
+    return {
+        "preset_id": preset_id,
+        "position_x_ratio": .5,
+        "position_y_ratio": position_y_ratio,
+        "size_ratio": round(size_ratio, 4),
+        "aspect_mode": "source",
+        "max_height_ratio": max_height_ratio,
+    }
+
+
+def _validated_visual_placement(
+    raw: Any,
+    asset: dict,
+    canvas_width: int,
+    canvas_height: int,
+    index: int,
+) -> dict | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise WorkbenchError(f"第 {index} 个重点素材的位置数据格式无效")
+    recommended = _recommended_visual_placement(asset, canvas_width, canvas_height)
+    preset_id = str(raw.get("preset_id") or recommended["preset_id"])
+    if preset_id not in VISUAL_COMPOSITION_PLACEMENT_PRESETS:
+        raise WorkbenchError(f"第 {index} 个重点素材的位置预设无效")
+    aspect_mode = str(raw.get("aspect_mode") or "source")
+    if aspect_mode not in VISUAL_COMPOSITION_ASPECT_MODES:
+        raise WorkbenchError(f"第 {index} 个重点素材必须保持源宽高比")
+    x = _as_number(raw.get("position_x_ratio"), recommended["position_x_ratio"])
+    y = _as_number(raw.get("position_y_ratio"), recommended["position_y_ratio"])
+    size = _as_number(raw.get("size_ratio"), recommended["size_ratio"])
+    max_height = _as_number(raw.get("max_height_ratio"), recommended["max_height_ratio"])
+    if not .05 <= x <= .95 or not .05 <= y <= .95:
+        raise WorkbenchError(f"第 {index} 个重点素材的中心位置超出画布安全范围")
+    if not .12 <= size <= .92:
+        raise WorkbenchError(f"第 {index} 个重点素材的大小超出安全范围")
+    if not .35 <= max_height <= .9:
+        raise WorkbenchError(f"第 {index} 个重点素材的最大高度无效")
+
+    source_width, source_height = _asset_resolution(asset)
+    source_aspect = source_width / source_height if source_width > 0 and source_height > 0 else canvas_width / canvas_height
+    width_ratio = min(size, max_height * (canvas_height / canvas_width) * source_aspect)
+    height_ratio = width_ratio * (canvas_width / canvas_height) / source_aspect
+    if x - width_ratio / 2 < -1e-6 or x + width_ratio / 2 > 1 + 1e-6:
+        raise WorkbenchError(f"第 {index} 个重点素材横向超出画布，请缩小或向中间移动")
+    if y - height_ratio / 2 < -1e-6 or y + height_ratio / 2 > 1 + 1e-6:
+        raise WorkbenchError(f"第 {index} 个重点素材纵向超出画布，请缩小或向中间移动")
+    return {
+        "preset_id": preset_id,
+        "position_x_ratio": round(x, 4),
+        "position_y_ratio": round(y, 4),
+        "size_ratio": round(size, 4),
+        "aspect_mode": "source",
+        "max_height_ratio": round(max_height, 4),
+    }
+
+
+def _validated_candidate_evidence(raw: Any, index: int) -> dict | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise WorkbenchError(f"第 {index} 个重点素材的候选证据格式无效")
+    source = str(raw.get("source") or "")
+    shot_id = str(raw.get("shot_id") or "")
+    query = re.sub(r"\s+", " ", str(raw.get("query") or "")).strip()[:1000]
+    fingerprint = str(raw.get("index_fingerprint") or "").lower()
+    if source != "vision_v2" or not re.fullmatch(r"SHOT-\d{4}", shot_id):
+        raise WorkbenchError(f"第 {index} 个重点素材的视觉候选证据无效")
+    if not query:
+        raise WorkbenchError(f"第 {index} 个重点素材缺少候选查询文本")
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise WorkbenchError(f"第 {index} 个重点素材的视觉索引指纹无效")
+    return {
+        "source": "vision_v2",
+        "shot_id": shot_id,
+        "query": query,
+        "index_fingerprint": fingerprint,
+    }
+
+
+def _validated_local_material_planner_evidence(raw: Any, index: int) -> dict | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise WorkbenchError(f"第 {index} 个重点素材的编排证据格式无效")
+    shot_id = str(raw.get("shot_id") or "")
+    fingerprint = str(raw.get("index_fingerprint") or "").lower()
+    sequence_id = str(raw.get("sequence_id") or "")
+    cut_policy = str(raw.get("cut_policy") or "")
+    if (
+        raw.get("source") != "local_material_orchestration_v1"
+        or not re.fullmatch(r"SHOT-\d{4}", shot_id)
+        or not re.fullmatch(r"[0-9a-f]{64}", fingerprint)
+        or not re.fullmatch(r"LMS-\d{3}", sequence_id)
+        or cut_policy not in LOCAL_MATERIAL_CUT_POLICIES
+    ):
+        raise WorkbenchError(f"第 {index} 个重点素材缺少可核验的本地素材编排证据")
+    return {
+        "source": "local_material_orchestration_v1",
+        "shot_id": shot_id,
+        "index_fingerprint": fingerprint,
+        "sequence_id": sequence_id,
+        "cut_policy": cut_policy,
+    }
+
+
+def _ensure_scene_visual_composition(scene: dict) -> dict:
+    """Migrate the optional layer contract without enabling it for old projects."""
+    raw = scene.get("visual_composition")
+    composition = raw if isinstance(raw, dict) else {}
+    default = _default_visual_composition()
+    composition.setdefault("version", 1)
+    composition.setdefault("revision", 1)
+    composition.setdefault("layout_recipe", "full_bleed")
+    background = composition.get("background") if isinstance(composition.get("background"), dict) else {}
+    background.setdefault("source", "visual_timeline")
+    background.setdefault(
+        "treatment",
+        "auto_dim" if composition.get("layout_recipe") == "focus_card" else "normal",
+    )
+    composition["background"] = background
+    composition["overlays"] = composition.get("overlays") if isinstance(composition.get("overlays"), list) else []
+    frame_style = composition.get("frame_style") if isinstance(composition.get("frame_style"), dict) else {}
+    for key, value in default["frame_style"].items():
+        frame_style.setdefault(key, value)
+    composition["frame_style"] = frame_style
+    composition.setdefault("updated_at", _now())
+    scene["visual_composition"] = composition
+    return composition
+
+
+def _visual_composition_render_contract(value: Any) -> dict:
+    """Strip review/control metadata that cannot change a rendered frame."""
+    composition = value if isinstance(value, dict) else _default_visual_composition()
+    return {
+        "layout_recipe": composition.get("layout_recipe") or "full_bleed",
+        "background": composition.get("background") or {},
+        "overlays": [
+            {key: item.get(key) for key in (
+                "id", "role", "asset_id", "start_seconds", "end_seconds",
+                "source_in_seconds", "source_out_seconds", "fit", "muted",
+                "playback_rate", "placement", "candidate_evidence", "planner_evidence",
+            )}
+            for item in (composition.get("overlays") or []) if isinstance(item, dict)
+        ],
+        "frame_style": composition.get("frame_style") or {},
+    }
+
+
 def _default_visual_plan_prompt(state: dict, scene: dict) -> str:
     intake = _normalize_intake(state.get("project", {}).get("intake"))
     style = intake.get("style_direction") or intake.get("style_reference") or "干净、清晰、适合中文知识类短视频"
@@ -705,6 +957,7 @@ def _ensure_scene_visual_state(state: dict, scene: dict) -> None:
         "updated_at": timeline.get("updated_at") or _now(),
     })
     scene["visual_timeline"] = timeline
+    _ensure_scene_visual_composition(scene)
     scene.setdefault("ppt_card_generation", None)
     scene.setdefault("ppt_card_candidate", None)
     brief = scene.get("ppt_card_brief")
@@ -937,6 +1190,28 @@ def _apply_timeline_update(state: dict, update: dict) -> dict:
             visual_timeline["blocks"][-1]["end_seconds"] = _rounded_seconds(new_duration)
             visual_timeline["revision"] = int(_as_number(visual_timeline.get("revision"), 0)) + 1
             visual_timeline["updated_at"] = _now()
+        visual_composition = scene.get("visual_composition") if isinstance(scene.get("visual_composition"), dict) else None
+        if visual_composition and isinstance(visual_composition.get("overlays"), list):
+            old_duration = max(.04, old_end - old_start)
+            new_duration = max(.04, new_end - new_start)
+            scale = new_duration / old_duration
+            changed_overlay_timing = False
+            for overlay in visual_composition["overlays"]:
+                if not isinstance(overlay, dict):
+                    continue
+                next_start = min(new_duration, _rounded_seconds(_as_number(overlay.get("start_seconds")) * scale))
+                next_end = min(new_duration, _rounded_seconds(_as_number(overlay.get("end_seconds")) * scale))
+                next_end = max(next_start + min(.04, new_duration), next_end)
+                next_end = min(new_duration, _rounded_seconds(next_end))
+                if (
+                    abs(_as_number(overlay.get("start_seconds")) - next_start) > .0005
+                    or abs(_as_number(overlay.get("end_seconds")) - next_end) > .0005
+                ):
+                    changed_overlay_timing = True
+                overlay["start_seconds"], overlay["end_seconds"] = next_start, next_end
+            if changed_overlay_timing:
+                visual_composition["revision"] = int(_as_number(visual_composition.get("revision"), 0)) + 1
+                visual_composition["updated_at"] = _now()
         timing = _scene_timing(scene)
         timing["committed_duration_seconds"] = _rounded_seconds(new_end - new_start)
         timing["timeline_revision"] = int(_as_number((state.get("timeline") or {}).get("revision"))) + 1
@@ -973,6 +1248,20 @@ def _automation_default() -> dict:
             "status": "idle", "job_id": None, "scene_ids": [], "items": [],
             "total_scenes": 0, "completed_scenes": 0, "failed_scenes": 0,
             "current": None, "started_at": None, "finished_at": None, "error": "",
+        },
+        "media_index": {
+            "status": "idle", "job_id": None, "asset_id": None, "stage": None,
+            "started_at": None, "finished_at": None, "result": None, "error": "",
+        },
+        # A project-level queue deliberately owns batch visual understanding.
+        # The underlying media runtime is single-flight, so parallel browser
+        # clicks must never turn into concurrent provider calls or overwrite
+        # the one durable media_index job record.
+        "media_index_batch": {
+            "status": "idle", "job_id": None, "stage": "vision",
+            "asset_ids": [], "pending_asset_ids": [], "completed_asset_ids": [],
+            "failed_assets": [], "skipped_assets": [], "current_asset_id": None,
+            "started_at": None, "finished_at": None, "error": "",
         },
         "voice": {"provider": "voicebox_tts", "source": "audio_center", "label": None, "profile_id": None, "profile_name": None},
         "narration_generation": {"status": "idle", "stage": "idle", "completed_scenes": 0, "total_scenes": 0, "audio_path": None, "subtitle_path": None, "error": ""},
@@ -1200,7 +1489,7 @@ def _presenter_default() -> dict:
         "timeline_revision": None,
         # Layout is deliberately separate from the chosen source and time
         # bounds.  Moving a presenter must never change its native audio.
-        "layout_template_id": "pip_top_left",
+        "layout_template_id": "pip_top_right",
         "layout_override": None,
         "shape": "rounded",
         # A template-local circular-avatar framing. ``None`` means inherit
@@ -1255,6 +1544,23 @@ def _normalized_presenter_shape(value: Any, fallback: str = "rounded") -> str:
     return shape if shape in PRESENTER_SHAPES else fallback
 
 
+def _normalized_story_headline_layout(raw: Any, fallback: dict | None = None) -> dict:
+    """Validate project-level story headline placement in normalized canvas units."""
+    source = raw if isinstance(raw, dict) else {}
+    base = fallback if isinstance(fallback, dict) else STORY_HEADLINE_LAYOUT_DEFAULT
+    width = min(.92, max(.24, _as_number(source.get("width"), _as_number(base.get("width"), .58))))
+    height = min(.24, max(.07, _as_number(source.get("height"), _as_number(base.get("height"), .125))))
+    x = min(1.0 - width, max(0.0, _as_number(source.get("x"), _as_number(base.get("x"), .36))))
+    y = min(1.0 - height, max(0.0, _as_number(source.get("y"), _as_number(base.get("y"), .09))))
+    return {"x": round(x, 4), "y": round(y, 4), "width": round(width, 4), "height": round(height, 4)}
+
+
+def _ensure_story_headline_layout(state: dict) -> dict:
+    layout = _normalized_story_headline_layout(state.get("story_headline_layout"))
+    state["story_headline_layout"] = layout
+    return layout
+
+
 def _ensure_presenter_layout_state(state: dict) -> dict:
     layouts = state.get("presenter_layouts") if isinstance(state.get("presenter_layouts"), dict) else {}
     existing = {
@@ -1295,11 +1601,11 @@ def _ensure_presenter_layout_state(state: dict) -> dict:
         })
     layouts = {
         "version": max(1, int(_as_number(layouts.get("version"), 1))),
-        "default_template_id": str(layouts.get("default_template_id") or "pip_top_left"),
+        "default_template_id": str(layouts.get("default_template_id") or "pip_top_right"),
         "templates": templates,
     }
     if layouts["default_template_id"] not in {item["id"] for item in templates}:
-        layouts["default_template_id"] = "pip_top_left"
+        layouts["default_template_id"] = "pip_top_right"
     state["presenter_layouts"] = layouts
     return layouts
 
@@ -1686,12 +1992,13 @@ def _build_default(project_dir: Path) -> dict:
         "settings": {"frame_rate": frame_rate, "sample_rate": sample_rate, "render_profile": "source"},
         "presenter_layouts": {
             "version": 1,
-            "default_template_id": "pip_top_left",
+            "default_template_id": "pip_top_right",
             "templates": [
                 {"id": item["id"], "name": item["name"], "geometry": item["geometry"], "crop_bottom": 0.0, "shape": item.get("shape", "rounded"), "face_crop": _normalized_presenter_face_crop(item.get("face_crop")), "builtin": True, "revision": 1, "updated_at": _now()}
                 for item in PRESENTER_LAYOUT_DEFAULTS
             ],
         },
+        "story_headline_layout": deepcopy(STORY_HEADLINE_LAYOUT_DEFAULT),
         "subtitle_styles": {
             "version": 1,
             "default_template_id": "subtitle-default",
@@ -1780,6 +2087,7 @@ def read_workbench(project_dir: Path) -> dict:
                 _scene_subtitles(scene)
                 _ensure_scene_visual_state(existing, scene)
         _ensure_presenter_layout_state(existing)
+        _ensure_story_headline_layout(existing)
         _ensure_scene_narrations(project_dir, existing)
         # This is intentionally derived on every read rather than persisted:
         # it is a truthful readiness report, not another job state that can
@@ -2458,7 +2766,7 @@ _AVATAR_SPEAKER_IDS = {"雅雅": "yaya", "檬檬": "mengmeng", "萌萌": "mengme
 
 
 def _parse_avatar_turn_script(source_text: str) -> list[dict[str, str]]:
-    """Parse a dual-presenter Txxx script into a strict immutable turn ledger."""
+    """Parse a one- or two-presenter Txxx script into a strict turn ledger."""
     rows = [row.strip() for row in str(source_text or "").replace("\r", "").split("\n") if row.strip()]
     if not rows:
         raise WorkbenchError("数字人脚本为空，请粘贴 T001 雅雅：台词 格式的逐轮脚本")
@@ -2489,8 +2797,8 @@ def _parse_avatar_turn_script(source_text: str) -> list[dict[str, str]]:
     actual = [turn["turn_id"] for turn in turns]
     if actual != expected:
         raise WorkbenchError(f"数字人轮次必须从 T001 连续排列；当前为 {'、'.join(actual)}")
-    if {turn["speaker_id"] for turn in turns} != {"yaya", "mengmeng"}:
-        raise WorkbenchError("双人数字人脚本必须同时包含雅雅和檬檬的台词")
+    if not {turn["speaker_id"] for turn in turns}:
+        raise WorkbenchError("数字人脚本至少需要一位已识别的主持人")
     return turns
 
 
@@ -2551,13 +2859,13 @@ def _normalize_avatar_turn_script(
         "title": str(generated_script.get("title") or title),
         "total_duration_seconds": cursor,
         "voice_performance": deepcopy(generated_script.get("voice_performance") or {
-            "performance_intent": "双主持自然播报",
+            "performance_intent": "数字人自然播报",
             "pacing_profile": "conversational",
         }),
         "sections": sections,
         "metadata": {
             "source": "organized_avatar_turn_script",
-            "turn_contract": "strict_txxx_dual_presenter_v1",
+            "turn_contract": "strict_txxx_avatar_presenter_v2",
             "model_turn_contract_complete": model_contract_complete,
             "timing_basis": "script_estimate_pending_native_avatar_audio",
         },
@@ -3455,6 +3763,26 @@ def update_presenter_layout_template(project_dir: Path, payload: dict) -> dict:
     return _save(project_dir, state)
 
 
+def update_story_headline_layout(project_dir: Path, payload: dict) -> dict:
+    """Persist one headline placement for preview and final render."""
+    state = _load_for_write(project_dir)
+    previous = _ensure_story_headline_layout(state)
+    layout = _normalized_story_headline_layout(payload, previous)
+    state["story_headline_layout"] = layout
+    affected: list[str] = []
+    for scene in state.get("scenes") or []:
+        if not isinstance(scene, dict) or not isinstance(scene.get("headline_overlay"), dict) or not scene.get("headline_overlay"):
+            continue
+        affected.append(str(scene.get("id") or ""))
+        _invalidate_scene_review_preview(scene, "新闻小标题位置已调整，请刷新本段审核预览")
+        scene["review_status"] = "needs_adjustment"
+    if affected:
+        _mark_render_needs_refresh(state, "新闻小标题位置已调整")
+    _decision(state, "story_headline_layout", "新闻小标题位置", "project", json.dumps(layout, ensure_ascii=False))
+    _activity(state, "story_headline_layout_saved", f"已保存新闻小标题位置，影响 {len(affected)} 个片段", scene_ids=affected)
+    return _save(project_dir, state)
+
+
 def _keyframe_prompt(state: dict, scene: dict, anchor_kind: str) -> str:
     """Build a bounded, review-oriented still-image prompt from project intent."""
     _ensure_scene_visual_state(state, scene)
@@ -4007,6 +4335,7 @@ def _validated_visual_timeline(state: dict, scene: dict, raw_blocks: Any) -> lis
         raise WorkbenchError("视觉时间线至少需要一个画面区间")
     duration = _rounded_seconds(_scene_duration(scene))
     minimum_block_duration = min(.4, duration)
+    fps = max(1, int(state.get("settings", {}).get("frame_rate") or 30))
     assets = {str(item.get("id")): item for item in state.get("assets", []) if isinstance(item, dict)}
     normalized: list[dict] = []
     used_ids: set[str] = set()
@@ -4024,12 +4353,56 @@ def _validated_visual_timeline(state: dict, scene: dict, raw_blocks: Any) -> lis
         mode = str(raw.get("source_mode") or _visual_source_mode(asset))
         if mode not in VISUAL_SOURCE_MODES:
             raise WorkbenchError(f"第 {index} 个画面区间的素材方式无效")
+        asset_type = str(asset.get("type") or "").lower()
+        has_source_window = "source_in_seconds" in raw or "source_out_seconds" in raw
+        source_in = source_out = None
+        if has_source_window:
+            if asset_type != "video":
+                raise WorkbenchError(f"第 {index} 个图片区间不能设置源视频时间范围")
+            if "source_in_seconds" not in raw or "source_out_seconds" not in raw:
+                raise WorkbenchError(f"第 {index} 个本地视频区间必须同时设置源入点和源出点")
+            source_in = _rounded_seconds(raw.get("source_in_seconds"))
+            source_out = _rounded_seconds(raw.get("source_out_seconds"))
+            if source_out <= source_in:
+                raise WorkbenchError(f"第 {index} 个本地视频的源出点必须晚于源入点")
+            display_frames = max(1, _nonnegative_frame(end, fps) - _nonnegative_frame(start, fps))
+            source_frames = max(1, _nonnegative_frame(source_out, fps) - _nonnegative_frame(source_in, fps))
+            if abs(display_frames - source_frames) > 1:
+                raise WorkbenchError(f"第 {index} 个本地视频的源区间与显示区间必须按帧一致，不能自动变速或循环")
+            available_duration = _as_number(asset.get("duration_seconds"))
+            if available_duration > 0 and source_out > available_duration + (1 / fps):
+                raise WorkbenchError(f"第 {index} 个本地视频的源出点超过素材实际时长")
+        visual_role = str(raw.get("visual_role") or "")
+        cut_policy = str(raw.get("cut_policy") or "")
+        sequence_id = str(raw.get("sequence_id") or "")
+        planner_evidence = raw.get("planner_evidence")
+        has_orchestration_metadata = bool(visual_role or cut_policy or sequence_id or planner_evidence is not None)
+        if has_orchestration_metadata:
+            if visual_role not in LOCAL_MATERIAL_VISUAL_ROLES:
+                raise WorkbenchError(f"第 {index} 个画面区间的素材角色无效")
+            if cut_policy not in LOCAL_MATERIAL_CUT_POLICIES:
+                raise WorkbenchError(f"第 {index} 个画面区间的连续性策略无效")
+            if visual_role == "local_full_bleed" and asset_type != "video":
+                raise WorkbenchError(f"第 {index} 个本地全屏动作必须使用视频素材")
+            if cut_policy == "atomic" and (not sequence_id or source_in is None or source_out is None):
+                raise WorkbenchError(f"第 {index} 个完整动作缺少连续序列或真实源时间范围")
+            if sequence_id and not re.fullmatch(r"LMS-\d{3}", sequence_id):
+                raise WorkbenchError(f"第 {index} 个画面区间的连续序列编号无效")
+            if planner_evidence is not None:
+                if not isinstance(planner_evidence, dict):
+                    raise WorkbenchError(f"第 {index} 个画面区间的编排证据格式无效")
+                if (
+                    planner_evidence.get("source") != "local_material_orchestration_v1"
+                    or not re.fullmatch(r"SHOT-\d{4}", str(planner_evidence.get("shot_id") or ""))
+                    or not re.fullmatch(r"[0-9a-f]{64}", str(planner_evidence.get("index_fingerprint") or "").lower())
+                ):
+                    raise WorkbenchError(f"第 {index} 个画面区间缺少可核验的本地素材证据")
         requested_id = str(raw.get("id") or "")
         block_id = requested_id if re.fullmatch(r"VB-\d{3}", requested_id) and requested_id not in used_ids else f"VB-{index:03d}"
         while block_id in used_ids:
             block_id = f"VB-{index + len(used_ids):03d}"
         used_ids.add(block_id)
-        normalized.append({
+        normalized_block = {
             "id": block_id, "start_seconds": start, "end_seconds": end,
             "story_id": str(scene.get("story_id") or raw.get("story_id") or ""),
             "source_mode": mode, "asset_id": asset_id,
@@ -4040,7 +4413,17 @@ def _validated_visual_timeline(state: dict, scene: dict, raw_blocks: Any) -> lis
             "context_text": str(raw.get("context_text") or "")[:800],
             "attempt": max(0, int(_as_number(raw.get("attempt")))),
             "error": "",
-        })
+        }
+        if has_source_window:
+            normalized_block.update({"source_in_seconds": source_in, "source_out_seconds": source_out})
+        if has_orchestration_metadata:
+            normalized_block.update({
+                "visual_role": visual_role,
+                "cut_policy": cut_policy,
+                "sequence_id": sequence_id or None,
+                "planner_evidence": deepcopy(planner_evidence) if isinstance(planner_evidence, dict) else None,
+            })
+        normalized.append(normalized_block)
     normalized.sort(key=lambda item: item["start_seconds"])
     tolerance = .012
     if abs(normalized[0]["start_seconds"]) > tolerance:
@@ -4085,6 +4468,219 @@ def update_scene_visual_timeline(project_dir: Path, scene_id: str, payload: dict
     _mark_render_needs_refresh(state, f"{scene_id} 的片段内视觉时间线已更新")
     _decision(state, "visual_timeline", f"{scene_id} 片段内画面", f"{len(blocks)} 个无缝区间", f"时间线版本 {scene['visual_timeline']['revision']}")
     _activity(state, "visual_timeline_saved", f"已保存 {scene_id} 的 {len(blocks)} 个画面区间", scene_id=scene_id, block_count=len(blocks))
+    return _save(project_dir, state)
+
+
+def _validated_visual_composition(project_dir: Path, state: dict, scene: dict, payload: Any) -> dict:
+    """Validate the bounded base-plus-hero contract used by preview and final render."""
+    if not isinstance(payload, dict):
+        raise WorkbenchError("画面布局数据格式无效")
+    if payload.get("version") is not None and int(_as_number(payload.get("version"), -1)) != 1:
+        raise WorkbenchError("当前工作台只支持第 1 版画面布局合同")
+    layout = str(payload.get("layout_recipe") or "full_bleed")
+    if layout not in VISUAL_COMPOSITION_LAYOUTS:
+        raise WorkbenchError("画面布局只能选择全屏画面或重点素材卡片")
+    if layout == "focus_card" and str(_scene_presenter(scene).get("treatment") or "hidden") == "fullscreen":
+        raise WorkbenchError("全屏数字人场景不会显示底层画面，请先切换为画中画或隐藏数字人")
+    raw_overlays = payload.get("overlays") if isinstance(payload.get("overlays"), list) else []
+    if len(raw_overlays) > VISUAL_COMPOSITION_MAX_OVERLAYS:
+        raise WorkbenchError(f"单个场景最多只能配置 {VISUAL_COMPOSITION_MAX_OVERLAYS} 个重点素材片段")
+
+    scene_duration = _rounded_seconds(_scene_duration(scene))
+    fps = max(1, int(state.get("settings", {}).get("frame_rate") or 30))
+    canvas_width, canvas_height = _render_dimensions(project_dir, state)
+    assets = {str(item.get("id")): item for item in state.get("assets", []) if isinstance(item, dict)}
+    normalized: list[dict] = []
+    used_ids: set[str] = set()
+    for index, raw in enumerate(raw_overlays, 1):
+        if not isinstance(raw, dict):
+            raise WorkbenchError(f"第 {index} 个重点素材格式无效")
+        role = str(raw.get("role") or "hero")
+        if role not in VISUAL_COMPOSITION_ROLES:
+            raise WorkbenchError(f"第 {index} 个上层素材角色无效")
+        start = _rounded_seconds(raw.get("start_seconds"))
+        end = _rounded_seconds(raw.get("end_seconds"))
+        if end - start < .4 - .001:
+            raise WorkbenchError(f"第 {index} 个重点素材至少需要显示 0.4 秒")
+        if start < 0 or end > scene_duration + .012:
+            raise WorkbenchError(f"第 {index} 个重点素材超出本段 {scene_duration:.3f} 秒范围")
+        end = min(end, scene_duration)
+        asset_id = str(raw.get("asset_id") or "")
+        asset = assets.get(asset_id)
+        asset_type = str((asset or {}).get("type") or "").lower()
+        if not asset or asset_type not in {"image", "video"} or not asset.get("path"):
+            raise WorkbenchError(f"第 {index} 个重点素材没有选择项目内可用的图片或视频")
+        source = (project_dir / str(asset.get("path"))).resolve()
+        try:
+            source.relative_to(project_dir.resolve())
+        except ValueError as exc:
+            raise WorkbenchError(f"第 {index} 个重点素材不在当前项目目录内") from exc
+        if not source.is_file():
+            raise WorkbenchError(f"第 {index} 个重点素材文件不存在")
+        fit = str(raw.get("fit") or "contain")
+        if fit not in VISUAL_COMPOSITION_FITS:
+            raise WorkbenchError(f"第 {index} 个重点素材适配方式无效")
+        if "muted" in raw and raw.get("muted") is not True:
+            raise WorkbenchError(f"第 {index} 个重点视频必须静音，不能混入素材原声")
+        muted = True
+        raw_playback_rate = raw.get("playback_rate", 1)
+        if isinstance(raw_playback_rate, bool) or not isinstance(raw_playback_rate, (int, float)):
+            raise WorkbenchError(f"第 {index} 个重点视频的播放速度格式无效")
+        playback_rate = _as_number(raw_playback_rate, 1)
+        if abs(playback_rate - 1) > 1e-6:
+            raise WorkbenchError(f"第 {index} 个重点视频第一版只允许 1 倍速播放")
+
+        if asset_type == "video" and _as_number(raw.get("source_in_seconds"), 0) < 0:
+            raise WorkbenchError(f"第 {index} 个重点视频的源入点不能小于 0 秒")
+        source_in = _rounded_seconds(raw.get("source_in_seconds")) if asset_type == "video" else 0.0
+        overlay_duration = end - start
+        source_out = _rounded_seconds(
+            raw.get("source_out_seconds"), source_in + overlay_duration
+        ) if asset_type == "video" else _rounded_seconds(overlay_duration)
+        if asset_type == "video":
+            if source_out <= source_in:
+                raise WorkbenchError(f"第 {index} 个重点视频的源出点必须晚于源入点")
+            display_frames = max(1, _nonnegative_frame(end, fps) - _nonnegative_frame(start, fps))
+            source_frames = max(1, _nonnegative_frame(source_out, fps) - _nonnegative_frame(source_in, fps))
+            if abs(source_frames - display_frames) > 1:
+                raise WorkbenchError(
+                    f"第 {index} 个重点视频的源区间与显示区间必须在 1 帧误差内保持一致，不能自动变速或循环"
+                )
+            available_duration = _as_number(asset.get("duration_seconds"))
+            if available_duration <= 0:
+                available_duration = _probe_duration_seconds(source, _ffmpeg_available(), 0)
+            if available_duration > 0 and source_out > available_duration + (1 / fps):
+                raise WorkbenchError(
+                    f"第 {index} 个重点视频的源出点 {source_out:.3f} 秒超过素材时长 {available_duration:.3f} 秒"
+                )
+
+        placement = _validated_visual_placement(
+            raw.get("placement"), asset, canvas_width, canvas_height, index,
+        )
+        candidate_evidence = _validated_candidate_evidence(raw.get("candidate_evidence"), index)
+        planner_evidence = _validated_local_material_planner_evidence(raw.get("planner_evidence"), index)
+
+        requested_id = str(raw.get("id") or "")
+        overlay_id = requested_id if re.fullmatch(r"VL-\d{3}", requested_id) and requested_id not in used_ids else f"VL-{index:03d}"
+        while overlay_id in used_ids:
+            overlay_id = f"VL-{index + len(used_ids):03d}"
+        used_ids.add(overlay_id)
+        normalized.append({
+            "id": overlay_id,
+            "role": role,
+            "asset_id": asset_id,
+            "start_seconds": start,
+            "end_seconds": end,
+            "source_in_seconds": source_in,
+            "source_out_seconds": source_out,
+            "fit": fit,
+            "muted": True,
+            "playback_rate": 1.0,
+            "placement": placement,
+            "candidate_evidence": candidate_evidence,
+            "planner_evidence": planner_evidence,
+            "locked": bool(raw.get("locked")),
+        })
+
+    normalized.sort(key=lambda item: (item["start_seconds"], item["end_seconds"], item["id"]))
+    for previous, current in zip(normalized, normalized[1:]):
+        if previous["end_seconds"] > current["start_seconds"] + .012:
+            raise WorkbenchError("重点素材的显示区间不能互相重叠")
+
+    old = _ensure_scene_visual_composition(scene)
+    old_locked = {
+        str(item.get("id")): item for item in old.get("overlays") or []
+        if isinstance(item, dict) and item.get("locked")
+    }
+    by_id = {item["id"]: item for item in normalized}
+    for overlay_id, frozen in old_locked.items():
+        replacement = by_id.get(overlay_id)
+        if replacement is None:
+            raise WorkbenchError(f"{overlay_id} 已锁定，请先解锁后再删除")
+        frozen_value = {key: value for key, value in frozen.items() if key != "locked"}
+        replacement_value = {key: value for key, value in replacement.items() if key != "locked"}
+        for value in (frozen_value, replacement_value):
+            value.setdefault("muted", True)
+            value.setdefault("playback_rate", 1.0)
+            value.setdefault("placement", None)
+            value.setdefault("candidate_evidence", None)
+            value.setdefault("planner_evidence", None)
+        if _json_hash(frozen_value) != _json_hash(replacement_value):
+            raise WorkbenchError(f"{overlay_id} 已锁定，请先解锁后再修改")
+
+    raw_style = payload.get("frame_style") if isinstance(payload.get("frame_style"), dict) else {}
+    default_style = _default_visual_composition()["frame_style"]
+    width_ratio = _as_number(raw_style.get("width_ratio"), default_style["width_ratio"])
+    height_ratio = _as_number(raw_style.get("height_ratio"), default_style["height_ratio"])
+    radius_ratio = _as_number(raw_style.get("border_radius_ratio"), default_style["border_radius_ratio"])
+    if not .35 <= width_ratio <= .96 or not .25 <= height_ratio <= .9:
+        raise WorkbenchError("重点素材卡片的宽高比例超出安全范围")
+    if not 0 <= radius_ratio <= .1:
+        raise WorkbenchError("重点素材卡片圆角比例无效")
+    border_color = str(raw_style.get("border_color") or default_style["border_color"]).upper()
+    if not re.fullmatch(r"#[0-9A-F]{6}", border_color):
+        raise WorkbenchError("重点素材卡片描边颜色必须是 #RRGGBB")
+    shadow = str(raw_style.get("shadow") or default_style["shadow"])
+    if shadow not in {"soft", "none"}:
+        raise WorkbenchError("重点素材卡片阴影样式无效")
+
+    return {
+        "version": 1,
+        "layout_recipe": layout,
+        "background": {
+            "source": "visual_timeline",
+            "treatment": "auto_dim" if layout == "focus_card" else "normal",
+        },
+        "overlays": normalized,
+        "frame_style": {
+            "width_ratio": round(width_ratio, 4),
+            "height_ratio": round(height_ratio, 4),
+            "border_radius_ratio": round(radius_ratio, 4),
+            "border_color": border_color,
+            "shadow": shadow,
+        },
+    }
+
+
+def update_scene_visual_composition(project_dir: Path, scene_id: str, payload: dict) -> dict:
+    """Atomically replace one scene's semantic layer contract."""
+    state = _load_for_write(project_dir)
+    scene = _find(state["scenes"], scene_id, "场景")
+    _ensure_scene_visual_state(state, scene)
+    old = _ensure_scene_visual_composition(scene)
+    expected_revision = payload.get("expected_revision")
+    if expected_revision is None:
+        raise WorkbenchError("保存画面布局时必须提供当前版本号")
+    if int(_as_number(expected_revision, -1)) != int(_as_number(old.get("revision"), 1)):
+        raise WorkbenchConflict("画面布局已在其他操作中更新，请刷新页面后重试")
+    validated = _validated_visual_composition(project_dir, state, scene, payload)
+    validated.update({
+        "revision": int(_as_number(old.get("revision"), 0)) + 1,
+        "updated_at": _now(),
+    })
+    render_changed = _json_hash(_visual_composition_render_contract(old)) != _json_hash(
+        _visual_composition_render_contract(validated)
+    )
+    scene["visual_composition"] = validated
+    if render_changed:
+        _invalidate_scene_review_preview(scene, "画面布局已更新，请刷新本段审核预览")
+        scene["review_status"] = "needs_adjustment"
+        _mark_render_needs_refresh(state, f"{scene_id} 的画面布局已更新")
+    label = "重点素材卡片" if validated["layout_recipe"] == "focus_card" else "全屏画面"
+    _decision(
+        state,
+        "visual_composition",
+        f"{scene_id} 画面布局",
+        label,
+        f"布局版本 {validated['revision']}，{len(validated['overlays'])} 个重点素材区间",
+    )
+    _activity(
+        state,
+        "visual_composition_saved",
+        f"已保存 {scene_id} 的{label}",
+        scene_id=scene_id,
+        overlay_count=len(validated["overlays"]),
+    )
     return _save(project_dir, state)
 
 
@@ -4883,8 +5479,8 @@ def _visual_batch_ai_context(project_dir: Path, state: dict, items: list[dict], 
         "task": "visual_route_planning",
         "aspect": "9:16" if height > width else "16:9",
         "has_presenter_overlay": _is_avatar_project(state),
-        "caption_owner": "Haike Video 独立字幕层",
-        "headline_owner": "Haike Video 按 story_id 统一的小标题叠加层；HyperFrames 不得渲染右上角新闻标题",
+        "caption_owner": "OpenMontage 独立字幕层",
+        "headline_owner": "OpenMontage 按 story_id 统一的小标题叠加层；HyperFrames 不得渲染右上角新闻标题",
         "hyperframes_layout_variants": layout_variant_catalog(),
         "preferences": {
             "mix_strategy": policy["mix_strategy"],
@@ -5938,6 +6534,8 @@ def _hyperframes_style_render_report(result: Any, style_context: dict) -> dict:
         "motion_variant": style_context.get("motion_variant"),
         "caption_owner": (style_context.get("caption_policy") or {}).get("owner"),
         "caption_baked": bool((style_context.get("caption_policy") or {}).get("baked_into_hyperframes")),
+        "headline_owner": (style_context.get("headline_policy") or {}).get("owner"),
+        "headline_baked": bool((style_context.get("headline_policy") or {}).get("render_in_hyperframes")),
         "lint_exit_code": (steps.get("lint") or {}).get("exit_code"),
         "validate_exit_code": (steps.get("validate") or {}).get("exit_code"),
         "inspect_exit_code": (steps.get("inspect") or {}).get("exit_code"),
@@ -6110,7 +6708,7 @@ def _build_hyperframes_review(project_dir: Path, state: dict, scene: dict, timel
         },
         "asset_manifest": {"assets": manifest_assets},
         "playbook": {
-            "name": "Haike Video 中文导演审核台",
+            "name": "OpenMontage 中文导演审核台",
             "visual_language": {"color_palette": {"background": "#0B0F1A", "text": "#F5F7FA", "accent": "#F5A623"}},
             "typography": {"heading": {"font": "Arial"}, "body": {"font": "Arial"}},
         },
@@ -6945,6 +7543,7 @@ def _avatar_pip_filter(geometry: dict, *, fps: int | None = None, duration: floa
         width_expression = "iw" if crop_width == source_width and crop_x == 0 else str(crop_width)
         parts.append(f"crop={width_expression}:{crop_height}:{crop_x}:{crop_y}")
     parts.extend([f"scale={int(geometry['width'])}:{int(geometry['height'])}", "setsar=1"])
+    parts.append(AVATAR_PIP_FACE_LIGHTING_FILTER)
     shape_filter = _avatar_shape_filter(
         _normalized_presenter_shape(geometry.get("shape"), "rectangle"),
         int(geometry["width"]),
@@ -6978,6 +7577,16 @@ def _review_preview_signature(project_dir: Path, state: dict, scene: dict) -> st
             "path": asset.get("path"),
             "version": next((item.get("id") for item in (asset.get("versions") or []) if item.get("status") == "current"), None),
         })
+    composition = _ensure_scene_visual_composition(scene)
+    composition_assets = {}
+    for overlay in composition.get("overlays") or []:
+        if not isinstance(overlay, dict):
+            continue
+        asset = assets.get(str(overlay.get("asset_id") or "")) or {}
+        composition_assets[str(overlay.get("asset_id") or "")] = {
+            "path": asset.get("path"),
+            "version": next((item.get("id") for item in (asset.get("versions") or []) if item.get("status") == "current"), None),
+        }
     return _json_hash({
         "scene": scene.get("id"),
         "bounds": [scene.get("start_seconds"), scene.get("end_seconds")],
@@ -6997,6 +7606,15 @@ def _review_preview_signature(project_dir: Path, state: dict, scene: dict) -> st
             "version": next((item.get("id") for item in ((visual or {}).get("versions") or []) if item.get("status") == "current"), None),
         },
         "visual_timeline": visual_timeline,
+        "visual_composition": {
+            **_visual_composition_render_contract(composition),
+            "assets": composition_assets,
+        },
+        "story_headline": {
+            "story_id": str(scene.get("story_id") or ""),
+            "content": deepcopy(scene.get("headline_overlay") or {}),
+            "layout": deepcopy(_ensure_story_headline_layout(state)),
+        },
         "directives": scene.get("surgical_directives") or [],
     })
 
@@ -7119,6 +7737,7 @@ def _materialize_avatar_overlay_clip(project_dir: Path, state: dict, scene: dict
     fingerprint = _json_hash({
         "source": str(source), "start": source_start, "end": source_end,
         "geometry": geometry, "revision": revision,
+        "face_lighting": AVATAR_PIP_FACE_LIGHTING_VERSION,
     })[:12]
     output = project_dir / "renders" / "avatar" / "scene-overlays" / f"{scene['id']}-{fingerprint}.mp4"
     if output.is_file() and _probe_duration_seconds(output, ffmpeg, 0) >= duration - 0.08:
@@ -7145,12 +7764,73 @@ def _materialize_avatar_overlay_clip(project_dir: Path, state: dict, scene: dict
     return output, geometry
 
 
-def _review_background_filter(asset: dict, width: int, height: int, duration: float) -> str:
-    """Create a cover-fitted, scene-duration background branch for review."""
-    return (
-        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"crop={width}:{height},setsar=1,trim=duration={duration:.3f},setpts=PTS-STARTPTS"
-    )
+_SDR_BT709_COLOR_CONTRACT_VERSION = "sdr-bt709-tone-map-v1"
+_HDR_TRANSFER_CHARACTERISTICS = {"arib-std-b67", "smpte2084"}
+_HDR_TO_SDR_BT709_FILTER = (
+    "zscale=transfer=linear:npl=100,format=gbrpf32le,"
+    "tonemap=tonemap=hable:desat=0,"
+    "zscale=primaries=bt709:transfer=bt709:matrix=bt709:range=tv,format=yuv420p"
+)
+_SDR_BT709_TAG_FILTER = (
+    "setparams=colorspace=bt709:color_primaries=bt709:color_trc=bt709:range=tv"
+)
+
+
+def _video_color_metadata(path: Path, ffmpeg: str | None = None) -> dict[str, str]:
+    """Read only the color fields needed to choose the composition contract."""
+    probe = _ffprobe_available(ffmpeg)
+    if not probe:
+        return {}
+    ok, output = _run_media([
+        probe, "-v", "error", "-select_streams", "v:0", "-show_entries",
+        "stream=color_range,color_space,color_transfer,color_primaries", "-of", "json", str(path),
+    ])
+    if not ok:
+        return {}
+    try:
+        streams = (json.loads(output).get("streams") or [])
+    except (json.JSONDecodeError, TypeError, AttributeError):
+        return {}
+    stream = streams[0] if streams and isinstance(streams[0], dict) else {}
+    return {
+        key: str(stream.get(key) or "").strip().lower()
+        for key in ("color_range", "color_space", "color_transfer", "color_primaries")
+        if stream.get(key)
+    }
+
+
+def _source_to_sdr_bt709_filter(source: Path, ffmpeg: str | None = None) -> str:
+    """Return the one color conversion allowed before a source enters composition.
+
+    The delivery contract is SDR BT.709.  HLG/PQ input must be tone-mapped
+    before it is concatenated with SDR clips; merely copying its HDR metadata
+    makes the whole H.264 preview advertise HLG, which darkens SDR overlays in
+    common players.  Existing SDR clips are not tone-mapped or brightened.
+    """
+    metadata = _video_color_metadata(source, ffmpeg)
+    if metadata.get("color_transfer") in _HDR_TRANSFER_CHARACTERISTICS:
+        return _HDR_TO_SDR_BT709_FILTER
+    return _SDR_BT709_TAG_FILTER
+
+
+def _review_background_filter(
+    asset: dict,
+    width: int,
+    height: int,
+    duration: float,
+    *,
+    source_color_filter: str = "",
+) -> str:
+    """Create a cover-fitted, SDR scene-duration background branch for review."""
+    filters = [source_color_filter] if source_color_filter else []
+    filters.extend([
+        f"scale={width}:{height}:force_original_aspect_ratio=increase",
+        f"crop={width}:{height}",
+        "setsar=1",
+        f"trim=duration={duration:.3f}",
+        "setpts=PTS-STARTPTS",
+    ])
+    return ",".join(filters)
 
 
 def _materialize_scene_visual_timeline(project_dir: Path, state: dict, scene: dict, ffmpeg: str) -> Path:
@@ -7164,6 +7844,7 @@ def _materialize_scene_visual_timeline(project_dir: Path, state: dict, scene: di
     fps = int(state.get("settings", {}).get("frame_rate") or 30)
     signature = _json_hash({
         "scene": scene.get("id"), "blocks": blocks, "dimensions": [width, height], "fps": fps,
+        "color_contract": _SDR_BT709_COLOR_CONTRACT_VERSION,
         "assets": {asset_id: {"path": item.get("path"), "versions": item.get("versions")} for asset_id, item in assets.items() if asset_id in {str(block.get('asset_id')) for block in blocks}},
     })
     output = project_dir / "renders" / "visual-timelines" / f"{scene['id']}-{signature[:12]}.mp4"
@@ -7207,9 +7888,20 @@ def _materialize_scene_visual_timeline(project_dir: Path, state: dict, scene: di
             # a downstream trim has emitted the requested frame range.
             command.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{block_duration:.6f}", "-i", str(source)])
         else:
-            command.extend(["-stream_loop", "-1", "-t", f"{block_duration:.6f}", "-i", str(source)])
+            # 本地连续动作必须使用已确认的源时间窗。不能循环，否则会把
+            # 已确认的动作重复播放，或让完整动作看起来抽搐。
+            if "source_in_seconds" in block and "source_out_seconds" in block:
+                command.extend([
+                    "-ss", f"{_as_number(block.get('source_in_seconds')):.6f}",
+                    "-t", f"{block_duration:.6f}", "-i", str(source),
+                ])
+            else:
+                command.extend(["-stream_loop", "-1", "-t", f"{block_duration:.6f}", "-i", str(source)])
         label = f"v{index}"
-        filters.append(f"[{index}:v]{_review_background_filter(asset, width, height, block_duration)},fps={fps}[{label}]")
+        color_filter = _source_to_sdr_bt709_filter(source, ffmpeg)
+        filters.append(
+            f"[{index}:v]{_review_background_filter(asset, width, height, block_duration, source_color_filter=color_filter)},fps={fps}[{label}]"
+        )
         labels.append(f"[{label}]")
     if len(labels) == 1:
         filters.append(f"{labels[0]}null[vout]")
@@ -7227,6 +7919,228 @@ def _materialize_scene_visual_timeline(project_dir: Path, state: dict, scene: di
         except OSError:
             pass
         raise WorkbenchError(f"{scene.get('id')} 的视觉时间线合成失败：{detail}")
+    os.replace(temporary, output)
+    return output
+
+
+def _materialize_focus_video_source(
+    project_dir: Path,
+    source: Path,
+    source_in_frame: int,
+    source_out_frame: int,
+    fps: int,
+    ffmpeg: str,
+) -> Path:
+    """Cache one silent CFR source window before Remotion frame decoding."""
+    frame_count = max(1, source_out_frame - source_in_frame)
+    duration = frame_count / fps
+    stat = source.stat()
+    signature = _json_hash({
+        "path": str(source.resolve()),
+        "size": stat.st_size,
+        "mtime_ns": stat.st_mtime_ns,
+        "source_in_frame": source_in_frame,
+        "source_out_frame": source_out_frame,
+        "fps": fps,
+        # v3 drops auxiliary data streams. Some phone/app MP4s carry a
+        # timed-data track which Remotion's frame reader can mistake for a
+        # video timeline when the clip is trimmed near its physical end.
+        "contract": "silent-cfr-v4-video-only-exact-frame-clock",
+    })
+    output = project_dir / "renders" / "visual-compositions" / "sources" / f"{signature[:16]}.mp4"
+    if output.is_file() and _probe_duration_seconds(output, ffmpeg, 0) >= duration - (1 / fps):
+        return output
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f".{output.stem}-{uuid4().hex[:8]}{output.suffix}")
+    command = [
+        ffmpeg, "-y",
+        "-ss", f"{source_in_frame / fps:.6f}",
+        "-t", f"{duration:.6f}",
+        "-i", str(source),
+        "-map", "0:v:0", "-dn",
+        "-map_metadata", "-1", "-map_chapters", "-1", "-write_tmcd", "0",
+        "-an",
+        # A 25FPS source can begin slightly after zero and finish one 30FPS
+        # tick short of the requested source window. Clone only the final
+        # decoded frame, then cap the output at the exact timeline frame
+        # count. This is frame-clock normalization, never visual looping.
+        "-vf", (
+            f"fps={fps},tpad=stop_mode=clone:stop_duration={2 / fps:.6f},"
+            "scale=trunc(iw/2)*2:trunc(ih/2)*2"
+        ),
+        "-frames:v", str(frame_count),
+        "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+        "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+        "-avoid_negative_ts", "make_zero",
+        str(temporary),
+    ]
+    ok, detail = _run_media(command)
+    measured = _probe_duration_seconds(temporary, ffmpeg, 0) if temporary.is_file() else 0
+    if not ok or measured < duration - (1 / fps):
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise WorkbenchError(f"重点视频本地规范化失败：{detail}")
+    os.replace(temporary, output)
+    return output
+
+
+def _materialize_scene_visual_composition(project_dir: Path, state: dict, scene: dict, ffmpeg: str) -> Path:
+    """Render the one authoritative silent content layer for preview and final."""
+    base = _materialize_scene_visual_timeline(project_dir, state, scene, ffmpeg)
+    composition = _ensure_scene_visual_composition(scene)
+    overlays = [item for item in (composition.get("overlays") or []) if isinstance(item, dict)]
+    if composition.get("layout_recipe") != "focus_card" or not overlays:
+        return base
+
+    width, height = _render_dimensions(project_dir, state)
+    fps = int(state.get("settings", {}).get("frame_rate") or 30)
+    duration = _scene_duration(scene)
+    assets = {str(item.get("id")): item for item in state.get("assets", []) if isinstance(item, dict)}
+    used_assets = {}
+    layered_overlays: list[dict] = []
+    for overlay in overlays:
+        asset_id = str(overlay.get("asset_id") or "")
+        asset = assets.get(asset_id)
+        if not asset or not asset.get("path"):
+            raise WorkbenchError(f"{scene.get('id')} 的重点素材 {overlay.get('id')} 已丢失")
+        source = (project_dir / str(asset.get("path"))).resolve()
+        try:
+            source.relative_to(project_dir.resolve())
+        except ValueError as exc:
+            raise WorkbenchError("重点素材不在当前项目目录内") from exc
+        if not source.is_file():
+            raise WorkbenchError(f"重点素材 {overlay.get('id')} 的文件不存在")
+        asset_type = str(asset.get("type") or "").lower()
+        display_start_frame = _nonnegative_frame(overlay.get("start_seconds"), fps)
+        display_end_frame = max(display_start_frame + 1, _nonnegative_frame(overlay.get("end_seconds"), fps))
+        source_in_frame = _nonnegative_frame(overlay.get("source_in_seconds"), fps)
+        source_out_frame = max(source_in_frame + 1, _nonnegative_frame(overlay.get("source_out_seconds"), fps))
+        used_assets[asset_id] = {"path": asset.get("path"), "versions": asset.get("versions")}
+        render_source = source
+        render_source_in_frame = source_in_frame
+        render_source_out_frame = source_out_frame
+        materialized_video_source = False
+        if asset_type == "video" and "playback_rate" in overlay:
+            render_source = _materialize_focus_video_source(
+                project_dir, source, source_in_frame, source_out_frame, fps, ffmpeg,
+            )
+            render_source_in_frame = 0
+            render_source_out_frame = source_out_frame - source_in_frame
+            materialized_video_source = True
+        placement = overlay.get("placement") if isinstance(overlay.get("placement"), dict) else None
+        source_width, source_height = _asset_resolution(asset)
+        rendered_placement = None
+        if placement:
+            rendered_placement = {
+                "presetId": str(placement.get("preset_id") or "source_hero_custom"),
+                "positionXRatio": _as_number(placement.get("position_x_ratio"), .5),
+                "positionYRatio": _as_number(placement.get("position_y_ratio"), .47),
+                "sizeRatio": _as_number(placement.get("size_ratio"), .74),
+                "aspectMode": "source",
+                "maxHeightRatio": _as_number(placement.get("max_height_ratio"), .78),
+                "sourceAspectRatio": (
+                    source_width / source_height
+                    if source_width > 0 and source_height > 0
+                    else width / height
+                ),
+            }
+        legacy_playback_rate = (
+            (source_out_frame - source_in_frame) / (display_end_frame - display_start_frame)
+        ) if asset_type == "video" else None
+        layered_overlays.append({
+            "id": overlay.get("id"),
+            "role": "hero",
+            "src": str(render_source),
+            "mediaType": asset_type,
+            "startSeconds": _as_number(overlay.get("start_seconds")),
+            "endSeconds": _as_number(overlay.get("end_seconds")),
+            "trimBeforeSeconds": render_source_in_frame / fps if asset_type == "video" else None,
+            # The visible ``endFrame`` is authoritative. Do not make
+            # Remotion seek to the normalized window's exclusive upper bound:
+            # a source whose container duration exceeds its decodable frame
+            # count can otherwise fail after the usable on-screen range.
+            "trimAfterSeconds": (
+                None if materialized_video_source else render_source_out_frame / fps
+            ) if asset_type == "video" else None,
+            "trimBeforeFrame": render_source_in_frame if asset_type == "video" else None,
+            "trimAfterFrame": (
+                None if materialized_video_source else render_source_out_frame
+            ) if asset_type == "video" else None,
+            "startFrame": display_start_frame,
+            "endFrame": display_end_frame,
+            "muted": True,
+            "playbackRate": (
+                _as_number(overlay.get("playback_rate"), 1.0)
+                if "playback_rate" in overlay
+                else legacy_playback_rate
+            ),
+            "fit": str(overlay.get("fit") or "contain"),
+            "placement": rendered_placement,
+        })
+
+    signature = _json_hash({
+        "scene": scene.get("id"),
+        "base": str(base),
+        "composition": _visual_composition_render_contract(composition),
+        "assets": used_assets,
+        "dimensions": [width, height],
+        "fps": fps,
+    })
+    output = project_dir / "renders" / "visual-compositions" / f"{scene['id']}-{signature[:12]}.mp4"
+    if output.is_file() and _probe_duration_seconds(output, ffmpeg, 0) >= duration - .12:
+        return output
+    output.parent.mkdir(parents=True, exist_ok=True)
+    temporary = output.with_name(f".{output.stem}-{uuid4().hex[:8]}{output.suffix}")
+    scene_duration_frames = max(1, int(math.ceil(duration * fps)))
+    scene_props = {
+        "id": f"layered-{scene.get('id')}",
+        "kind": "layered",
+        "startSeconds": 0,
+        "durationSeconds": duration,
+        "startFrame": 0,
+        "durationFrames": scene_duration_frames,
+        "layoutRecipe": "focus_card",
+        "background": {
+            "src": str(base.resolve()),
+            "mediaType": "video",
+            "fit": "cover",
+            "trimBeforeSeconds": 0,
+            "trimAfterSeconds": duration,
+            "trimBeforeFrame": 0,
+            "trimAfterFrame": scene_duration_frames,
+        },
+        "overlays": layered_overlays,
+        "frameStyle": {
+            "widthRatio": _as_number((composition.get("frame_style") or {}).get("width_ratio"), .82),
+            "heightRatio": _as_number((composition.get("frame_style") or {}).get("height_ratio"), .56),
+            "borderRadiusRatio": _as_number((composition.get("frame_style") or {}).get("border_radius_ratio"), .025),
+            "borderColor": str((composition.get("frame_style") or {}).get("border_color") or "#D9F3FF"),
+            "shadow": str((composition.get("frame_style") or {}).get("shadow") or "soft"),
+        },
+    }
+    result = VideoCompose().execute({
+        "operation": "remotion_render",
+        "composition_data": {
+            "renderer_family": "layered-content",
+            "scenes": [scene_props],
+            "canvasWidth": width,
+            "canvasHeight": height,
+            "frameRate": fps,
+            "durationFrames": scene_duration_frames,
+        },
+        "output_path": str(temporary),
+        "remotion_timeout_ms": max(120000, int(math.ceil(duration * 10000))),
+    })
+    measured = _probe_duration_seconds(temporary, ffmpeg, 0) if temporary.is_file() else 0
+    if not result.success or not temporary.is_file() or measured < duration - .12:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        detail = result.error or f"输出时长仅 {measured:.3f} 秒"
+        raise WorkbenchError(f"{scene.get('id')} 的重点素材卡片渲染失败：{detail}")
     os.replace(temporary, output)
     return output
 
@@ -7250,6 +8164,12 @@ def generate_scene_review_preview(project_dir: Path, scene_id: str) -> dict:
     duration = _scene_duration(scene)
     width, height = _render_dimensions(project_dir, state)
     fps = int(state.get("settings", {}).get("frame_rate") or 30)
+    headline_overlays, _ = _daily_story_headline_overlays(project_dir, state, width, height)
+    story_id = str(scene.get("story_id") or "")
+    story_headline = next(
+        (item for item in headline_overlays if str(item.get("story_id") or "") == story_id),
+        None,
+    )
     visual = _selected_visual_asset(state, scene_id)
     asset_lookup = {str(item.get("id")): item for item in state.get("assets", []) if isinstance(item, dict)}
     visual_blocks = list((scene.get("visual_timeline") or {}).get("blocks") or [])
@@ -7277,6 +8197,11 @@ def generate_scene_review_preview(project_dir: Path, scene_id: str) -> dict:
             "resolution": f"{width}x{height}", "generated_at": preview.get("generated_at") or _now(),
             "stale_reason": "", "error": "",
             "caption_cues": _subtitle_cues(scene, _scene_text(project_dir, state, scene), relative_to_scene=True),
+            "story_headline": {
+                "story_id": story_id,
+                "visible": bool(story_headline),
+                "layout": deepcopy(_ensure_story_headline_layout(state)),
+            },
         })
         return _save(project_dir, state)
 
@@ -7287,36 +8212,14 @@ def generate_scene_review_preview(project_dir: Path, scene_id: str) -> dict:
     input_count = 0
     background_input_indices: list[int] = []
     if needs_background and visual_blocks:
-        background_labels: list[str] = []
-        for index, block in enumerate(visual_blocks):
-            block_asset = asset_lookup.get(str(block.get("asset_id") or ""))
-            if not block_asset or not block_asset.get("path"):
-                block_label = block.get("id") or index + 1
-                if block.get("status") == "failed" and block.get("error"):
-                    raise WorkbenchError(f"视觉区间 {block_label} 的上游素材筛选失败：{block['error']}")
-                raise WorkbenchError(f"视觉区间 {block_label} 的素材文件不存在，请重新选择")
-            background = (project_dir / str(block_asset.get("path"))).resolve()
-            try:
-                background.relative_to(project_dir.resolve())
-            except ValueError as exc:
-                raise WorkbenchError("视觉时间线素材不在当前项目目录内") from exc
-            if not background.is_file():
-                raise WorkbenchError(f"视觉区间 {block.get('id') or index + 1} 的素材文件不存在")
-            block_duration = max(.04, _as_number(block.get("end_seconds")) - _as_number(block.get("start_seconds")))
-            input_index = input_count
-            background_input_indices.append(input_index)
-            if str(block_asset.get("type") or "").lower() == "image":
-                command.extend(["-loop", "1", "-framerate", str(fps), "-i", str(background)])
-            else:
-                command.extend(["-stream_loop", "-1", "-i", str(background)])
-            label = f"bg{index}"
-            filter_parts.append(f"[{input_index}:v]{_review_background_filter(block_asset, width, height, block_duration)},fps={fps}[{label}]")
-            background_labels.append(f"[{label}]")
-            input_count += 1
-        if len(background_labels) == 1:
-            filter_parts.append(f"{background_labels[0]}null[base]")
-        else:
-            filter_parts.append(f"{''.join(background_labels)}concat=n={len(background_labels)}:v=1:a=0[base]")
+        # Preview and final share this exact silent content-layer materializer.
+        # Keeping a second block compositor here caused historic preview/final
+        # drift as soon as a new layout primitive was introduced.
+        background = _materialize_scene_visual_composition(project_dir, state, scene, ffmpeg)
+        command.extend(["-i", str(background)])
+        background_input_indices.append(input_count)
+        filter_parts.append(f"[{input_count}:v]{_review_background_filter({}, width, height, duration)},fps={fps}[base]")
+        input_count += 1
     elif needs_background:
         background = (project_dir / str(visual.get("path"))).resolve()
         try:
@@ -7330,6 +8233,18 @@ def generate_scene_review_preview(project_dir: Path, scene_id: str) -> dict:
         else:
             command.extend(["-stream_loop", "-1", "-i", str(background)])
         filter_parts.append(f"[0:v]{_review_background_filter(visual, width, height, duration)},fps={fps}[base]")
+        input_count += 1
+    headline_index: int | None = None
+    if story_headline:
+        headline_path = Path(str(story_headline["asset_path"])).resolve()
+        try:
+            headline_path.relative_to(project_dir.resolve())
+        except ValueError as exc:
+            raise WorkbenchError("新闻小标题素材不在当前项目目录内") from exc
+        if not headline_path.is_file():
+            raise WorkbenchError("新闻小标题素材不存在，请重新保存标题后再预览")
+        command.extend(["-loop", "1", "-framerate", str(fps), "-t", f"{duration:.6f}", "-i", str(headline_path)])
+        headline_index = input_count
         input_count += 1
     if source_path:
         command.extend(["-ss", f"{source_start:.6f}", "-t", f"{duration:.6f}", "-i", str(source_path)])
@@ -7365,11 +8280,21 @@ def generate_scene_review_preview(project_dir: Path, scene_id: str) -> dict:
         else:
             audio_map = None
 
+    composed_label = "composed"
+    if headline_index is not None and story_headline:
+        filter_parts.append(
+            f"[{headline_index}:v]format=rgba,trim=duration={duration:.3f},setpts=PTS-STARTPTS[storyheadline]"
+        )
+        filter_parts.append(
+            f"[composed][storyheadline]overlay={int(story_headline['x'])}:{int(story_headline['y'])}:"
+            "eof_action=pass[headlinecomposed]"
+        )
+        composed_label = "headlinecomposed"
     effects = _scene_directive_filters(project_dir, state, scene)
     if effects:
-        filter_parts.append(f"[composed]{effects}[vout]")
+        filter_parts.append(f"[{composed_label}]{effects}[vout]")
     else:
-        filter_parts.append("[composed]null[vout]")
+        filter_parts.append(f"[{composed_label}]null[vout]")
     command.extend(["-filter_complex", ";".join(filter_parts), "-map", "[vout]"])
     if audio_map:
         command.extend(["-map", audio_map, "-c:a", "aac", "-b:a", "160k"])
@@ -7394,6 +8319,11 @@ def generate_scene_review_preview(project_dir: Path, scene_id: str) -> dict:
         "input_signature": signature, "duration_seconds": round(duration, 3),
         "resolution": f"{width}x{height}", "generated_at": _now(), "stale_reason": "", "error": "",
         "caption_cues": _subtitle_cues(scene, _scene_text(project_dir, state, scene), relative_to_scene=True),
+        "story_headline": {
+            "story_id": story_id,
+            "visible": bool(story_headline),
+            "layout": deepcopy(_ensure_story_headline_layout(state)),
+        },
     })
     _activity(state, "scene_review_preview", f"已生成 {scene_id} 的本地审核预览（{width}×{height}）", scene_id=scene_id, output_path=preview["output_path"])
     return _save(project_dir, state)
@@ -7450,7 +8380,7 @@ def remove_surgical_directive(project_dir: Path, scene_id: str, directive_id: st
 
 def _safe_automation_error(error: object) -> str:
     message = str(error or "自动生产任务失败")
-    for variable in ("OPENAI_API_KEY", "PEXELS_API_KEY", "VOICEBOX_API_KEY"):
+    for variable in ("OPENAI_API_KEY", "PEXELS_API_KEY", "VOICEBOX_API_KEY", "DOUBAO_SPEECH_API_KEY"):
         secret = os.environ.get(variable)
         if secret:
             message = message.replace(secret, "[已隐藏]")
@@ -7822,7 +8752,7 @@ def _try_official_image_candidate(
             lambda: requests.get(
                 image_url,
                 timeout=30,
-                headers={"User-Agent": "Mozilla/5.0 Haike Video/1.0"},
+                headers={"User-Agent": "Mozilla/5.0 OpenMontage/1.0"},
             ),
         )
         response.raise_for_status()
@@ -8313,8 +9243,8 @@ def _generate_hyperframes_visual_block(
             "style_pack_id": style_context["style_pack_id"],
             "style_pack_version": style_context["style_pack_version"],
             "style_context": style_context, "require_layout_inspect": True,
-            "caption_owner": "haike_video", "subtitle_burn": False,
-            "headline_owner": "haike_video-story-overlay" if scene.get("story_id") else "hyperframes",
+            "caption_owner": "openmontage", "subtitle_burn": False,
+            "headline_owner": "openmontage-story-overlay" if scene.get("story_id") else "hyperframes",
         },
         "cuts": [
             {"id": f"{scene['id']}-{block['id']}-hero", "type": "text_card", "text": intent, "in_seconds": 0, "out_seconds": duration},
@@ -9584,14 +10514,14 @@ def start_project_narration(project_dir: Path, payload: dict) -> dict:
     narration_job = automation["narration_generation"]
     if narration_job.get("status") == "generating":
         raise WorkbenchError("项目旁白正在生成，请不要重复点击")
-    if VoiceboxTTS().get_status().value != "available":
-        raise WorkbenchError("Haike Video 本地配音当前不可用，请先完成安装并启动服务")
     voice = get_default_voice()
-    if not voice or not voice.get("id"):
+    if not voice or not voice.get("id") or voice.get("available") is False:
         raise WorkbenchError("尚未在通用配音中心设置可用默认音色，请先选择并试听")
+    provider_id = str(voice.get("provider_id") or "voicebox_tts")
+    provider_name = str(voice.get("provider_name") or "Haike Video 本地配音")
     automation["status"] = "generating_narration"
     automation["voice"] = {
-        "provider": "voicebox_tts", "source": "audio_center", "label": voice["name"],
+        "provider": provider_id, "provider_name": provider_name, "source": "audio_center", "label": voice["name"],
         "profile_id": voice["id"], "profile_name": voice["name"],
         "default_engine": voice.get("default_engine"),
     }
@@ -9602,7 +10532,7 @@ def start_project_narration(project_dir: Path, payload: dict) -> dict:
     }
     _mark_render_needs_refresh(state, "项目旁白将重新生成，原全片预览与正式成片会在新时间线下过期")
     automation["render"] = {"status": "awaiting_narration", "runtime": "ffmpeg", "output_path": None, "error": ""}
-    _decision(state, "voice_selection", "旁白配音", f"Haike Video 本地配音 / {voice['name']}", "引用通用配音中心的当前默认音色；项目只记录引用与生成结果。")
+    _decision(state, "voice_selection", "旁白配音", f"{provider_name} / {voice['name']}", "引用通用配音中心的当前默认音色；任务已冻结供应商和音色，后续修改通用默认不会影响本次生成。")
     _activity(state, "narration_generation_started", f"开始用通用音色“{voice['name']}”生成项目旁白；完成后将以真实时长建立时间线")
     return _save(project_dir, state)
 
@@ -9632,7 +10562,20 @@ def generate_project_narration(project_dir: Path) -> dict:
     profile_id = automation["voice"].get("profile_id")
     if not profile_id:
         raise WorkbenchError("项目未记录有效的通用音色引用，请重新开始生成旁白")
-    voice_tool = VoiceboxTTS()
+    profile = get_voice_profile(str(profile_id))
+    if not profile and str(automation["voice"].get("provider") or "voicebox_tts") == "voicebox_tts":
+        profile = {
+            "id": str(profile_id),
+            "name": str(automation["voice"].get("profile_name") or profile_id),
+            "provider_id": "voicebox_tts",
+            "provider_name": "Haike Video 本地配音",
+        }
+    if not profile:
+        raise WorkbenchError("项目冻结的配音音色已不存在，请回到配音中心重新选择")
+    frozen_provider = str(automation["voice"].get("provider") or "voicebox_tts")
+    if str(profile.get("provider_id") or "voicebox_tts") != frozen_provider:
+        raise WorkbenchError("项目冻结的配音供应商与当前音色配置不一致，请重新开始旁白任务")
+    provider_name = str(profile.get("provider_name") or automation["voice"].get("provider_name") or "Haike Video 本地配音")
     natural_audio: list[Path] = []
     ffmpeg = _ffmpeg_available()
     if not ffmpeg:
@@ -9644,11 +10587,9 @@ def generate_project_narration(project_dir: Path) -> dict:
         if not text:
             raise WorkbenchError(f"{scene.get('id')} 缺少可配音的脚本内容")
         source_audio = project_dir / "assets" / "audio" / "voicebox" / f"{scene['id']}.wav"
-        result = voice_tool.execute({
-            "text": text, "profile_id": profile_id, "language": "zh", "output_path": str(source_audio),
-        })
+        result = generate_voice_audio(text=text, profile=profile, output_path=source_audio, language="zh")
         if not result.success or not source_audio.is_file():
-            raise WorkbenchError(_safe_automation_error(result.error or f"{scene['id']} 的本地配音未生成"))
+            raise WorkbenchError(_safe_automation_error(result.error or f"{scene['id']} 的配音未生成"))
         duration_seconds = _probe_duration_seconds(source_audio, ffmpeg, 0)
         if duration_seconds <= 0:
             raise WorkbenchError(f"无法读取 {scene['id']} 的本地配音时长")
@@ -9656,8 +10597,8 @@ def generate_project_narration(project_dir: Path) -> dict:
         audio_asset = _append_asset(project_dir, state, {
             "name": f"{scene.get('title') or scene['id']} · {automation['voice']['label']}旁白", "type": "audio", "source_type": "local_generated",
             "path": str(source_audio), "duration_seconds": duration_seconds,
-            "provider": "Haike Video 本地配音", "source_tool": "voicebox_tts", "license": "本机 Qwen3-TTS 生成；按项目发布规范复核",
-            "generation": {"profile_id": profile_id, "profile_name": automation["voice"]["profile_name"], "voice_label": automation["voice"]["label"], "scene_id": scene["id"], "generated_at": _now(), "timing_mode": "natural"},
+            "provider": provider_name, "source_tool": frozen_provider, "license": "由所选配音供应商生成；请按项目发布规范复核",
+            "generation": {"provider_id": frozen_provider, "profile_id": profile_id, "profile_name": automation["voice"]["profile_name"], "voice_label": automation["voice"]["label"], "scene_id": scene["id"], "generated_at": _now(), "timing_mode": "natural", "metadata_path": (result.data or {}).get("metadata_path")},
         })
         scene_narration = scene.get("narration") if isinstance(scene.get("narration"), dict) else _scene_narration_default(text)
         scene["narration"] = scene_narration
@@ -9738,9 +10679,6 @@ def start_scene_narration_candidate(project_dir: Path, scene_id: str, payload: d
     narration["job"] = job
     if job.get("status") == "generating":
         raise WorkbenchError("这个片段的候选配音正在生成，请等待完成后再试")
-    if VoiceboxTTS().get_status().value != "available":
-        raise WorkbenchError("Haike Video 本地配音当前不可用，请先完成安装并启动服务")
-
     catalog = voice_catalog()
     profiles = catalog.get("profiles") if isinstance(catalog.get("profiles"), list) else []
     requested_profile = str(payload.get("profile_id") or "").strip()
@@ -9748,7 +10686,9 @@ def start_scene_narration_candidate(project_dir: Path, scene_id: str, payload: d
     if selected is None:
         selected = catalog.get("default_voice") if not requested_profile else None
     if not selected or not selected.get("id"):
-        raise WorkbenchError("请先在通用配音中心确认可用音色，或在这里选择一个本地音色")
+        raise WorkbenchError("请先在通用配音中心确认可用音色，或在这里选择一个音色")
+    if selected.get("available") is False:
+        raise WorkbenchError(f"{selected.get('provider_name') or '所选配音服务'}当前不可用，请先完成配置")
 
     text = str(payload.get("text") or narration.get("text") or _scene_text(project_dir, state, scene)).strip()
     if not text:
@@ -9761,6 +10701,7 @@ def start_scene_narration_candidate(project_dir: Path, scene_id: str, payload: d
     narration["job"] = {
         "id": f"NJOB-{uuid4().hex[:10]}", "status": "generating", "version_id": version_id,
         "text": text, "profile_id": selected["id"], "profile_name": selected.get("name") or selected["id"],
+        "provider_id": selected.get("provider_id") or "voicebox_tts", "provider_name": selected.get("provider_name") or "Haike Video 本地配音",
         "started_at": _now(), "error": "",
     }
     _activity(state, "scene_narration_started", f"开始生成 {scene_id} 的候选配音 {version_id}", scene_id=scene_id, narration_version_id=version_id)
@@ -9781,15 +10722,23 @@ def generate_scene_narration_candidate(project_dir: Path, scene_id: str) -> dict
     if not version_id:
         raise WorkbenchError("片段候选配音缺少版本编号")
     raw_audio = project_dir / "assets" / "audio" / "voicebox" / scene_id / f"{version_id}-raw.wav"
-    result = VoiceboxTTS().execute({
-        "text": job["text"], "profile_id": job["profile_id"], "language": "zh", "output_path": str(raw_audio),
-    })
+    profile = get_voice_profile(str(job["profile_id"]))
+    if not profile and str(job.get("provider_id") or "voicebox_tts") == "voicebox_tts":
+        profile = {
+            "id": str(job["profile_id"]),
+            "name": str(job.get("profile_name") or job["profile_id"]),
+            "provider_id": "voicebox_tts",
+            "provider_name": "Haike Video 本地配音",
+        }
+    if not profile or str(profile.get("provider_id") or "voicebox_tts") != str(job.get("provider_id") or "voicebox_tts"):
+        raise WorkbenchError("候选配音冻结的音色配置已变化，请重新发起候选生成")
+    result = generate_voice_audio(text=str(job["text"]), profile=profile, output_path=raw_audio, language="zh")
     state = _load_for_write(project_dir)
     scene = _find(state["scenes"], scene_id, "场景")
     narration = scene.get("narration") if isinstance(scene.get("narration"), dict) else {}
     job = narration.get("job") if isinstance(narration.get("job"), dict) else {}
     if not result.success or not raw_audio.is_file():
-        message = _safe_automation_error(result.error or "本地配音没有返回可试听的音频文件")
+        message = _safe_automation_error(result.error or "配音服务没有返回可试听的音频文件")
         narration["status"] = "candidate_failed"
         narration["job"] = {**job, "status": "failed", "finished_at": _now(), "error": message}
         _activity(state, "scene_narration_failed", f"{scene_id} 候选配音生成失败：{message}", scene_id=scene_id)
@@ -9810,10 +10759,11 @@ def generate_scene_narration_candidate(project_dir: Path, scene_id: str) -> dict
     audio_asset = _append_asset(project_dir, state, {
         "name": f"{scene.get('title') or scene_id} · {job.get('profile_name') or '本地音色'} 候选配音",
         "type": "audio", "source_type": "local_generated", "path": str(raw_audio), "duration_seconds": duration_seconds,
-        "provider": "Haike Video 本地配音", "source_tool": "voicebox_tts", "license": "本机 Qwen3-TTS 生成；请按项目发布规范复核",
+        "provider": job.get("provider_name") or "Haike Video 本地配音", "source_tool": job.get("provider_id") or "voicebox_tts", "license": "由所选配音供应商生成；请按项目发布规范复核",
         "generation": {
-            "profile_id": job["profile_id"], "profile_name": job.get("profile_name"), "scene_id": scene_id,
+            "provider_id": job.get("provider_id") or "voicebox_tts", "profile_id": job["profile_id"], "profile_name": job.get("profile_name"), "scene_id": scene_id,
             "narration_version_id": version_id, "generated_at": _now(), "timing_mode": "natural",
+            "metadata_path": (result.data or {}).get("metadata_path"),
         },
     })
     version = {
@@ -10268,10 +11218,11 @@ def _daily_story_headline_overlays(project_dir: Path, state: dict, width: int, h
             continue
         groups.append({"story_id": story_id, "start_seconds": start, "end_seconds": end, "headline": deepcopy(headline)})
 
-    canvas_w = max(480, int(width * .58))
-    canvas_h = max(170, int(height * .125))
-    x = int(width * .36)
-    y = int(height * .09)
+    layout = _ensure_story_headline_layout(state)
+    canvas_w = max(240, int(width * layout["width"]))
+    canvas_h = max(100, int(height * layout["height"]))
+    x = int(width * layout["x"])
+    y = int(height * layout["y"])
     output_dir = project_dir / "renders" / "overlays" / "story-headlines"
     output_dir.mkdir(parents=True, exist_ok=True)
     overlays: list[dict] = []
@@ -10363,7 +11314,13 @@ def _measure_integrated_loudness(path: Path, ffmpeg: str) -> dict[str, Any]:
     }
 
 
-def _normalize_video_loudness(project_dir: Path, video_path: Path, *, target_lufs: float) -> dict[str, Any]:
+def _normalize_video_loudness(
+    project_dir: Path,
+    video_path: Path,
+    *,
+    target_lufs: float,
+    enforce_acceptance: bool = True,
+) -> dict[str, Any]:
     ffmpeg = _ffmpeg_available()
     if not ffmpeg:
         raise WorkbenchError("本机未发现 FFmpeg，无法执行成片响度归一化")
@@ -10396,14 +11353,49 @@ def _normalize_video_loudness(project_dir: Path, video_path: Path, *, target_luf
         raise WorkbenchError(f"成片响度归一化失败：{detail}")
     os.replace(temporary, video_path)
     measured = _measure_integrated_loudness(video_path, ffmpeg)
+    peak_safety_attenuation_db = 0.0
+    # AAC can still overshoot the requested loudnorm peak by a fraction of a
+    # decibel.  When loudness is already acceptable, apply one small,
+    # deterministic safety trim and measure again instead of rejecting an
+    # otherwise valid render at the very last step.
+    if (
+        abs(measured["integrated_lufs"] - float(target_lufs)) <= 1.5
+        and measured["true_peak_dbtp"] > -1.0
+    ):
+        peak_safety_attenuation_db = min(-0.1, -1.2 - measured["true_peak_dbtp"])
+        safety_output = video_path.with_name(
+            f".{video_path.stem}-peak-safety-{uuid4().hex[:8]}{video_path.suffix}"
+        )
+        ok, detail = _run_media([
+            ffmpeg, "-y", "-i", str(video_path), "-map", "0:v:0", "-map", "0:a:0",
+            "-c:v", "copy", "-af", f"volume={peak_safety_attenuation_db:.3f}dB",
+            "-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-movflags", "+faststart",
+            str(safety_output),
+        ])
+        if not ok or not safety_output.is_file():
+            safety_output.unlink(missing_ok=True)
+            raise WorkbenchError(f"成片峰值安全衰减失败：{detail}")
+        os.replace(safety_output, video_path)
+        measured = _measure_integrated_loudness(video_path, ffmpeg)
+    meets_acceptance = (
+        abs(measured["integrated_lufs"] - float(target_lufs)) <= 1.5
+        and measured["true_peak_dbtp"] <= -1.0
+    )
     report = {
         "target_lufs": float(target_lufs),
         "normalization_true_peak_target_dbtp": normalization_true_peak_dbtp,
         "acceptance_true_peak_limit_dbtp": -1.0,
+        "peak_safety_attenuation_db": peak_safety_attenuation_db,
+        "acceptance_enforced": bool(enforce_acceptance),
+        "acceptance_status": "passed" if meets_acceptance else "warning",
         **measured,
         "output_path": _safe_relpath(project_dir, str(video_path)),
     }
-    if abs(measured["integrated_lufs"] - float(target_lufs)) > 1.5 or measured["true_peak_dbtp"] > -1.0:
+    # An audit preview is a human review artifact, not a released deliverable.
+    # Keep its measured loudness in the report, but do not discard an otherwise
+    # playable preview because of a marginal (or even material) loudness miss.
+    # Formal renders continue to fail closed below.
+    if enforce_acceptance and not meets_acceptance:
         raise WorkbenchError(
             f"成片响度未达到发布容差：{measured['integrated_lufs']:.1f} LUFS / {measured['true_peak_dbtp']:.1f} dBTP"
         )
@@ -10487,11 +11479,11 @@ def _generate_project_video_render(project_dir: Path, *, preview: bool) -> dict:
             ffmpeg = ffmpeg or _ffmpeg_available()
             if not ffmpeg:
                 raise WorkbenchError("本机未发现 FFmpeg，无法合成片段内视觉时间线")
-            timeline_path = _materialize_scene_visual_timeline(project_dir, state, scene, ffmpeg)
+            timeline_path = _materialize_scene_visual_composition(project_dir, state, scene, ffmpeg)
             timeline_asset_id = f"VT-{scene['id']}"
             manifest["assets"].append({
                 "id": timeline_asset_id, "type": "video", "path": str(timeline_path.resolve()),
-                "source_tool": "workbench_visual_timeline", "provider": "local_ffmpeg",
+                "source_tool": "workbench_visual_composition", "provider": "local_remotion_or_ffmpeg",
                 "license": "由项目内已登记素材合成", "duration_seconds": duration,
             })
         usage = next((item for item in state["usages"] if item.get("scene_id") == scene.get("id") and item.get("role") == "visual" and item.get("selected")), None)
@@ -10589,7 +11581,12 @@ def _generate_project_video_render(project_dir: Path, *, preview: bool) -> dict:
             },
         }
     )
-    loudness_result = _normalize_video_loudness(project_dir, output, target_lufs=-14.0 if preview else -16.0)
+    loudness_result = _normalize_video_loudness(
+        project_dir,
+        output,
+        target_lufs=-14.0 if preview else -16.0,
+        enforce_acceptance=not preview,
+    )
     report_path = AUTOMATION_PREVIEW_RENDER_REPORT if preview else AUTOMATION_RENDER_REPORT
     render_report = {
         "version": "1.0", "status": "completed", "kind": "full_preview" if preview else "formal_final",
@@ -10856,6 +11853,15 @@ def _asset_reference_index(state: dict) -> dict[str, list[dict]]:
         for block in timeline.get("blocks") or []:
             if isinstance(block, dict) and str(block.get("status") or "ready") != "failed":
                 add(block.get("asset_id"), "visual_timeline", f"{title} · 画面区间 {block.get('id') or ''}".strip(), scene_id=scene_id)
+        composition = scene.get("visual_composition") if isinstance(scene.get("visual_composition"), dict) else {}
+        for overlay in composition.get("overlays") or []:
+            if isinstance(overlay, dict):
+                add(
+                    overlay.get("asset_id"),
+                    "visual_composition",
+                    f"{title} · 重点素材 {overlay.get('id') or ''}".strip(),
+                    scene_id=scene_id,
+                )
         presenter = scene.get("presenter") if isinstance(scene.get("presenter"), dict) else {}
         if presenter.get("treatment") != "hidden":
             add(presenter.get("asset_id"), "presenter", f"{title} · 数字人出镜", scene_id=scene_id)
@@ -11159,6 +12165,126 @@ def restore_trashed_asset(project_dir: Path, asset_id: str) -> dict:
     return _save(project_dir, state)
 
 
+def _safe_project_asset_upload_name(original_filename: str) -> tuple[str, str]:
+    leaf = Path(str(original_filename or "").replace("\\", "/")).name.strip()
+    suffix = Path(leaf).suffix.lower()
+    media_type = PROJECT_ASSET_UPLOAD_TYPES.get(suffix)
+    if not leaf or not media_type:
+        raise WorkbenchError("只支持上传常见的视频或图片素材")
+    stem = re.sub(r"[^\w\- .()（）\u4e00-\u9fff]+", "_", Path(leaf).stem, flags=re.UNICODE).strip(" ._")
+    return f"{(stem or 'asset')[:96]}{suffix}", media_type
+
+
+def prepare_project_asset_upload(project_dir: Path, original_filename: str) -> Path:
+    """Create one project-contained temporary file for a streamed local upload."""
+    safe_name, _ = _safe_project_asset_upload_name(original_filename)
+    project = project_dir.resolve(strict=True)
+    root = (project / PROJECT_ASSET_UPLOAD_DIRECTORY).resolve()
+    try:
+        root.relative_to(project)
+    except ValueError as exc:
+        raise WorkbenchError("项目素材上传目录越过了当前项目边界") from exc
+    root.mkdir(parents=True, exist_ok=True)
+    temporary = (root / f".incoming-{uuid4().hex}-{safe_name}").resolve()
+    try:
+        temporary.relative_to(root)
+    except ValueError as exc:
+        raise WorkbenchError("素材上传临时路径无效") from exc
+    temporary.touch(exist_ok=False)
+    return temporary
+
+
+def complete_project_asset_upload(
+    project_dir: Path,
+    temporary_path: Path,
+    original_filename: str,
+    *,
+    display_name: str = "",
+    license_notice: str = "",
+    content_sha256: str = "",
+    max_bytes: int = MAX_PROJECT_ASSET_BYTES,
+) -> dict:
+    """Validate, atomically adopt and register one browser-uploaded visual asset."""
+    safe_name, media_type = _safe_project_asset_upload_name(original_filename)
+    project = project_dir.resolve(strict=True)
+    root = (project / PROJECT_ASSET_UPLOAD_DIRECTORY).resolve()
+    temporary = temporary_path.resolve(strict=True)
+    try:
+        temporary.relative_to(root)
+    except ValueError as exc:
+        raise WorkbenchError("上传文件不在当前项目的安全临时目录中") from exc
+    if not temporary.is_file() or not temporary.name.startswith(".incoming-"):
+        raise WorkbenchError("素材上传临时文件无效")
+    size = temporary.stat().st_size
+    if size <= 0:
+        raise WorkbenchError("上传的素材文件为空")
+    if size > int(max_bytes):
+        raise WorkbenchError(f"单个素材不能超过 {int(max_bytes) // (1024 ** 3)}GB")
+    digest = str(content_sha256 or "").lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        digest = _sha256_file(temporary)
+    final = (root / f"asset-{digest}{Path(safe_name).suffix.lower()}").resolve()
+    try:
+        final.relative_to(root)
+    except ValueError as exc:
+        raise WorkbenchError("素材上传目标路径无效") from exc
+    created_final = False
+    if final.exists():
+        if not final.is_file() or _sha256_file(final) != digest:
+            raise WorkbenchError("素材内容标识发生冲突，未覆盖现有文件")
+        temporary.unlink(missing_ok=True)
+    else:
+        os.replace(temporary, final)
+        created_final = True
+
+    try:
+        duration: float | None = None
+        resolution: dict | None = None
+        if media_type == "video":
+            probe = _probe_video(final, _ffmpeg_available())
+            streams = probe.get("streams") if isinstance(probe, dict) else []
+            video = next((item for item in streams or [] if isinstance(item, dict) and item.get("codec_type") == "video"), None)
+            duration = _as_number(((probe or {}).get("format") or {}).get("duration")) if isinstance(probe, dict) else 0
+            if not video or duration <= 0:
+                raise WorkbenchError("上传文件不是可读取的有效视频，请检查格式或 FFmpeg 配置")
+            resolution = {"width": int(video.get("width") or 0), "height": int(video.get("height") or 0)}
+        else:
+            try:
+                from PIL import Image
+                with Image.open(final) as image:
+                    image.verify()
+                with Image.open(final) as image:
+                    resolution = {"width": int(image.width), "height": int(image.height)}
+            except Exception as exc:
+                raise WorkbenchError("上传文件不是可读取的有效图片") from exc
+
+        state = _load_for_write(project)
+        relative = _safe_relpath(project, str(final))
+        existing = next((item for item in state.get("assets") or [] if str(item.get("path") or "") == str(relative)), None)
+        if existing:
+            _activity(state, "asset_upload_reused", f"已复用相同内容的素材 {existing['id']}", asset_id=existing["id"])
+            return _save(project, state)
+        _append_asset(project, state, {
+            "name": str(display_name or Path(safe_name).stem)[:160],
+            "type": media_type,
+            "source_type": "human_provided",
+            "path": relative,
+            "duration_seconds": round(duration, 3) if duration else None,
+            "resolution": resolution,
+            "provider": "本地上传",
+            "source_tool": "workbench_asset_upload",
+            "license": str(license_notice or "用户上传；发布前请确认使用权")[:500],
+        })
+        return _save(project, state)
+    except Exception:
+        if created_final:
+            try:
+                final.unlink()
+            except OSError:
+                pass
+        raise
+
+
 def _append_asset(project_dir: Path, state: dict, payload: dict) -> dict:
     """Append a traceable material record without assigning it to a scene."""
     source_type = str(payload.get("source_type") or "undecided")
@@ -11189,6 +12315,885 @@ def _append_asset(project_dir: Path, state: dict, payload: dict) -> dict:
     state["assets"].append(asset)
     _activity(state, "asset", f"已登记素材 {asset_id}", asset_id=asset_id)
     return asset
+
+
+def _media_index_source(project_dir: Path, state: dict, asset_id: str) -> tuple[dict, Path]:
+    asset = _find(state.get("assets") or [], asset_id, "素材")
+    if str(asset.get("type") or "").lower() != "video" or not asset.get("path"):
+        raise WorkbenchError("只有已登记到项目内的视频素材可以建立片段索引")
+    source = (project_dir / str(asset.get("path"))).resolve()
+    try:
+        source.relative_to(project_dir.resolve())
+    except ValueError as exc:
+        raise WorkbenchError("待分析素材不在当前项目目录内") from exc
+    if not source.is_file():
+        raise WorkbenchError("待分析素材文件不存在")
+    return asset, source
+
+
+def _media_transcript_provider(model_path: str | None = None):
+    """Create one lazy, local-only Whisper provider for a media-index job."""
+    cache: dict[str, Any] = {}
+
+    def transcribe(path: Path) -> tuple[str, list[dict], dict]:
+        from backlot.avatar_import import _load_whisper, _transcribe_file
+
+        if "model" not in cache:
+            model, selected = _load_whisper(model_path)
+            cache.update({"model": model, "selected": selected})
+        text, segments = _transcribe_file(cache["model"], path, word_timestamps=True, beam_size=5)
+        return text, segments, {
+            "provider": "faster-whisper-local",
+            "model": Path(str(cache["selected"])).parent.parent.name.replace("models--Systran--", ""),
+            "local_only": True,
+        }
+
+    return transcribe
+
+
+def start_asset_media_index(project_dir: Path, asset_id: str, payload: dict) -> dict:
+    """Queue one local evidence or confirmed visual job on the shared media runtime."""
+    state = _load_for_write(project_dir)
+    asset, _ = _media_index_source(project_dir, state, asset_id)
+    automation = _automation(state)
+    batch = automation["media_index_batch"]
+    supplied_batch_id = str(payload.get("batch_job_id") or "")
+    if batch.get("status") in {"queued", "generating"} and supplied_batch_id != str(batch.get("job_id") or ""):
+        raise WorkbenchError("本项目正在批量理解本地视频；请等待批量任务完成后再单独操作")
+    current = automation["media_index"]
+    if current.get("status") in {"queued", "generating"}:
+        raise WorkbenchError("已有本地视频素材分析任务正在运行，请等待完成")
+    stage = str(payload.get("stage") or "coarse")
+    if stage not in {"coarse", "fine", "vision"}:
+        raise WorkbenchError("素材分析阶段只能是粗筛、精筛或视觉理解")
+    if stage == "fine":
+        coarse_path = str((asset.get("media_index") or {}).get("coarse_index_path") or "")
+        if not coarse_path or not (project_dir / coarse_path).is_file():
+            raise WorkbenchError("请先完成该素材的粗筛索引，再开始精筛")
+        start = _rounded_seconds(payload.get("start_seconds"))
+        end = _rounded_seconds(payload.get("end_seconds"))
+        if end - start < .4:
+            raise WorkbenchError("精筛窗口至少需要 0.4 秒")
+    if stage == "vision" and payload.get("remote_vision_confirmed") is not True:
+        raise WorkbenchError("视觉理解会把去重后的关键帧发送给已配置的 AI 服务，请先明确确认")
+    job_id = f"MIJ-{uuid4().hex[:10]}"
+    job = {
+        "status": "queued", "job_id": job_id, "asset_id": asset_id, "stage": stage,
+        "started_at": _now(), "finished_at": None, "result": None, "error": "",
+        "request": {
+            "transcribe": bool(payload.get("transcribe")),
+            "model_path": str(payload.get("model_path") or "") or None,
+            "query": str(payload.get("query") or "")[:1000],
+            "start_seconds": _rounded_seconds(payload.get("start_seconds")),
+            "end_seconds": _rounded_seconds(payload.get("end_seconds")),
+            "remote_vision_confirmed": payload.get("remote_vision_confirmed") is True,
+        },
+        "progress": {"stage": "queued", "message": "等待共享媒体分析资源"},
+    }
+    automation["media_index"] = job
+    asset["media_index"] = {**(asset.get("media_index") or {}), "status": "queued", "job_id": job_id, "stage": stage}
+    label = {"coarse": "本地粗筛", "fine": "本地精筛", "vision": "画面理解"}[stage]
+    _activity(state, "media_index_started", f"已开始 {asset_id} 的{label}", asset_id=asset_id, job_id=job_id)
+    return _save(project_dir, state)
+
+
+_LOCAL_MATERIAL_BATCH_SOURCES = {"human_provided", "local_generated", "project_library"}
+
+
+def _is_batch_local_video(asset: object) -> bool:
+    return (
+        isinstance(asset, dict)
+        and str(asset.get("type") or "").lower() == "video"
+        and str(asset.get("source_type") or "") in _LOCAL_MATERIAL_BATCH_SOURCES
+    )
+
+
+def start_asset_media_index_batch(project_dir: Path, payload: dict) -> dict:
+    """Create a durable, serial V2 visual-understanding queue for local videos.
+
+    This is intentionally a single confirmed operation rather than a browser
+    loop.  A worker can resume it after a server restart without re-submitting
+    already completed assets, and individual failures do not discard the rest
+    of the user's material preparation.
+    """
+    if not isinstance(payload, dict) or payload.get("remote_vision_confirmed") is not True:
+        raise WorkbenchError("批量画面理解会把去重后的关键帧发送给已配置的 AI 服务，请先明确确认")
+    state = _load_for_write(project_dir)
+    automation = _automation(state)
+    batch = automation["media_index_batch"]
+    if batch.get("status") in {"queued", "generating"}:
+        raise WorkbenchError("已有本地视频批量理解任务正在运行，请等待完成")
+    if automation["media_index"].get("status") in {"queued", "generating"}:
+        raise WorkbenchError("已有单个本地视频分析任务正在运行，请等待完成后再批量理解")
+
+    requested = payload.get("asset_ids")
+    requested_ids = {str(item) for item in requested if str(item).strip()} if isinstance(requested, list) else None
+    candidate_ids: list[str] = []
+    skipped: list[dict[str, str]] = []
+    for asset in state.get("assets") or []:
+        if not _is_batch_local_video(asset):
+            continue
+        asset_id = str(asset.get("id") or "")
+        if requested_ids is not None and asset_id not in requested_ids:
+            continue
+        media_state = asset.get("media_index") if isinstance(asset.get("media_index"), dict) else {}
+        if media_state.get("vision_index_path"):
+            skipped.append({"asset_id": asset_id, "reason": "已有视觉理解索引"})
+            continue
+        try:
+            _media_index_source(project_dir, state, asset_id)
+        except WorkbenchError as exc:
+            skipped.append({"asset_id": asset_id, "reason": str(exc)[:300]})
+            continue
+        candidate_ids.append(asset_id)
+    if not candidate_ids:
+        if skipped:
+            raise WorkbenchError("没有需要理解的本地视频；已有索引可在素材库中查看或单独重建")
+        raise WorkbenchError("请先上传至少一个项目内本地视频，再开始批量理解")
+
+    job_id = f"MIB-{uuid4().hex[:10]}"
+    automation["media_index_batch"] = {
+        "status": "queued", "job_id": job_id, "stage": "vision",
+        "asset_ids": candidate_ids, "pending_asset_ids": list(candidate_ids),
+        "completed_asset_ids": [], "failed_assets": [], "skipped_assets": skipped,
+        "current_asset_id": None, "started_at": _now(), "finished_at": None,
+        "error": "", "request": {"remote_vision_confirmed": True},
+    }
+    _activity(state, "media_index_batch_started", f"已开始批量理解 {len(candidate_ids)} 个本地视频", job_id=job_id)
+    return _save(project_dir, state)
+
+
+def _finish_media_index_batch(state: dict, batch: dict, *, status: str) -> dict:
+    batch.update({"status": status, "current_asset_id": None, "finished_at": _now()})
+    message = (
+        f"本地视频批量理解完成：{len(batch.get('completed_asset_ids') or [])} 个成功"
+        f"，{len(batch.get('failed_assets') or [])} 个失败"
+    )
+    _activity(state, "media_index_batch_completed", message, job_id=batch.get("job_id"))
+    return state
+
+
+def generate_asset_media_index_batch(project_dir: Path, expected_job_id: str) -> dict:
+    """Run or resume a batch queue without ever overlapping the media runtime."""
+    while True:
+        state = _load_for_write(project_dir)
+        automation = _automation(state)
+        batch = automation["media_index_batch"]
+        if str(batch.get("job_id") or "") != str(expected_job_id) or batch.get("status") not in {"queued", "generating"}:
+            return state
+        pending = [str(item) for item in (batch.get("pending_asset_ids") or []) if str(item)]
+        if not pending:
+            final_status = "completed_with_warnings" if batch.get("failed_assets") else "completed"
+            return _save(project_dir, _finish_media_index_batch(state, batch, status=final_status))
+
+        asset_id = pending[0]
+        current = automation["media_index"]
+        batch.update({
+            "status": "generating", "current_asset_id": asset_id,
+            "progress": {"completed": len(batch.get("completed_asset_ids") or []), "total": len(batch.get("asset_ids") or []), "message": f"正在理解 {asset_id}"},
+        })
+        _save(project_dir, state)
+        error_message = ""
+        try:
+            current_is_item = str(current.get("asset_id") or "") == asset_id
+            current_matches = current_is_item and current.get("status") in {"queued", "generating"}
+            # A process can stop after the child index wrote its completed
+            # record but before this queue removed the asset from pending.
+            # In that recovery window, consume the durable child result below
+            # instead of submitting the same visual request a second time.
+            child_already_terminal = current_is_item and current.get("status") in {"completed", "failed"}
+            if not current_matches and not child_already_terminal:
+                started = start_asset_media_index(project_dir, asset_id, {
+                    "stage": "vision", "remote_vision_confirmed": True, "batch_job_id": expected_job_id,
+                })
+                current = _automation(started)["media_index"]
+            if not child_already_terminal:
+                generate_asset_media_index(project_dir, str(current.get("job_id") or ""))
+        except Exception as exc:
+            error_message = str(exc)[:1200] or "素材视觉理解失败"
+            try:
+                latest = _load_for_write(project_dir)
+                current_job = _automation(latest)["media_index"]
+                if str(current_job.get("asset_id") or "") == asset_id and current_job.get("status") in {"queued", "generating"}:
+                    mark_asset_media_index_failed(project_dir, str(current_job.get("job_id") or ""), exc)
+            except Exception:
+                pass
+
+        state = _load_for_write(project_dir)
+        automation = _automation(state)
+        batch = automation["media_index_batch"]
+        if str(batch.get("job_id") or "") != str(expected_job_id) or batch.get("status") not in {"queued", "generating"}:
+            return state
+        batch["pending_asset_ids"] = [item for item in (batch.get("pending_asset_ids") or []) if str(item) != asset_id]
+        asset = next((item for item in state.get("assets") or [] if str(item.get("id") or "") == asset_id), {})
+        media_state = asset.get("media_index") if isinstance(asset.get("media_index"), dict) else {}
+        succeeded = not error_message and bool(media_state.get("vision_index_path")) and media_state.get("status") == "completed"
+        if succeeded:
+            batch["completed_asset_ids"] = list(dict.fromkeys([*(batch.get("completed_asset_ids") or []), asset_id]))
+        else:
+            batch["failed_assets"] = [item for item in (batch.get("failed_assets") or []) if str(item.get("asset_id") or "") != asset_id]
+            batch["failed_assets"].append({"asset_id": asset_id, "error": error_message or str(media_state.get("error") or "未生成视觉理解索引")[:1200]})
+        batch["current_asset_id"] = None
+        _save(project_dir, state)
+
+
+def mark_asset_media_index_batch_failed(project_dir: Path, expected_job_id: str, error: object) -> dict:
+    state = _load_for_write(project_dir)
+    batch = _automation(state)["media_index_batch"]
+    if str(batch.get("job_id") or "") != str(expected_job_id) or batch.get("status") not in {"queued", "generating"}:
+        return state
+    message = str(error)[:1200] or "批量素材理解任务异常中止"
+    batch.update({"status": "failed", "finished_at": _now(), "current_asset_id": None, "error": message})
+    _activity(state, "media_index_batch_failed", f"本地视频批量理解异常中止：{message[:160]}", job_id=expected_job_id)
+    return _save(project_dir, state)
+
+
+def generate_asset_media_index(project_dir: Path, expected_job_id: str) -> dict:
+    state = _load_for_write(project_dir)
+    job = _automation(state)["media_index"]
+    if str(job.get("job_id") or "") != str(expected_job_id) or job.get("status") not in {"queued", "generating"}:
+        return state
+    asset_id = str(job.get("asset_id") or "")
+    asset, source = _media_index_source(project_dir, state, asset_id)
+    job["status"] = "generating"
+    job["progress"] = {"stage": "local_analysis", "message": "正在读取媒体并建立证据"}
+    asset["media_index"] = {**(asset.get("media_index") or {}), "status": "generating", "job_id": expected_job_id, "stage": job.get("stage")}
+    _save(project_dir, state)
+
+    ffmpeg = _ffmpeg_available()
+    ffprobe = _ffprobe_available(ffmpeg)
+    if not ffmpeg or not ffprobe:
+        raise WorkbenchError("本机缺少 FFmpeg/ffprobe，无法分析视频素材")
+    request = job.get("request") if isinstance(job.get("request"), dict) else {}
+    provider = _media_transcript_provider(request.get("model_path")) if request.get("transcribe") else None
+    output_dir = project_dir / "artifacts" / "media-index" / re.sub(r"[^A-Za-z0-9_-]", "-", asset_id)
+    if job.get("stage") == "coarse":
+        result = build_coarse_index(
+            source,
+            output_dir,
+            ffmpeg=ffmpeg,
+            ffprobe=ffprobe,
+            transcript_provider=provider,
+        )
+        index_relative = _safe_relpath(project_dir, str(result["index_path"]))
+        recommendations = recommend_coarse_segments(result, str(request.get("query") or ""), limit=6) if request.get("query") else []
+        result_summary = {
+            "stage": "coarse", "index_path": index_relative,
+            "duration_seconds": (result.get("probe") or {}).get("duration_seconds"),
+            "segment_count": len(result.get("segments") or []),
+            "representative_frame_count": len(result.get("representative_frames") or []),
+            "transcript_status": result.get("transcript_status"),
+            "recommendations": recommendations,
+            "cache_hit": bool(result.get("cache_hit")),
+        }
+    elif job.get("stage") == "fine":
+        coarse_relative = str((asset.get("media_index") or {}).get("coarse_index_path") or "")
+        coarse_path = project_dir / coarse_relative
+        coarse = json.loads(coarse_path.read_text(encoding="utf-8"))
+        coarse_source = (coarse.get("source") or {}) if isinstance(coarse.get("source"), dict) else {}
+        try:
+            recorded_source = Path(str(coarse_source.get("path") or "")).resolve()
+        except OSError as exc:
+            raise WorkbenchError("粗筛索引记录的素材路径无效，请重新粗筛") from exc
+        if recorded_source != source.resolve():
+            raise WorkbenchError("粗筛索引与当前素材不一致，请重新粗筛")
+        if str(coarse_source.get("fingerprint") or "") != media_fingerprint(source):
+            raise WorkbenchError("视频素材在粗筛后已经变化，请重新建立粗筛索引")
+        result = build_fine_index(
+            coarse,
+            _as_number(request.get("start_seconds")),
+            _as_number(request.get("end_seconds")),
+            ffmpeg=ffmpeg,
+            transcript_provider=provider,
+        )
+        index_relative = _safe_relpath(project_dir, str(result["index_path"]))
+        result_summary = {
+            "stage": "fine", "index_path": index_relative,
+            "start_seconds": result.get("start_seconds"), "end_seconds": result.get("end_seconds"),
+            "frame_count": len(result.get("frames") or []),
+            "transcript_status": result.get("transcript_status"),
+            "transcript": result.get("transcript"),
+            "cache_hit": bool(result.get("cache_hit")),
+        }
+    else:
+        if request.get("remote_vision_confirmed") is not True:
+            raise WorkbenchError("视觉理解缺少关键帧外发确认")
+        identity = vision_runtime_identity()
+        preflight_holder: dict[str, Any] = {}
+
+        def run_confirmed_vision(shots: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+            if not preflight_holder:
+                progress_state = _load_for_write(project_dir)
+                progress_job = _automation(progress_state)["media_index"]
+                if str(progress_job.get("job_id") or "") != str(expected_job_id):
+                    raise WorkbenchError("素材视觉任务已经被更新的任务替代")
+                progress_job["progress"] = {"stage": "vision_preflight", "message": "正在验证图片输入和多图顺序"}
+                _save(project_dir, progress_state)
+                preflight = test_vision_ai_connection()
+                preflight_holder.update(preflight)
+            progress_state = _load_for_write(project_dir)
+            progress_job = _automation(progress_state)["media_index"]
+            progress_job["progress"] = {"stage": "vision_describe", "message": "正在按镜头理解去重后的关键帧"}
+            _save(project_dir, progress_state)
+            return describe_shots(shots)
+
+        result = build_material_vision_index(
+            source,
+            output_dir,
+            ffmpeg=ffmpeg,
+            ffprobe=ffprobe,
+            vision_describer=run_confirmed_vision,
+            vision_identity=identity,
+        )
+        index_relative = _safe_relpath(project_dir, str(result["index_path"]))
+        selected_frame_count = sum(
+            1 for shot in result.get("shots") or [] for frame in shot.get("frames") or []
+            if frame.get("selected_for_vision")
+        )
+        result_summary = {
+            "stage": "vision", "index_path": index_relative,
+            "duration_seconds": (result.get("probe") or {}).get("duration_seconds"),
+            "shot_count": len(result.get("shots") or []),
+            "selected_frame_count": selected_frame_count,
+            "vision": result.get("vision"),
+            "preflight": preflight_holder or {
+                "ok": True,
+                "status": "cache_reused",
+                "message": "沿用相同素材、模型和策略的已验证视觉索引",
+                **identity,
+            },
+            "cache_hit": bool(result.get("cache_hit")),
+        }
+
+    state = _load_for_write(project_dir)
+    job = _automation(state)["media_index"]
+    if str(job.get("job_id") or "") != str(expected_job_id):
+        return state
+    asset = _find(state.get("assets") or [], asset_id, "素材")
+    media_state = asset.get("media_index") if isinstance(asset.get("media_index"), dict) else {}
+    if result_summary["stage"] == "coarse":
+        media_state.update({
+            "coarse_index_path": result_summary["index_path"],
+            "duration_seconds": result_summary["duration_seconds"],
+            "segment_count": result_summary["segment_count"],
+            "transcript_status": result_summary["transcript_status"],
+        })
+    elif result_summary["stage"] == "fine":
+        fine = media_state.get("fine_indices") if isinstance(media_state.get("fine_indices"), list) else []
+        fine.append({
+            "path": result_summary["index_path"],
+            "start_seconds": result_summary["start_seconds"],
+            "end_seconds": result_summary["end_seconds"],
+        })
+        media_state["fine_indices"] = fine[-20:]
+    else:
+        media_state.update({
+            "vision_index_path": result_summary["index_path"],
+            "duration_seconds": result_summary["duration_seconds"],
+            "vision_shot_count": result_summary["shot_count"],
+            "vision_frame_count": result_summary["selected_frame_count"],
+            "vision": result_summary["vision"],
+            "vision_preflight": result_summary["preflight"],
+        })
+    media_state.update({"status": "completed", "job_id": expected_job_id, "stage": result_summary["stage"], "updated_at": _now()})
+    asset["media_index"] = media_state
+    job.update({"status": "completed", "finished_at": _now(), "result": result_summary, "error": "", "progress": {"stage": "completed", "message": "素材分析完成"}})
+    label = {"coarse": "粗筛", "fine": "精筛", "vision": "画面理解"}[result_summary["stage"]]
+    _activity(state, "media_index_completed", f"{asset_id} 的素材{label}已完成", asset_id=asset_id, job_id=expected_job_id)
+    return _save(project_dir, state)
+
+
+def mark_asset_media_index_failed(project_dir: Path, expected_job_id: str, error: object) -> dict:
+    state = _load_for_write(project_dir)
+    job = _automation(state)["media_index"]
+    if str(job.get("job_id") or "") != str(expected_job_id):
+        return state
+    message = str(error)[:1200]
+    job.update({"status": "failed", "finished_at": _now(), "error": message})
+    asset = next((item for item in state.get("assets", []) if str(item.get("id")) == str(job.get("asset_id"))), None)
+    if asset:
+        asset["media_index"] = {**(asset.get("media_index") or {}), "status": "failed", "job_id": expected_job_id, "error": message}
+    _activity(state, "media_index_failed", f"本地素材分析失败：{message[:160]}", asset_id=job.get("asset_id"), job_id=expected_job_id)
+    return _save(project_dir, state)
+
+
+def read_asset_media_index_job(project_dir: Path) -> dict:
+    state = read_workbench(project_dir)
+    return deepcopy(_automation(state)["media_index"])
+
+
+def read_asset_media_index_batch(project_dir: Path) -> dict:
+    state = read_workbench(project_dir)
+    return deepcopy(_automation(state)["media_index_batch"])
+
+
+def recommend_asset_media_segments(project_dir: Path, asset_id: str, query: str, limit: int = 6) -> dict:
+    state = read_workbench(project_dir)
+    asset, source = _media_index_source(project_dir, state, asset_id)
+    media_state = asset.get("media_index") if isinstance(asset.get("media_index"), dict) else {}
+    vision_relative = str(media_state.get("vision_index_path") or "")
+    vision_path = (project_dir / vision_relative).resolve()
+    if vision_relative:
+        try:
+            vision_path.relative_to(project_dir.resolve())
+        except ValueError as exc:
+            raise WorkbenchError("画面理解索引路径无效，请重新分析") from exc
+    if vision_relative and vision_path.is_file():
+        vision_index = json.loads(vision_path.read_text(encoding="utf-8"))
+        if str((vision_index.get("source") or {}).get("fingerprint") or "") != media_content_fingerprint(source):
+            raise WorkbenchError("视频素材在画面理解后已经变化，请重新分析")
+        candidates = recommend_vision_shots(vision_index, query, limit=limit)
+        for candidate in candidates:
+            frame = candidate.get("representative_frame") if isinstance(candidate.get("representative_frame"), dict) else None
+            if frame and frame.get("path"):
+                try:
+                    frame["path"] = _safe_relpath(project_dir, str(frame.get("path")))
+                except WorkbenchError:
+                    candidate["representative_frame"] = None
+        if any(int(item.get("score") or 0) > 0 for item in candidates):
+            return {
+                "asset_id": asset_id,
+                "query": str(query or "")[:1000],
+                "candidates": candidates,
+                "evidence_source": "vision_v2",
+                "index_fingerprint": str(vision_index.get("signature") or ""),
+                "vision": vision_index.get("vision"),
+            }
+    relative = str(media_state.get("coarse_index_path") or "")
+    path = project_dir / relative
+    if not relative or not path.is_file():
+        raise WorkbenchError("该素材还没有完成粗筛索引")
+    index = json.loads(path.read_text(encoding="utf-8"))
+    return {
+        "asset_id": asset_id,
+        "query": str(query or "")[:1000],
+        "candidates": recommend_coarse_segments(index, query, limit=limit),
+        "transcript_status": index.get("transcript_status"),
+    }
+
+
+def adopt_asset_media_candidate(
+    project_dir: Path,
+    asset_id: str,
+    shot_id: str,
+    payload: dict,
+) -> dict:
+    """Adopt one verified V2 shot into one scene's unlocked hero draft."""
+    if not isinstance(payload, dict):
+        raise WorkbenchError("采用镜头候选的数据格式无效")
+    scene_id = str(payload.get("scene_id") or "").strip()
+    query = re.sub(r"\s+", " ", str(payload.get("query") or "")).strip()[:1000]
+    if not scene_id:
+        raise WorkbenchError("采用镜头候选时必须指定当前片段")
+    if not query:
+        raise WorkbenchError("采用镜头候选时必须保留原始查询文本")
+    if not re.fullmatch(r"SHOT-\d{4}", str(shot_id or "")):
+        raise WorkbenchError("要采用的视觉镜头编号无效")
+
+    state = read_workbench(project_dir)
+    scene = _find(state.get("scenes") or [], scene_id, "场景")
+    asset = _find(state.get("assets") or [], asset_id, "素材")
+    composition = _ensure_scene_visual_composition(scene)
+    expected_revision = payload.get("expected_revision")
+    if expected_revision is None:
+        raise WorkbenchError("采用镜头候选时必须提供当前画面布局版本号")
+    if int(_as_number(expected_revision, -1)) != int(_as_number(composition.get("revision"), 1)):
+        raise WorkbenchConflict("画面布局已在其他操作中更新，请刷新页面后重新采用")
+
+    recommendation = recommend_asset_media_segments(project_dir, asset_id, query, limit=20)
+    if recommendation.get("evidence_source") != "vision_v2":
+        raise WorkbenchError("当前候选不是视觉分析 2.0 的可核验证据，不能一键采用")
+    candidate = next(
+        (
+            item for item in recommendation.get("candidates") or []
+            if str(item.get("segment_id") or "") == shot_id
+            and str(item.get("evidence_kind") or "") == "vision"
+            and int(item.get("score") or 0) > 0
+        ),
+        None,
+    )
+    if not candidate:
+        raise WorkbenchError("该镜头没有命中当前台词，系统不会伪造采用结果")
+
+    source_start = _rounded_seconds(candidate.get("start_seconds"))
+    source_end = _rounded_seconds(candidate.get("end_seconds"))
+    source_duration = source_end - source_start
+    if source_duration < .4 - .001:
+        raise WorkbenchError("该镜头不足 0.4 秒，不能作为重点视频采用")
+    scene_duration = _rounded_seconds(_scene_duration(scene))
+    overlays = [deepcopy(item) for item in composition.get("overlays") or [] if isinstance(item, dict)]
+    target = next((item for item in overlays if item.get("role", "hero") == "hero" and not item.get("locked")), None)
+    if target is not None:
+        display_start = _rounded_seconds(target.get("start_seconds"))
+        current_duration = max(.4, _rounded_seconds(target.get("end_seconds")) - display_start)
+        display_duration = min(source_duration, current_duration, scene_duration - display_start)
+        if display_duration < .4 - .001:
+            raise WorkbenchError("当前重点素材草案没有足够的显示时长，请先调整时间区间")
+    else:
+        occupied = sorted(
+            (
+                (_rounded_seconds(item.get("start_seconds")), _rounded_seconds(item.get("end_seconds")))
+                for item in overlays
+            ),
+            key=lambda item: item[0],
+        )
+        gaps: list[tuple[float, float]] = []
+        cursor = 0.0
+        for start, end in occupied:
+            if start - cursor >= .4 - .001:
+                gaps.append((cursor, start))
+            cursor = max(cursor, end)
+        if scene_duration - cursor >= .4 - .001:
+            gaps.append((cursor, scene_duration))
+        if not gaps:
+            raise WorkbenchError("当前片段没有可用的重点素材空档，请先解锁或调整已有草案")
+        display_start, gap_end = max(gaps, key=lambda item: item[1] - item[0])
+        display_duration = min(source_duration, gap_end - display_start)
+        target = {
+            "id": "", "role": "hero", "asset_id": asset_id,
+            "locked": False,
+        }
+        overlays.append(target)
+
+    canvas_width, canvas_height = _render_dimensions(project_dir, state)
+    target.update({
+        "asset_id": asset_id,
+        "start_seconds": _rounded_seconds(display_start),
+        "end_seconds": _rounded_seconds(display_start + display_duration),
+        "source_in_seconds": source_start,
+        "source_out_seconds": _rounded_seconds(source_start + display_duration),
+        "fit": "contain",
+        "muted": True,
+        "playback_rate": 1.0,
+        "placement": _recommended_visual_placement(asset, canvas_width, canvas_height),
+        "candidate_evidence": {
+            "source": "vision_v2",
+            "shot_id": shot_id,
+            "query": query,
+            "index_fingerprint": str(recommendation.get("index_fingerprint") or "").lower(),
+        },
+        "locked": False,
+    })
+    return update_scene_visual_composition(project_dir, scene_id, {
+        "version": 1,
+        "expected_revision": expected_revision,
+        "layout_recipe": "focus_card",
+        "overlays": overlays,
+        "frame_style": deepcopy(composition.get("frame_style") or {}),
+    })
+
+
+def _local_material_vision_indexes(project_dir: Path, state: dict) -> tuple[dict[str, dict], list[str]]:
+    """Load only project-local, completed V2 indexes for the draft planner.
+
+    This deliberately does *not* start visual analysis or talk to a model.  A
+    stale/missing index is a visible preparation warning, never a reason to
+    infer a semantic description from an uploaded filename.
+    """
+    indexes: dict[str, dict] = {}
+    warnings: list[str] = []
+    root = project_dir.resolve()
+    for asset in state.get("assets") or []:
+        if not isinstance(asset, dict) or str(asset.get("type") or "").lower() != "video":
+            continue
+        source_type = str(asset.get("source_type") or "")
+        if source_type not in {"human_provided", "local_generated", "project_library"}:
+            continue
+        asset_id = str(asset.get("id") or "")
+        media_state = asset.get("media_index") if isinstance(asset.get("media_index"), dict) else {}
+        relative = str(media_state.get("vision_index_path") or "")
+        if not relative:
+            warnings.append(f"素材 {asset_id} 尚未完成视觉理解 2.0")
+            continue
+        try:
+            path = (project_dir / relative).resolve()
+            path.relative_to(root)
+            source = (project_dir / str(asset.get("path") or "")).resolve()
+            source.relative_to(root)
+        except (OSError, ValueError):
+            warnings.append(f"素材 {asset_id} 的视觉理解路径无效")
+            continue
+        if not path.is_file() or not source.is_file():
+            warnings.append(f"素材 {asset_id} 的视觉理解文件或原视频缺失")
+            continue
+        try:
+            index = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            warnings.append(f"素材 {asset_id} 的视觉理解索引损坏，请重新分析")
+            continue
+        expected = str((index.get("source") or {}).get("fingerprint") or "")
+        try:
+            actual = media_content_fingerprint(source)
+        except MediaIndexError:
+            warnings.append(f"素材 {asset_id} 无法核对视觉理解版本")
+            continue
+        if not expected or expected != actual:
+            warnings.append(f"素材 {asset_id} 在视觉理解后已经变化，请重新分析")
+            continue
+        indexes[asset_id] = index
+    return indexes, list(dict.fromkeys(warnings))
+
+
+def _local_material_orchestration_fingerprint(value: dict) -> str:
+    return _json_hash({key: item for key, item in value.items() if key not in {"fingerprint", "created_at", "updated_at", "revision"}})
+
+
+def create_local_material_orchestration(project_dir: Path, payload: dict) -> dict:
+    """Persist an auditable local-material draft without changing scenes."""
+    if not isinstance(payload, dict):
+        raise WorkbenchError("素材驱动编排请求格式无效")
+    state = _load_for_write(project_dir)
+    indexes, index_warnings = _local_material_vision_indexes(project_dir, state)
+    try:
+        draft = build_orchestration_draft(state, indexes, payload)
+    except LocalMaterialOrchestrationError as exc:
+        raise WorkbenchError(str(exc)) from exc
+    previous = state.get("local_material_orchestration") if isinstance(state.get("local_material_orchestration"), dict) else {}
+    draft["revision"] = max(1, int(_as_number(previous.get("revision"), 0)) + 1)
+    draft["warnings"] = list(dict.fromkeys([*(draft.get("warnings") or []), *index_warnings]))
+    draft["created_at"] = _now()
+    draft["updated_at"] = draft["created_at"]
+    draft["fingerprint"] = _local_material_orchestration_fingerprint(draft)
+    state["local_material_orchestration"] = draft
+    _decision(
+        state,
+        "local_material_orchestration",
+        "本地素材驱动编排草案",
+        f"{len(draft.get('sequences') or [])} 个可采用序列",
+        "仅生成草案；不会下载、生成、覆盖或批准画面",
+    )
+    _activity(
+        state,
+        "local_material_orchestration_drafted",
+        f"已生成本地素材编排草案：{len(draft.get('material_capability_map') or [])} 个能力片段，{len(draft.get('sequences') or [])} 个可采用序列",
+        revision=draft["revision"],
+    )
+    return _save(project_dir, state)
+
+
+def _planner_evidence_for_sequence(sequence: dict) -> dict:
+    evidence = sequence.get("evidence") if isinstance(sequence.get("evidence"), dict) else {}
+    fingerprint = str(evidence.get("index_fingerprint") or "").lower()
+    shot_id = str(evidence.get("shot_id") or "")
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint) or not re.fullmatch(r"SHOT-\d{4}", shot_id):
+        raise WorkbenchError("本地素材草案缺少可核验的视觉理解证据")
+    return {
+        "source": "local_material_orchestration_v1",
+        "shot_id": shot_id,
+        "index_fingerprint": fingerprint,
+        "sequence_id": str(sequence.get("sequence_id") or ""),
+        "cut_policy": str(sequence.get("cut_policy") or "safe_cut"),
+    }
+
+
+def _adopt_local_material_focus_card(project_dir: Path, state: dict, scene: dict, sequence: dict, payload: dict) -> None:
+    composition = _ensure_scene_visual_composition(scene)
+    expected = payload.get("expected_composition_revision")
+    if expected is None:
+        raise WorkbenchError("采用本地主角窗时必须提供当前画面布局版本号")
+    if int(_as_number(expected, -1)) != int(_as_number(composition.get("revision"), 1)):
+        raise WorkbenchConflict("画面布局已在其他操作中更新，请刷新后重新采用本地素材草案")
+    overlays = [deepcopy(item) for item in composition.get("overlays") or [] if isinstance(item, dict)]
+    if any(item.get("locked") for item in overlays):
+        raise WorkbenchError("当前片段存在锁定的重点素材，请先解锁或保留现有画面")
+    overlays = [item for item in overlays if item.get("role", "hero") != "hero"]
+    overlays.append({
+        "id": "",
+        "role": "hero",
+        "asset_id": str(sequence["asset_id"]),
+        "start_seconds": _rounded_seconds(sequence["display_start_seconds"]),
+        "end_seconds": _rounded_seconds(sequence["display_end_seconds"]),
+        "source_in_seconds": _rounded_seconds(sequence["source_in_seconds"]),
+        "source_out_seconds": _rounded_seconds(sequence["source_out_seconds"]),
+        "fit": "contain",
+        "muted": True,
+        "playback_rate": 1.0,
+        "placement": _recommended_visual_placement(
+            _find(state.get("assets") or [], str(sequence["asset_id"]), "素材"),
+            *_render_dimensions(project_dir, state),
+        ),
+        "candidate_evidence": {
+            "source": "vision_v2",
+            "shot_id": _planner_evidence_for_sequence(sequence)["shot_id"],
+            "query": "素材驱动编排草案",
+            "index_fingerprint": _planner_evidence_for_sequence(sequence)["index_fingerprint"],
+        },
+        "planner_evidence": _planner_evidence_for_sequence(sequence),
+        "locked": False,
+    })
+    validated = _validated_visual_composition(project_dir, state, scene, {
+        "version": 1,
+        "layout_recipe": "focus_card",
+        "overlays": overlays,
+        "frame_style": deepcopy(composition.get("frame_style") or {}),
+    })
+    validated.update({"revision": int(_as_number(composition.get("revision"), 0)) + 1, "updated_at": _now()})
+    scene["visual_composition"] = validated
+
+
+def _background_block_for_local_sequence(scene: dict, display_end: float) -> dict | None:
+    """Use only an existing unlocked background block; never trigger a download."""
+    blocks = [item for item in ((scene.get("visual_timeline") or {}).get("blocks") or []) if isinstance(item, dict)]
+    if not blocks or display_end >= _scene_duration(scene) - .001:
+        return None
+    candidate = next((item for item in blocks if item.get("asset_id") and not item.get("locked")), None)
+    if not candidate:
+        return None
+    return {
+        "id": "VB-002",
+        "start_seconds": _rounded_seconds(display_end),
+        "end_seconds": _rounded_seconds(_scene_duration(scene)),
+        "source_mode": str(candidate.get("source_mode") or "web_download"),
+        "asset_id": str(candidate.get("asset_id")),
+        "label": f"连续动作后的既有背景：{candidate.get('label') or candidate.get('asset_id')}",
+        "visual_role": "supporting_background",
+        "cut_policy": "interruptible",
+        "sequence_id": None,
+        "planner_evidence": None,
+        "locked": False,
+    }
+
+
+def _adopt_local_material_full_bleed(project_dir: Path, state: dict, scene: dict, sequence: dict, payload: dict) -> None:
+    timeline = scene.get("visual_timeline") if isinstance(scene.get("visual_timeline"), dict) else {}
+    expected = payload.get("expected_timeline_revision")
+    if expected is None:
+        raise WorkbenchError("采用本地全屏动作时必须提供当前视觉时间线版本号")
+    if int(_as_number(expected, -1)) != int(_as_number(timeline.get("revision"), 1)):
+        raise WorkbenchConflict("视觉时间线已在其他操作中更新，请刷新后重新采用本地素材草案")
+    old_blocks = [item for item in timeline.get("blocks") or [] if isinstance(item, dict)]
+    if any(item.get("locked") for item in old_blocks):
+        raise WorkbenchError("当前片段存在锁定的背景区间，不能自动改为本地全屏动作")
+    display_end = _rounded_seconds(sequence["display_end_seconds"])
+    local_block = {
+        "id": "VB-001",
+        "start_seconds": 0.0,
+        "end_seconds": display_end,
+        "source_mode": "human_provided",
+        "asset_id": str(sequence["asset_id"]),
+        "label": f"本地连续动作：{sequence.get('sequence_id')}",
+        "visual_role": "local_full_bleed",
+        "cut_policy": str(sequence["cut_policy"]),
+        "sequence_id": str(sequence["sequence_id"]),
+        "source_in_seconds": _rounded_seconds(sequence["source_in_seconds"]),
+        "source_out_seconds": _rounded_seconds(sequence["source_out_seconds"]),
+        "planner_evidence": _planner_evidence_for_sequence(sequence),
+        "locked": False,
+    }
+    blocks = [local_block]
+    background = _background_block_for_local_sequence(scene, display_end)
+    if background:
+        blocks.append(background)
+    elif display_end < _scene_duration(scene) - .001:
+        raise WorkbenchError("本地动作未覆盖完整片段，且没有可复用的未锁定背景；请先准备背景或改用主角窗")
+    blocks = _validated_visual_timeline(state, scene, blocks)
+    _commit_visual_timeline(state, scene, blocks)
+    composition = _ensure_scene_visual_composition(scene)
+    expected_composition = payload.get("expected_composition_revision")
+    if expected_composition is None:
+        raise WorkbenchError("采用本地全屏动作时必须提供当前画面布局版本号")
+    if int(_as_number(expected_composition, -1)) != int(_as_number(composition.get("revision"), 1)):
+        raise WorkbenchConflict("画面布局已在其他操作中更新，请刷新后重新采用本地素材草案")
+    if any(item.get("locked") for item in composition.get("overlays") or []):
+        raise WorkbenchError("当前片段存在锁定的重点素材，不能自动切换为本地全屏动作")
+    composition.update({
+        "layout_recipe": "full_bleed",
+        "background": {"source": "visual_timeline", "treatment": "normal"},
+        "overlays": [],
+        "revision": int(_as_number(composition.get("revision"), 0)) + 1,
+        "updated_at": _now(),
+    })
+
+
+def adopt_local_material_orchestration_scene(project_dir: Path, scene_id: str, payload: dict) -> dict:
+    """Apply one accepted local-material scene plan atomically and locally."""
+    if not isinstance(payload, dict):
+        raise WorkbenchError("采用素材驱动编排草案的数据格式无效")
+    state = _load_for_write(project_dir)
+    draft = state.get("local_material_orchestration") if isinstance(state.get("local_material_orchestration"), dict) else None
+    if not draft:
+        raise WorkbenchError("请先生成素材驱动编排草案")
+    expected_revision = payload.get("expected_orchestration_revision")
+    if expected_revision is None or int(_as_number(expected_revision, -1)) != int(_as_number(draft.get("revision"), -1)):
+        raise WorkbenchConflict("素材驱动编排草案已更新，请刷新后再采用")
+    indexes, _warnings = _local_material_vision_indexes(project_dir, state)
+    if draft.get("script_fingerprint") != local_material_script_fingerprint(state):
+        raise WorkbenchConflict("脚本或场景内容已变化，请重新生成素材驱动编排草案")
+    if draft.get("asset_index_fingerprint") != material_indexes_fingerprint(indexes):
+        raise WorkbenchConflict("本地素材或视觉理解索引已变化，请重新生成素材驱动编排草案")
+    if draft.get("fingerprint") != _local_material_orchestration_fingerprint(draft):
+        raise WorkbenchConflict("素材驱动编排草案已损坏或被旧页面覆盖，请重新生成")
+    try:
+        _plan, sequence = find_scene_plan(draft, scene_id)
+    except LocalMaterialOrchestrationError as exc:
+        raise WorkbenchError(str(exc)) from exc
+    scene = _find(state.get("scenes") or [], scene_id, "场景")
+    _ensure_scene_visual_state(state, scene)
+    role = str(sequence.get("visual_role") or "")
+    if role == "local_focus_card":
+        _adopt_local_material_focus_card(project_dir, state, scene, sequence, payload)
+    elif role == "local_full_bleed":
+        _adopt_local_material_full_bleed(project_dir, state, scene, sequence, payload)
+    else:
+        raise WorkbenchError("当前草案不是可采用的本地素材主画面")
+    _invalidate_scene_review_preview(scene, "已采用素材驱动编排草案，请刷新本段审核预览")
+    scene["review_status"] = "needs_adjustment"
+    _mark_render_needs_refresh(state, f"{scene_id} 已采用素材驱动编排草案")
+    for scene_plan in draft.get("scene_plans") or []:
+        if str(scene_plan.get("scene_id") or "") == str(scene_id):
+            scene_plan.update({"status": "adopted", "adopted_at": _now()})
+    draft["status"] = "partially_adopted"
+    draft["updated_at"] = _now()
+    draft["fingerprint"] = _local_material_orchestration_fingerprint(draft)
+    _decision(state, "local_material_orchestration", f"{scene_id} 本地素材采用", str(sequence.get("sequence_id") or ""), f"{role} / {sequence.get('cut_policy')}")
+    _activity(state, "local_material_orchestration_adopted", f"已采用 {scene_id} 的本地素材草案；仅该片段需要刷新审核预览", scene_id=scene_id, sequence_id=sequence.get("sequence_id"))
+    return _save(project_dir, state)
+
+def read_asset_material_vision(project_dir: Path, asset_id: str, *, limit: int = 80) -> dict:
+    state = read_workbench(project_dir)
+    asset, source = _media_index_source(project_dir, state, asset_id)
+    relative = str((asset.get("media_index") or {}).get("vision_index_path") or "")
+    path = (project_dir / relative).resolve()
+    if relative:
+        try:
+            path.relative_to(project_dir.resolve())
+        except ValueError as exc:
+            raise WorkbenchError("画面理解索引路径无效，请重新分析") from exc
+    if not relative or not path.is_file():
+        raise WorkbenchError("该素材还没有完成画面理解")
+    try:
+        index = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise WorkbenchError("画面理解索引损坏，请保留现场后重新分析") from exc
+    if str((index.get("source") or {}).get("fingerprint") or "") != media_content_fingerprint(source):
+        raise WorkbenchError("视频素材在画面理解后已经变化，请重新分析")
+    rows = []
+    for shot in (index.get("shots") or [])[:max(1, min(200, int(limit)))]:
+        frames = []
+        for frame in shot.get("frames") or []:
+            if not frame.get("selected_for_vision"):
+                continue
+            frames.append({
+                "frame_id": frame.get("frame_id"),
+                "time_seconds": frame.get("time_seconds"),
+                "sampling_reason": frame.get("sampling_reason"),
+                "path": _safe_relpath(project_dir, str(frame.get("path") or "")),
+            })
+        rows.append({
+            "shot_id": shot.get("shot_id"),
+            "start_seconds": shot.get("start_seconds"),
+            "end_seconds": shot.get("end_seconds"),
+            "frames": frames,
+            "description": shot.get("description"),
+        })
+    return {
+        "asset_id": asset_id,
+        "status": index.get("status"),
+        "signature": index.get("signature"),
+        "vision": index.get("vision"),
+        "shot_count": len(index.get("shots") or []),
+        "shots": rows,
+    }
 
 
 def _read_avatar_timeline(project_dir: Path, package: dict) -> dict:

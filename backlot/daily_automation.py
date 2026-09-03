@@ -1460,7 +1460,7 @@ def _decode_google_news_url(value: str, *, session: requests.Session | None = No
     if parts.netloc.lower() != "news.google.com" or "/articles/" not in parts.path:
         return value
     client = session or requests.Session()
-    headers = {"User-Agent": "Mozilla/5.0 Haike Video/1.0"}
+    headers = {"User-Agent": "Mozilla/5.0 OpenMontage/1.0"}
     response = client.get(value, timeout=20, headers=headers)
     response.raise_for_status()
     page = response.text
@@ -1550,7 +1550,7 @@ def _enrich_candidate_evidence(candidate: dict[str, Any]) -> None:
     try:
         client = requests.Session()
         original_url = _decode_google_news_url(str(candidate.get("url") or ""), session=client)
-        response = client.get(original_url, timeout=20, headers={"User-Agent": "Mozilla/5.0 Haike Video/1.0"})
+        response = client.get(original_url, timeout=20, headers={"User-Agent": "Mozilla/5.0 OpenMontage/1.0"})
         response.raise_for_status()
         response.encoding = response.apparent_encoding or response.encoding
         evidence = _extract_article_evidence(response.text)
@@ -1699,7 +1699,7 @@ def _collect_baidu_heat_signals(source: dict[str, Any], request_get: Callable[..
     response = request_get(
         str(source.get("url") or "https://top.baidu.com/board?tab=realtime"),
         timeout=20,
-        headers={"User-Agent": "Mozilla/5.0 Haike Video/1.0"},
+        headers={"User-Agent": "Mozilla/5.0 OpenMontage/1.0"},
     )
     response.raise_for_status()
     page = response.text
@@ -1857,7 +1857,7 @@ def _request_douyin_api_snapshot(
         headers={
             "Accept": "application/json",
             "Authorization": f"Bearer {api_key}",
-            "User-Agent": "Haike Video/1.0 DailyTechBrief",
+            "User-Agent": "OpenMontage/1.0 DailyTechBrief",
         },
         timeout=20,
     )
@@ -2022,7 +2022,7 @@ def collect_news_candidates(
             source_results.append(result)
             continue
         try:
-            response = request_get(source_url, timeout=20, headers={"User-Agent": "Haike Video/1.0 DailyTechBrief"})
+            response = request_get(source_url, timeout=20, headers={"User-Agent": "OpenMontage/1.0 DailyTechBrief"})
             response.raise_for_status()
             root = _parse_feed_root(response.content)
             entries = [item for item in root.iter() if item.tag.rsplit("}", 1)[-1].lower() in {"item", "entry"}]
@@ -2080,7 +2080,7 @@ def collect_news_candidates(
         )
     else:
         copy_skill_feed = {
-            "schema": "haike_video-copy-skill-hotspot-feed-v1",
+            "schema": "openmontage-copy-skill-hotspot-feed-v1",
             "feed_status": "missing",
             "business_date": target_value.isoformat(),
             "run_id": None,
@@ -3308,7 +3308,7 @@ def scheduler_command() -> list[str]:
 def scheduler_task_spec(config: dict[str, Any] | None = None) -> dict[str, Any]:
     config = config or read_config()
     return {
-        "task_name": "Haike Video-Daily-Tech-Brief",
+        "task_name": "OpenMontage-Daily-Tech-Brief",
         "enabled": bool(config["enabled"]),
         "schedule_time": config["schedule_time"],
         "working_directory": str(REPO_ROOT),
@@ -3329,7 +3329,7 @@ def _scheduler_task_xml(spec: dict[str, Any], *, username: str | None = None) ->
     ET.register_namespace("", namespace)
     task = ET.Element(f"{{{namespace}}}Task", {"version": "1.4"})
     registration = ET.SubElement(task, f"{{{namespace}}}RegistrationInfo")
-    ET.SubElement(registration, f"{{{namespace}}}Author").text = "Haike Video"
+    ET.SubElement(registration, f"{{{namespace}}}Author").text = "OpenMontage"
     triggers = ET.SubElement(task, f"{{{namespace}}}Triggers")
     calendar = ET.SubElement(triggers, f"{{{namespace}}}CalendarTrigger")
     today = datetime.now(LOCAL_TIMEZONE).date().isoformat()
@@ -3380,7 +3380,7 @@ def sync_windows_scheduler(config: dict[str, Any] | None = None) -> dict[str, An
         return {**spec, "installed": False, "platform_supported": False, "detail": "当前系统不是 Windows，未创建计划任务"}
     task_name = str(spec["task_name"])
     if settings.get("enabled") is True:
-        handle, temporary = tempfile.mkstemp(prefix="haike_video-daily-", suffix=".xml")
+        handle, temporary = tempfile.mkstemp(prefix="openmontage-daily-", suffix=".xml")
         try:
             with os.fdopen(handle, "wb") as stream:
                 stream.write(_scheduler_task_xml(spec))

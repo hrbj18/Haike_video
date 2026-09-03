@@ -116,6 +116,10 @@ def create_avatar_role(payload: dict) -> dict:
         "license": str(payload.get("license") or "仅限本人项目使用").strip()[:200],
         "version": 1,
         "references": [],
+        # A role may be the visible identity for one configured TTS profile.
+        # It is deliberately an explicit association rather than an inference
+        # from a Chinese display name or a file name.
+        "voice_binding": None,
         "created_at": _now(),
         "updated_at": _now(),
     }
@@ -194,6 +198,70 @@ def finalize_role_reference_upload(role_id: str, slot: str, temporary: Path, tar
         _save_store(store)
         return _public_role(role)
     raise AvatarRoleError("角色在上传过程中不存在")
+
+
+def set_avatar_role_voice_binding(role_id: str, profile: dict | None) -> dict:
+    """Attach one runtime voice identity to a reusable avatar role.
+
+    ``profile`` is resolved by the server from the local audio centre.  Store
+    only public/non-secret identity fields so a role export never leaks a
+    provider token or a provider-private voice resource identifier.
+    """
+    role_id = _safe_role_id(role_id)
+    binding: dict | None = None
+    if profile is not None:
+        profile_id = str(profile.get("id") or "").strip()
+        if not profile_id:
+            raise AvatarRoleError("音色编号不能为空")
+        binding = {
+            "profile_id": profile_id,
+            "profile_name": str(profile.get("name") or profile_id).strip()[:120],
+            "provider_id": str(profile.get("provider_id") or "").strip()[:80],
+            "provider_name": str(profile.get("provider_name") or "").strip()[:120],
+            "voice_signature": str(profile.get("voice_signature") or "").strip()[:160] or None,
+            "bound_at": _now(),
+        }
+    store = _read_store()
+    if binding:
+        for existing in store["roles"]:
+            existing_binding = existing.get("voice_binding") if isinstance(existing.get("voice_binding"), dict) else {}
+            if existing.get("role_id") != role_id and existing_binding.get("profile_id") == binding["profile_id"]:
+                raise AvatarRoleError(f"该音色已关联角色“{existing.get('name') or existing.get('role_id')}”，请先解除原关联")
+    for role in store["roles"]:
+        if role.get("role_id") != role_id:
+            continue
+        role["voice_binding"] = binding
+        role["version"] = int(role.get("version") or 0) + 1
+        role["updated_at"] = _now()
+        _save_store(store)
+        return _public_role(role)
+    raise AvatarRoleError("未找到该数字人角色")
+
+
+def find_avatar_role_by_voice_profile(profile_id: str) -> dict | None:
+    """Return the unique role explicitly bound to a profile, if any."""
+    requested = str(profile_id or "").strip()
+    if not requested:
+        return None
+    matches = [
+        role for role in _read_store()["roles"]
+        if isinstance(role.get("voice_binding"), dict)
+        and str(role["voice_binding"].get("profile_id") or "") == requested
+    ]
+    if len(matches) > 1:
+        raise AvatarRoleError("同一音色被关联到多个角色，无法安全选择出镜图")
+    return _public_role(matches[0]) if matches else None
+
+
+def role_front_reference(role: dict) -> dict:
+    """Return the only role-library asset eligible as a presenter image."""
+    reference = next(
+        (item for item in role.get("references", []) if isinstance(item, dict) and item.get("slot") == "front"),
+        None,
+    )
+    if not isinstance(reference, dict):
+        raise AvatarRoleError(f"角色“{role.get('name') or role.get('role_id')}”尚未上传正面出镜图")
+    return dict(reference)
 
 
 def avatar_role_asset_file(role_id: str, reference_path: str) -> Path:

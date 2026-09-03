@@ -31,17 +31,3 @@ def test_repository_handoff_package_stays_within_limits() -> None:
     rows = audit()
     assert rows
     assert all(row.ok for row in rows)
-
-
-def test_root_handoff_routes_colleagues_to_release_and_development_sources() -> None:
-    root = Path(__file__).resolve().parents[2]
-    readme = (root / "README.md").read_text(encoding="utf-8")
-    start = (root / "START_HERE.md").read_text(encoding="utf-8")
-    release = (root / "docs" / "handoff" / "RELEASE_STATUS.md").read_text(encoding="utf-8")
-
-    assert "START_HERE.md" in readme
-    assert "docs/handoff/RELEASE_STATUS.md" in start
-    assert "docs/GIT_WORKFLOW_ZH-CN.md" in start
-    assert "docs/handoff/CURRENT_STATUS.md" in start
-    assert "`main`" in release and "`dev`" in release
-    assert (root / "VERSION").read_text(encoding="utf-8").strip() in release

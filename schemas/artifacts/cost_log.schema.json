@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "haike_video/artifacts/cost_log",
+  "$id": "openmontage/artifacts/cost_log",
   "title": "Cost Log",
   "description": "Estimated, reserved, and actual spend by operation.",
   "type": "object",

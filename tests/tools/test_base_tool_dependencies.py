@@ -20,7 +20,7 @@ class DummyTool(BaseTool):
 class BinaryDependencyTests(unittest.TestCase):
     def test_binary_dependency_prefix_is_checked_like_cmd(self) -> None:
         tool = DummyTool()
-        tool.dependencies = ["binary:definitely-not-installed-haike_video-test"]
+        tool.dependencies = ["binary:definitely-not-installed-openmontage-test"]
         tool.install_instructions = "install it"
 
         with patch("tools.base_tool.shutil.which", return_value=None):

@@ -5,7 +5,10 @@ import {
   getJSON, mediaURL, subscribe, thumbURL, waveBars,
 } from "/ui/lib.js";
 
-const rawProjectPath = location.pathname.split("/p/")[1] || "";
+// `/p/{id}/board` is the legacy deep link.  Keep its project identity equal
+// to the director route rather than mistakenly treating the trailing `/board`
+// as part of the id when requesting state or opening the SSE stream.
+const rawProjectPath = (location.pathname.split("/p/")[1] || "").replace(/\/board$/, "");
 const projectId = decodeURIComponent(rawProjectPath);
 const encodedProjectId = encodeURIComponent(projectId);
 const app = document.getElementById("app");
@@ -13,7 +16,7 @@ const modal = document.getElementById("modal");
 const player = document.getElementById("player");
 
 const THEME_KEY = "backlot.theme";
-let currentTheme = localStorage.getItem(THEME_KEY) === "light" ? "light" : "dark";
+let currentTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
 let state = null;
 let selectedStage = null;   // stage drawer open for this stage name
 let activeRender = 0;
@@ -92,7 +95,7 @@ function renderSlate(s) {
   return el("header", { class: "slate" },
     el("div", { class: "clapper" }),
     el("div", {},
-      el("a", { class: "wordmark", href: "/", style: "text-decoration:none" }, "Backlot"),
+      el("a", { class: "wordmark", href: "/", style: "text-decoration:none" }, "HAIKE VIDEO"),
       el("h1", {}, s.title),
     ),
     ...chips,
@@ -1054,7 +1057,7 @@ function tickReplay() {
 function render() {
   if (!state) return;
   const s = replay ? stateAt(state, replay.t) : state;
-  document.title = `Backlot — ${s.title}`;
+  document.title = `海客视频 — ${s.title}`;
   document.body.classList.toggle("first", firstPaint);
   firstPaint = false;
   app.innerHTML = "";

@@ -1,4 +1,4 @@
-# Haike Video - Global Configuration
+# OpenMontage - Global Configuration
 
 llm:
   provider: anthropic            # anthropic | openai | gemini | openrouter | ollama | mistral | minimax

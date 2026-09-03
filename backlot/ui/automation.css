@@ -112,3 +112,47 @@
   .recovery-head { flex-direction: column; }
   .recovery-summary { justify-content: flex-start; }
 }
+
+/* ============================================================
+   FORMAL UI PHASE 2 — warm-paper automation centre
+   Scheduler, budget confirmation and recovery controls retain all existing
+   endpoints and confirmation gates; this is visual presentation only.
+   ============================================================ */
+:root[data-theme="light"] .automation-page { background: #f4ede0; color: #211d17; }
+:root[data-theme="light"] .automation-shell { width: min(1440px, calc(100vw - 64px)); padding-top: 32px; }
+:root[data-theme="light"] .automation-header { align-items: flex-end; padding-bottom: 22px; border-bottom: 2px solid #342f27; }
+:root[data-theme="light"] .automation-header h1 { color: #211d17; font-family: Georgia, "Noto Serif SC", "Songti SC", serif; font-weight: 500; letter-spacing: -.055em; }
+:root[data-theme="light"] .automation-header p, :root[data-theme="light"] .automation-master-switch small, :root[data-theme="light"] .muted, :root[data-theme="light"] .automation-fact small, :root[data-theme="light"] .preflight-item span, :root[data-theme="light"] .run-overview span, :root[data-theme="light"] .run-detail p, :root[data-theme="light"] .text-recovery-detail p, :root[data-theme="light"] .history-row span { color: #665d50; }
+:root[data-theme="light"] .automation-header .wordmark, :root[data-theme="light"] .eyebrow, :root[data-theme="light"] .automation-message, :root[data-theme="light"] .run-overview a, :root[data-theme="light"] .cost-number { color: #a4472f; }
+:root[data-theme="light"] :is(.automation-health, .contract-chip) { border-color: #cbbda7; border-radius: 999px; color: #665d50; background: transparent; }
+:root[data-theme="light"] .automation-health.ok { border-color: #91a58b; color: #355e32; background: rgba(64, 107, 58, .07); }
+:root[data-theme="light"] .automation-health.warning { border-color: #c78d88; color: #8d3832; background: rgba(169, 63, 53, .07); }
+:root[data-theme="light"] .automation-health.off { background: #f5ecdc; }
+:root[data-theme="light"] .automation-card { border-color: #d8cdb8; border-radius: 0; background: rgba(251, 246, 235, .94); }
+:root[data-theme="light"] .automation-card-head { border-bottom-color: #ded2bd; }
+:root[data-theme="light"] .automation-card-head h2 { color: #211d17; font-family: Georgia, "Noto Serif SC", serif; font-weight: 500; }
+:root[data-theme="light"] .automation-master-switch input { accent-color: #c14a2b; }
+:root[data-theme="light"] :is(.scheduler-alert, .scheduler-alert.danger) { border-left-color: #c14a2b; background: #f8e8d7; color: #5f4835; }
+:root[data-theme="light"] .scheduler-alert.danger { border-left-color: #a93f35; background: #f9e4e1; }
+:root[data-theme="light"] .automation-facts { border-color: #ded2bd; border-radius: 0; background: #ded2bd; }
+:root[data-theme="light"] .automation-fact { background: #fbf6eb; }
+:root[data-theme="light"] .automation-fact strong, :root[data-theme="light"] .preflight-item b, :root[data-theme="light"] .stage-node b, :root[data-theme="light"] .run-detail h3, :root[data-theme="light"] .text-recovery-detail h3, :root[data-theme="light"] .combination-card header b, :root[data-theme="light"] .recovery-story b { color: #40382e; }
+:root[data-theme="light"] .preflight-item, :root[data-theme="light"] .stage-node, :root[data-theme="light"] .run-detail, :root[data-theme="light"] .text-recovery-detail, :root[data-theme="light"] .combination-card, :root[data-theme="light"] .history-row { border-color: #d8cdb8; border-radius: 0; background: #fbf6eb; }
+:root[data-theme="light"] .preflight-item::before { color: #406b3a; }
+:root[data-theme="light"] .preflight-item.warning::before { color: #c14a2b; }
+:root[data-theme="light"] .stage-node.succeeded, :root[data-theme="light"] .stage-node.skipped { border-top: 3px solid #406b3a; }
+:root[data-theme="light"] .stage-node.running { border-color: #c14a2b; box-shadow: inset 0 0 0 1px rgba(193, 74, 43, .14); }
+:root[data-theme="light"] .stage-node.failed, :root[data-theme="light"] .failure-panel { border-color: #b86b63; background: #f9e4e1; }
+:root[data-theme="light"] .manual-run input { border-color: #cbbda7; border-radius: 1px; background: #fffdf6; color: #211d17; color-scheme: light; }
+:root[data-theme="light"] .combination-card.selected { border-color: #c14a2b; box-shadow: inset 0 3px 0 #c14a2b; }
+:root[data-theme="light"] .recovery-summary > span, :root[data-theme="light"] .heat-chip { border-color: #cbbda7; color: #665d50; background: transparent; }
+:root[data-theme="light"] .recovery-summary .recovery-state { border-color: #c14a2b; color: #8b4628; background: rgba(193, 74, 43, .07); }
+:root[data-theme="light"] .recovery-summary .recovery-state.passed { border-color: #91a58b; color: #355e32; background: rgba(64, 107, 58, .07); }
+:root[data-theme="light"] .recovery-summary .recovery-state.awaiting_human, :root[data-theme="light"] .recovery-summary .recovery-state.failed { border-color: #c78d88; color: #8d3832; background: rgba(169, 63, 53, .07); }
+:root[data-theme="light"] .heat-chip.h3, :root[data-theme="light"] .heat-chip.h4 { border-color: #bd8e54; color: #7b582b; background: #f8e8d7; }
+:root[data-theme="light"] .history-row:hover, :root[data-theme="light"] .history-row.selected { border-color: #9c8060; background: #f7eddd; }
+:root[data-theme="light"] .history-row .good { color: #355e32; }
+:root[data-theme="light"] .history-row .bad, :root[data-theme="light"] .automation-message.error { color: #8d3832; }
+@media (max-width:700px) {
+  :root[data-theme="light"] .automation-shell { width: min(100% - 28px, 1440px); }
+}

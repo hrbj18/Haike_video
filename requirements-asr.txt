@@ -1,6 +1,6 @@
 # Optional local ASR runtime for long-form avatar alignment.
 # Model weights stay in the machine-level cache and are never downloaded by
-# the Haike Video avatar pipeline at task runtime.
+# the OpenMontage avatar pipeline at task runtime.
 faster-whisper==1.2.1
 ctranslate2==4.8.1
 opencc-python-reimplemented==0.1.7

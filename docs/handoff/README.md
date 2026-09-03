@@ -1,4 +1,4 @@
-# Haike Video 轻量交接入口
+# OpenMontage 轻量交接入口
 
 更新时间：2026-09-01
 
@@ -11,10 +11,9 @@
 
 ## 当前任务入口
 
-- 同事第一次接手：仓库根目录 `START_HERE.md`。
-- 当前开发：`CURRENT_STATUS.md`，再按任务选至多一个专题。
-- GitHub 稳定版、分支和部署：`RELEASE_STATUS.md` 与 `DEPLOYMENT.md`。
-- 版本发布步骤：`docs/GIT_WORKFLOW_ZH-CN.md`。
+- 本机继续开发：先读 `CURRENT_STATUS.md`，再按任务选至多一个专题。
+- GitHub 稳定版、分支和跨电脑安装：读 `DEPLOYMENT.md`；克隆后的同事从根目录 `START_HERE.md` 开始。
+- 本机后续功能不得被误报为 GitHub 已发布能力。
 
 ## 更新规则
 

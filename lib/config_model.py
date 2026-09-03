@@ -1,4 +1,4 @@
-"""Runtime configuration model for Haike Video.
+"""Runtime configuration model for OpenMontage.
 
 Loads config.yaml, merges with env overrides, and provides typed access.
 """
@@ -62,7 +62,7 @@ class PathsConfig(BaseModel):
     output_dir: str = "output"
 
 
-class HaikeVideoConfig(BaseModel):
+class OpenMontageConfig(BaseModel):
     """Top-level runtime configuration."""
 
     llm: LLMConfig = Field(default_factory=LLMConfig)
@@ -72,7 +72,7 @@ class HaikeVideoConfig(BaseModel):
     paths: PathsConfig = Field(default_factory=PathsConfig)
 
     @classmethod
-    def load(cls, config_path: Optional[Path] = None) -> "HaikeVideoConfig":
+    def load(cls, config_path: Optional[Path] = None) -> "OpenMontageConfig":
         """Load config from YAML file. Falls back to defaults if file missing."""
         if config_path is None:
             config_path = Path(__file__).resolve().parent.parent / "config.yaml"

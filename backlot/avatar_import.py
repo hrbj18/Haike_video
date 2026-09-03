@@ -1168,6 +1168,71 @@ def apply_longform_timing_manifest(project_dir: Path, manifest: dict) -> dict:
     return _save_package(project_dir, package)
 
 
+def ensure_exact_clock_assembly_duration_limit(
+    project_dir: Path,
+    *,
+    maximum_seconds: float,
+    tolerance_seconds: float = 1.0,
+) -> dict:
+    """Reserve enough local master duration for a validated v2 timing manifest.
+
+    The one-click RunningHub route creates one source video per presenter and
+    then interleaves their frame-exact turns locally. Its default 120-second
+    import limit predates that route and must not turn a valid, already-paid
+    121--180 second master into a false failure. This function is deliberately
+    limited to the validated v2 contract: it never estimates, trims, stretches,
+    or changes legacy/ASR-derived cuts.
+    """
+    package = read_avatar_package(project_dir)
+    if not package:
+        raise AvatarImportError("数字人素材包不存在")
+    manifest = (((package.get("asr") or {}).get("summary") or {}).get("timing_manifest") or {})
+    if str(manifest.get("version") or "") != "avatar-turn-timing-v2":
+        return package
+    if package.get("import_mode") != "longform":
+        raise AvatarImportError("精确帧时长预算只能用于长视频数字人素材包")
+    if maximum_seconds <= 0 or tolerance_seconds < 0:
+        raise AvatarImportError("精确帧时长预算参数无效")
+
+    turns = package.get("turns") or []
+    if not turns:
+        raise AvatarImportError("数字人素材包没有可合成的台词")
+    planned_duration = 0.0
+    previous_speaker_id: str | None = None
+    settings = package.get("settings") or {}
+    for turn in turns:
+        try:
+            start = float(turn["source_start_seconds"])
+            end = float(turn["source_end_seconds"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise AvatarImportError(f"{turn.get('turn_id') or '未知轮次'} 缺少精确帧切割边界") from exc
+        if not 0 <= start < end:
+            raise AvatarImportError(f"{turn.get('turn_id') or '未知轮次'} 的精确帧切割边界无效")
+        speaker_id = str(turn.get("speaker_id") or "")
+        if previous_speaker_id is not None:
+            gap_key = "same_speaker_gap_seconds" if speaker_id == previous_speaker_id else "speaker_change_gap_seconds"
+            try:
+                gap = float(settings.get(gap_key) or 0)
+            except (TypeError, ValueError) as exc:
+                raise AvatarImportError("数字人切换静音合同无效") from exc
+            if gap < 0:
+                raise AvatarImportError("数字人切换静音合同不能为负数")
+            planned_duration += gap
+        planned_duration += end - start
+        previous_speaker_id = speaker_id
+
+    if planned_duration > maximum_seconds + 1e-6:
+        raise AvatarImportError(
+            f"精确帧清单预计母版 {planned_duration:.2f} 秒，超过一键数字人 {maximum_seconds:.2f} 秒安全上限"
+        )
+    required_limit = math.ceil((planned_duration + tolerance_seconds) * 1000) / 1000
+    current_limit = float(settings.get("max_duration_seconds") or 0)
+    if current_limit + 1e-6 >= required_limit:
+        return package
+    package["settings"]["max_duration_seconds"] = required_limit
+    return _save_package(project_dir, package)
+
+
 def _review_deterministic_longform_turns(package: dict, transcripts: dict[str, dict], manifest: dict) -> list[dict]:
     """Review deterministic boundaries without letting ASR rewrite v2 cuts.
 
@@ -2422,7 +2487,7 @@ def _assemble_avatar_package_parallel(project_dir: Path, payload: dict | None = 
     output_dir.mkdir(parents=True, exist_ok=True)
     output = output_dir / "avatar-dialogue-master.mp4"
     candidate_output = output_dir / f".avatar-dialogue-master-{uuid4().hex}.mp4"
-    with tempfile.TemporaryDirectory(prefix="haike_video-avatar-") as temp_dir:
+    with tempfile.TemporaryDirectory(prefix="openmontage-avatar-") as temp_dir:
         graph_path = Path(temp_dir) / "filter.txt"
         graph_path.write_text(graph, encoding="utf-8")
         command = [ffmpeg, "-y"]
@@ -2435,7 +2500,7 @@ def _assemble_avatar_package_parallel(project_dir: Path, payload: dict | None = 
             "-pix_fmt", "yuv420p", "-r", str(package["settings"]["fps"]), "-fps_mode", "cfr",
             "-c:a", "aac", "-b:a", "192k", "-ar", str(package["settings"]["audio_sample_rate"]), "-ac", "2",
             "-movflags", "+faststart",
-            "-metadata", "title=Haike Video Avatar Dialogue Master",
+            "-metadata", "title=OpenMontage Avatar Dialogue Master",
             "-metadata", "comment=Native avatar audio is the master timeline",
             str(candidate_output),
         ])

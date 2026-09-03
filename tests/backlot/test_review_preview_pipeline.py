@@ -264,6 +264,38 @@ def start_payload(**extra: object) -> dict:
     }
 
 
+def test_frozen_visual_signature_tracks_render_fields_and_asset_bytes_but_not_lock(tmp_path: Path) -> None:
+    project = make_project(tmp_path)
+    state = wb.read_workbench(project)
+    script = state["project"]["script_draft"]["script"]
+    scene = state["scenes"][0]
+    asset = state["assets"][0]
+    scene["visual_composition"] = {
+        **wb._default_visual_composition(),
+        "layout_recipe": "focus_card",
+        "overlays": [{
+            "id": "VL-001", "role": "hero", "asset_id": asset["id"],
+            "start_seconds": .25, "end_seconds": 1.5,
+            "source_in_seconds": 0, "source_out_seconds": 1.25,
+            "fit": "contain", "locked": False,
+        }],
+    }
+    first = pipeline._current_input_contract(project, state, script)["scene_visual_signature"]
+    scene["visual_composition"]["overlays"][0]["locked"] = True
+    locked = pipeline._current_input_contract(project, state, script)["scene_visual_signature"]
+    assert locked == first
+
+    scene["visual_composition"]["overlays"][0]["end_seconds"] = 1.75
+    changed_contract = pipeline._current_input_contract(project, state, script)["scene_visual_signature"]
+    assert changed_contract != first
+
+    scene["visual_composition"]["overlays"][0]["end_seconds"] = 1.5
+    asset_path = project / str(asset["path"])
+    asset_path.write_bytes(asset_path.read_bytes() + b"-changed")
+    changed_bytes = pipeline._current_input_contract(project, state, script)["scene_visual_signature"]
+    assert changed_bytes != first
+
+
 def complete_no_gate_review_job(
     project: Path,
     *,
@@ -426,6 +458,79 @@ def test_yaya_is_exact_default_only_without_explicit_persisted_choice(tmp_path: 
     assert any("雅雅" in blocker and "静默回退" in blocker for blocker in missing["blockers"])
 
 
+def test_explicit_doubao_default_is_visible_to_review_preview_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project = make_project(tmp_path)
+    public_profile = {
+        "id": "doubao:public_female",
+        "name": "豆包公版女声",
+        "language": "zh",
+        "voice_type": "cloud",
+        "default_engine": "doubao_speech_2_0",
+        "voice_signature": "doubao:fixture-signature",
+        "provider_id": "doubao",
+        "provider_name": "豆包云端配音",
+        "available": True,
+    }
+    runtime_profile = {**public_profile, "provider_voice_id": "fixture-voice", "resource_id": "seed-tts-2.0"}
+    monkeypatch.setattr(
+        pipeline.audio_center,
+        "_load",
+        lambda: {"default_profile_id": public_profile["id"], "default_updated_at": "2026-09-02T00:00:00Z"},
+    )
+    monkeypatch.setattr(
+        pipeline.audio_center,
+        "read_audio_center",
+        lambda: {"provider": {"status": "available"}, "profiles": [public_profile]},
+    )
+    monkeypatch.setattr(pipeline.audio_center, "get_voice_profile", lambda profile_id: runtime_profile if profile_id == public_profile["id"] else None)
+    monkeypatch.setattr(wb, "_ffmpeg_available", lambda: "mock-ffmpeg")
+    monkeypatch.setattr(wb, "_ffprobe_available", lambda _ffmpeg: "mock-ffprobe")
+
+    report = pipeline.review_preview_preflight(
+        project,
+        capabilities=pipeline.collect_review_preview_capabilities(include_visual_runtime=False),
+    )
+    assert report["ready"] is True
+    assert report["frozen_voice"]["provider"] == "doubao"
+    assert report["frozen_voice"]["profile_id"] == "doubao:public_female"
+    assert not any("默认音色已不存在" in blocker for blocker in report["blockers"])
+
+
+def test_frozen_cloud_line_uses_unified_runtime_without_local_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    profile = {
+        "id": "doubao:public_female",
+        "name": "豆包公版女声",
+        "provider_id": "doubao",
+        "provider_name": "豆包云端配音",
+        "provider_voice_id": "fixture-voice",
+        "available": True,
+    }
+    monkeypatch.setattr(pipeline.audio_center, "get_voice_profile", lambda _profile_id: profile)
+    received: dict = {}
+
+    def generate(*, text: str, profile: dict, output_path: Path, language: str):
+        received.update({"text": text, "profile": profile, "language": language})
+        write_pcm_wav(output_path)
+        return SimpleNamespace(success=True, error="", data={"task_id": "doubao-fixture"})
+
+    monkeypatch.setattr(pipeline, "generate_voice_audio", generate)
+    output = tmp_path / "line.wav"
+    result = pipeline._synthesize_frozen_line(
+        {"text": "云端配音测试。"},
+        output,
+        {"provider": "doubao", "profile_id": "doubao:public_female", "voice_signature": "doubao:fixture-signature"},
+    )
+    assert output.is_file()
+    assert received["profile"]["provider_id"] == "doubao"
+    assert result["voice_signature"] == "doubao:fixture-signature"
+
+
 def test_inherited_yaya_gain_is_trusted_but_user_mix_changes_keep_audio_gate(tmp_path: Path) -> None:
     project = make_project(tmp_path)
     state = wb._load_for_write(project)
@@ -529,18 +634,15 @@ def test_zero_network_preflight_skips_all_visual_runtime_probes(tmp_path: Path, 
 
 
 def test_capability_collection_does_not_touch_visual_tools_when_not_required(monkeypatch) -> None:
-    class LocalTTS:
-        def get_status(self):
-            return SimpleNamespace(value="available")
-
-        def list_profiles(self):
-            return capabilities()["tts"]["profiles"]
-
     def forbidden(*_args, **_kwargs):
         raise AssertionError("zero-network capability collection touched a visual runtime")
 
-    monkeypatch.setattr(pipeline, "VoiceboxTTS", LocalTTS)
     monkeypatch.setattr(pipeline.audio_center, "_load", lambda: {"default_profile_id": None})
+    monkeypatch.setattr(
+        pipeline.audio_center,
+        "read_audio_center",
+        lambda: {"provider": {"status": "available"}, "profiles": capabilities()["tts"]["profiles"]},
+    )
     monkeypatch.setattr(wb, "_ffmpeg_available", lambda: "mock-ffmpeg")
     monkeypatch.setattr(wb, "_ffprobe_available", lambda _ffmpeg: "mock-ffprobe")
     monkeypatch.setattr(pipeline, "PexelsSource", forbidden)

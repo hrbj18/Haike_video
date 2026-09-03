@@ -107,6 +107,18 @@ let assetLibraryAuditLoading = false;
 let assetLibraryFilter = "all";
 let assetLibrarySearch = "";
 let assetLibrarySelection = new Set();
+let mediaIndexRecommendations = null;
+let mediaVisionDetails = null;
+// New-project local material preparation stays independent from the script
+// form.  File handles live only in the browser until the user explicitly
+// clicks upload; they are never persisted as paths or silently analysed.
+let localMaterialPreparationFiles = [];
+let localMaterialPreparationUploading = false;
+// This small client-side list is deliberately only a request draft. The
+// server validates every confirmation against the persisted V2 index and
+// records it in the auditable orchestration plan; clicking a checkbox never
+// changes an active scene on its own.
+let localMaterialContinuityConfirmations = [];
 // Keep the workbench compact on a fresh page load. The reviewer can expand
 // batch production explicitly when needed.
 let visualBatchPanelOpen = false;
@@ -226,6 +238,10 @@ const reviewUiMemory = {
 // A fresh page load opens the normal scene-review layout. Focus mode is an
 // explicit reviewer choice and never changes the project or render.
 let reviewFocusMode = false;
+// The segment workbench keeps its editor choice in the browser only.  A tab
+// switch changes neither the project nor the production plan; it only makes
+// the already-existing, scene-scoped controls easier to reach.
+let reviewEditorTab = "layout";
 
 const sourceLabels = {
   human_provided: "人工提供", web_download: "网络下载", project_library: "项目素材库",
@@ -700,6 +716,30 @@ function reviewPreviewAvatarVoiceCopy(source) {
   return values.map((item) => `${item.label || item.role || "主持人"}：${item.profile_name || item.profile_id || "未识别音色"}`).join("；");
 }
 
+function renderReviewPreviewAvatarBindings(source) {
+  const roles = (source && source.roles) || (((source || {}).frozen_input || {}).roles) || {};
+  const values = Object.values(roles).filter((item) => item && typeof item === "object");
+  if (!values.length) return null;
+  return el("div", { class: "review-preview-avatar-bindings", "aria-label": "数字人角色绑定核对" },
+    values.map((item) => {
+      const path = reviewPreviewMediaSource(item.presenter_path);
+      const title = `${item.label || item.role || "主持人"} → ${item.profile_name || item.profile_id || "未识别音色"} → ${item.role_name || "未关联角色"}`;
+      return el("article", { class: "review-preview-avatar-binding" },
+        path ? el("img", { src: path, alt: `${item.label || item.role || "主持人"} 已冻结出镜图` }) : el("div", { class: "review-preview-avatar-binding-empty" }, "未冻结角色图"),
+        el("div", {},
+          el("strong", {}, item.label || item.role || "主持人"),
+          el("span", {}, `台词 ${Number(item.turn_count || 0)} 句`),
+          el("span", {}, `音色：${item.profile_name || item.profile_id || "未识别"}`),
+          el("span", {}, `服务：${item.provider_name || item.provider_id || "未识别"}`),
+          el("span", {}, `角色图：${item.role_name || "未关联"}`),
+          el("small", {}, item.presenter_filename || "项目内冻结副本"),
+        ),
+        el("span", { class: "review-preview-avatar-binding-title", title }, "已核对"),
+      );
+    }),
+  );
+}
+
 function renderReviewPreviewPreflight(preflight) {
   if (!preflight) return null;
   const blockers = reviewPreviewList(preflight.blockers);
@@ -717,7 +757,7 @@ function renderReviewPreviewPreflight(preflight) {
     "两位主持串行",
   ].filter(Boolean).join(" · ");
   const capabilityRows = [
-    ["本地 TTS", ["tts", "local_tts"]],
+    [avatarMode ? "双主持配音服务" : "配音服务", ["tts", "local_tts"]],
     ["FFmpeg", ["ffmpeg"]],
     ["ffprobe", ["ffprobe"]],
     ["Pexels", ["pexels"]],
@@ -763,6 +803,7 @@ function renderReviewPreviewPreflight(preflight) {
       avatarMode ? el("div", {}, el("dt", {}, "费用与自动恢复"), el("dd", {}, `本次最多 ¥${Number(((preflight.budget || {}).limit_cny) || 5).toFixed(2)}；每位主持最多 3 次：Standard 24GB 最多 2 次，只有前两次都明确 OOM 才使用 1 次 Plus 48GB`)) : null,
     ),
     el("div", { class: "review-preview-capabilities" }, capabilityRows),
+    avatarMode ? renderReviewPreviewAvatarBindings(preflight) : null,
     el("p", { class: "review-preview-zero-avatar" }, avatarMode
       ? "付费边界：只允许预检中冻结的 InfiniteTalk 精确帧工作流、448×560、Standard 24GB；两位主持严格串行，结果不明绝不重提。Standard 明确 OOM 才有限自动恢复，第三次才可能使用 Plus 48GB；本地 Whisper 只记录诊断，不覆盖精确帧切点，也不会因低置信度打断流程。"
       : "零数字人调用：不调用 RunningHub、DashScope 数字人或其他付费数字人服务。"),
@@ -1008,7 +1049,7 @@ function renderReviewPreviewDynamicState() {
         el("p", { class: "eyebrow" }, avatarMode ? "有数字人口播 · 唯一主操作" : "无数字人口播 · 唯一主操作"),
         el("h4", {}, avatarMode ? "一键生成有数字人审核预览" : "一键生成审核预览"),
         el("p", {}, avatarMode
-          ? "从已通过双主持脚本生成本地配音、RunningHub Standard 24GB 数字人、精确帧切点、主体画面、字幕和可人工观看的全片预览。"
+          ? "从已通过双主持脚本生成已绑定的本地或云端配音、RunningHub Standard 24GB 数字人、精确帧切点、主体画面、字幕和可人工观看的全片预览。"
           : "从已通过脚本建立逐句配音、真实时间线、主体画面、字幕和可人工观看的全片预览。"),
       ),
       button(actionLabel, "primary review-preview-primary", startReviewPreviewJob, active || externallyBlocked || reviewPreviewActionInFlight),
@@ -1208,6 +1249,9 @@ function avatarTimelineApplied() { return Boolean(state && state.avatar && state
 function presenterLayouts() {
   return (state && state.presenter_layouts) || { default_template_id: "pip_top_left", templates: [] };
 }
+function storyHeadlineLayout() {
+  return (state && state.story_headline_layout) || { x: .36, y: .09, width: .58, height: .125 };
+}
 function presenterLayout(scene) {
   const presenter = presenterFor(scene);
   const layouts = presenterLayouts();
@@ -1226,6 +1270,44 @@ function presenterLayout(scene) {
 
 function reviewPreview(scene) {
   return (scene && scene.review_preview) || { status: "idle", output_path: null, caption_cues: [] };
+}
+
+function reviewPlaybackSource(scene) {
+  const scenePreview = reviewPreview(scene);
+  if (scenePreview.status === "ready" && scenePreview.output_path) {
+    return {
+      kind: "scene",
+      status: "ready",
+      output_path: scenePreview.output_path,
+      offset_seconds: 0,
+      resolution: scenePreview.resolution || "按项目画幅预览",
+      caption_cues: scenePreview.caption_cues || [],
+    };
+  }
+  // A completed parent preview already contains this exact scene on the
+  // shared, audio-driven timeline.  Reuse it read-only instead of making the
+  // reviewer generate a redundant per-scene file just to inspect one part.
+  const full = fullPreviewState().preview || {};
+  if (full.status === "completed" && full.output_path) {
+    return {
+      kind: "full_preview",
+      status: "ready",
+      output_path: full.output_path,
+      offset_seconds: Math.max(0, Number((scene || {}).start_seconds || 0)),
+      resolution: scenePreview.resolution || "全片审核预览",
+      caption_cues: scenePreview.caption_cues || [],
+    };
+  }
+  return {
+    kind: "missing",
+    status: scenePreview.status || "idle",
+    output_path: null,
+    offset_seconds: 0,
+    resolution: scenePreview.resolution || "按项目画幅预览",
+    caption_cues: scenePreview.caption_cues || [],
+    error: scenePreview.error || "",
+    stale_reason: scenePreview.stale_reason || "",
+  };
 }
 
 function subtitleStyles() {
@@ -1365,6 +1447,23 @@ function visualPlan(scene) {
 
 function visualTimeline(scene) {
   return (scene && scene.visual_timeline) || { blocks: [], revision: 0 };
+}
+
+function visualComposition(scene) {
+  return (scene && scene.visual_composition) || {
+    version: 1,
+    revision: 1,
+    layout_recipe: "full_bleed",
+    background: { source: "visual_timeline", treatment: "normal" },
+    overlays: [],
+    frame_style: {
+      width_ratio: .82,
+      height_ratio: .56,
+      border_radius_ratio: .025,
+      border_color: "#D9F3FF",
+      shadow: "soft",
+    },
+  };
 }
 
 function sceneHasPresenterMedia(scene) {
@@ -2281,6 +2380,319 @@ function renderVisualTimelineEditor(scene) {
   );
 }
 
+function assetResolution(asset) {
+  const raw = (asset || {}).resolution;
+  if (raw && typeof raw === "object") {
+    const width = Number(raw.width || 0);
+    const height = Number(raw.height || 0);
+    if (width > 0 && height > 0) return { width, height, aspect: width / height };
+  }
+  const match = String(raw || "").match(/^\s*(\d+)\s*[xX×]\s*(\d+)\s*$/);
+  if (match) {
+    const width = Number(match[1]);
+    const height = Number(match[2]);
+    if (width > 0 && height > 0) return { width, height, aspect: width / height };
+  }
+  const profile = reviewCanvasProfile();
+  return { width: profile.width, height: profile.height, aspect: profile.width / profile.height };
+}
+
+function recommendedHeroPlacement(asset) {
+  const profile = reviewCanvasProfile();
+  const resolution = assetResolution(asset);
+  const portrait = resolution.aspect < 1;
+  const maxHeight = portrait ? .68 : .78;
+  return {
+    preset_id: portrait ? "portrait_hero_center" : "landscape_hero_center",
+    position_x_ratio: .5,
+    position_y_ratio: portrait ? .44 : .47,
+    size_ratio: portrait ? Math.min(.42, maxHeight * (profile.height / profile.width) * resolution.aspect) : .74,
+    aspect_mode: "source",
+    max_height_ratio: maxHeight,
+  };
+}
+
+function heroPlacementMetrics(asset, placement) {
+  const profile = reviewCanvasProfile();
+  const resolution = assetResolution(asset);
+  const sourceAspect = Math.max(.05, resolution.aspect);
+  const maxHeight = Number(placement.max_height_ratio || .78);
+  const widthRatio = Math.min(Number(placement.size_ratio || .74), maxHeight * (profile.height / profile.width) * sourceAspect);
+  const heightRatio = widthRatio * (profile.width / profile.height) / sourceAspect;
+  const x = Number(placement.position_x_ratio || .5);
+  const y = Number(placement.position_y_ratio || .47);
+  return {
+    x, y, widthRatio, heightRatio, resolution,
+    left: x - widthRatio / 2,
+    top: y - heightRatio / 2,
+    right: x + widthRatio / 2,
+    bottom: y + heightRatio / 2,
+  };
+}
+
+function heroPlacementWarning(metrics) {
+  if (metrics.left < 0 || metrics.right > 1 || metrics.top < 0 || metrics.bottom > 1) return "主角窗超出画布";
+  const warnings = [];
+  if (metrics.top < .2) warnings.push("进入标题安全区");
+  if (metrics.bottom > .78) warnings.push("进入字幕安全区");
+  return warnings.join("；");
+}
+
+function renderVisualCompositionEditor(scene) {
+  const duration = Math.max(.04, Number(scene.end_seconds || 0) - Number(scene.start_seconds || 0));
+  const original = visualComposition(scene);
+  const presenterAssetIds = new Set((state.scenes || []).map((item) => presenterFor(item).asset_id).filter(Boolean));
+  const assets = (state.assets || []).filter((asset) => isLiveAsset(asset) && asset.path
+    && ["image", "video"].includes(String(asset.type || "").toLowerCase())
+    && !presenterAssetIds.has(asset.id));
+  const assetLookup = new Map(assets.map((asset) => [asset.id, asset]));
+  let layoutRecipe = original.layout_recipe === "focus_card" ? "focus_card" : "full_bleed";
+  let overlays = (original.overlays || []).map((item) => ({
+    ...item,
+    placement: item.placement ? { ...item.placement } : null,
+    candidate_evidence: item.candidate_evidence ? { ...item.candidate_evidence } : null,
+  }));
+  const profile = reviewCanvasProfile();
+  const isLandscapeProject = Number(profile.width) > Number(profile.height);
+  const frameStyle = {
+    width_ratio: .82,
+    height_ratio: .56,
+    border_radius_ratio: .025,
+    border_color: "#D9F3FF",
+    shadow: "soft",
+    ...(original.frame_style || {}),
+  };
+  const body = el("div", { class: "visual-layer-body" });
+  const actionBar = el("div", { class: "inline-actions" });
+  let rebuildActions = () => {};
+  const layout = el("select", { "aria-label": "画面布局" },
+    el("option", { value: "full_bleed", selected: layoutRecipe === "full_bleed" ? "" : null }, "全屏画面（保持现有方式）"),
+    el("option", { value: "focus_card", selected: layoutRecipe === "focus_card" ? "" : null }, "重点素材卡片（背景 + 中间素材）"),
+  );
+
+  const rebuild = () => {
+    body.replaceChildren();
+    if (layoutRecipe === "full_bleed") {
+      body.append(el("div", { class: "source-branch-note" },
+        el("strong", {}, "当前使用全屏画面"),
+        el("span", {}, overlays.length ? `已保留 ${overlays.length} 个重点素材草案；切回重点素材卡片后可继续编辑。` : "继续使用上方画面时间线，旧项目输出不会改变。"),
+      ));
+      return;
+    }
+    body.append(el("div", { class: "source-branch-note" },
+      el("strong", {}, "背景仍由画面时间线提供"),
+      el("span", {}, "Pexels、HyperFrames 或本地素材继续在底层播放；下方素材只在指定台词区间显示，视频声音不会混入主音轨。"),
+    ));
+    if (!overlays.length) {
+      body.append(el("div", { class: "empty compact" }, el("strong", {}, "还没有重点素材"), el("span", {}, "添加一个图片或视频片段，设置它在本段出现的时间。")));
+    }
+    overlays.forEach((overlay, index) => {
+      const locked = Boolean(overlay.locked);
+      const asset = assetLookup.get(overlay.asset_id);
+      const isVideo = String((asset || {}).type || "").toLowerCase() === "video";
+      const resolution = assetResolution(asset);
+      const recommendedPlacement = recommendedHeroPlacement(asset);
+      const effectivePlacement = { ...recommendedPlacement, ...(overlay.placement || {}) };
+      const placementMetrics = heroPlacementMetrics(asset, effectivePlacement);
+      const placementWarning = heroPlacementWarning(placementMetrics);
+      const startInput = el("input", { type: "number", min: "0", max: String(duration), step: ".01", value: Number(overlay.start_seconds || 0).toFixed(2), disabled: locked ? "" : null });
+      const endInput = el("input", { type: "number", min: ".4", max: String(duration), step: ".01", value: Number(overlay.end_seconds || Math.min(duration, 2.5)).toFixed(2), disabled: locked ? "" : null });
+      const sourceIn = el("input", { type: "number", min: "0", step: ".01", value: Number(overlay.source_in_seconds || 0).toFixed(2), disabled: locked || !isVideo ? "" : null });
+      const sourceOut = el("input", { type: "number", min: ".4", step: ".01", value: Number(overlay.source_out_seconds || Math.max(.4, Number(overlay.end_seconds || 0) - Number(overlay.start_seconds || 0))).toFixed(2), disabled: locked || !isVideo ? "" : null });
+      const selector = el("select", { disabled: locked ? "" : null, "aria-label": `重点素材 ${index + 1}` }, el("option", { value: "" }, "选择项目内图片或视频"));
+      assets.forEach((item) => selector.append(el("option", { value: item.id, selected: item.id === overlay.asset_id ? "" : null }, `${item.id} · ${item.name}`)));
+      const fit = el("select", { disabled: locked ? "" : null, "aria-label": "素材适配方式" },
+        el("option", { value: "contain", selected: overlay.fit !== "cover" ? "" : null }, "完整显示（推荐）"),
+        el("option", { value: "cover", selected: overlay.fit === "cover" ? "" : null }, "铺满裁切"),
+      );
+      const updateNumbers = () => {
+        overlay.start_seconds = Number(startInput.value);
+        overlay.end_seconds = Number(endInput.value);
+        overlay.source_in_seconds = Number(sourceIn.value);
+        overlay.source_out_seconds = Number(sourceOut.value);
+        overlay.muted = true;
+        overlay.playback_rate = 1;
+      };
+      startInput.addEventListener("change", () => {
+        updateNumbers();
+        if (isVideo) {
+          overlay.source_out_seconds = Number((overlay.source_in_seconds + Math.max(.4, overlay.end_seconds - overlay.start_seconds)).toFixed(3));
+          sourceOut.value = Number(overlay.source_out_seconds).toFixed(2);
+        }
+      });
+      endInput.addEventListener("change", () => {
+        updateNumbers();
+        if (isVideo) {
+          overlay.source_out_seconds = Number((overlay.source_in_seconds + Math.max(.4, overlay.end_seconds - overlay.start_seconds)).toFixed(3));
+          sourceOut.value = Number(overlay.source_out_seconds).toFixed(2);
+        }
+      });
+      sourceIn.addEventListener("change", () => {
+        updateNumbers();
+        overlay.source_out_seconds = Number((overlay.source_in_seconds + Math.max(.4, overlay.end_seconds - overlay.start_seconds)).toFixed(3));
+        sourceOut.value = Number(overlay.source_out_seconds).toFixed(2);
+      });
+      sourceOut.addEventListener("change", () => {
+        updateNumbers();
+        if (isVideo) {
+          const sourceDuration = Math.max(.4, overlay.source_out_seconds - overlay.source_in_seconds);
+          overlay.end_seconds = Number(Math.min(duration, overlay.start_seconds + sourceDuration).toFixed(3));
+          endInput.value = Number(overlay.end_seconds).toFixed(2);
+          overlay.source_out_seconds = Number((overlay.source_in_seconds + overlay.end_seconds - overlay.start_seconds).toFixed(3));
+          sourceOut.value = Number(overlay.source_out_seconds).toFixed(2);
+        }
+      });
+      selector.addEventListener("change", () => {
+        overlay.asset_id = selector.value;
+        overlay.source_in_seconds = 0;
+        overlay.source_out_seconds = Number(Math.max(.4, Number(overlay.end_seconds || 0) - Number(overlay.start_seconds || 0)).toFixed(3));
+        overlay.muted = true;
+        overlay.playback_rate = 1;
+        overlay.candidate_evidence = null;
+        overlay.placement = selector.value ? recommendedHeroPlacement(assetLookup.get(selector.value)) : null;
+        rebuild();
+      });
+      fit.addEventListener("change", () => { overlay.fit = fit.value; });
+      const media = asset ? (isVideo
+        ? el("video", { src: mediaURL(projectId, asset.path), muted: "", preload: "metadata" })
+        : el("img", { src: mediaURL(projectId, asset.path), alt: asset.name || asset.id, loading: "lazy" }))
+        : el("div", { class: "visual-block-placeholder" }, "待选择重点素材");
+      let placementPanel = null;
+      if (isLandscapeProject && asset) {
+        const placementMedia = isVideo
+          ? el("video", { src: mediaURL(projectId, asset.path), muted: "", preload: "metadata" })
+          : el("img", { src: mediaURL(projectId, asset.path), alt: `${asset.name || asset.id} 主角窗预览`, loading: "lazy" });
+        const previewHero = el("div", {
+          class: "visual-hero-placement-window",
+          style: `left:${placementMetrics.left * 100}%;top:${placementMetrics.top * 100}%;width:${placementMetrics.widthRatio * 100}%;height:${placementMetrics.heightRatio * 100}%`,
+        }, placementMedia);
+        const preview = el("div", { class: "visual-hero-placement-preview", style: `aspect-ratio:${profile.width} / ${profile.height}` },
+          el("div", { class: "visual-hero-title-safe" }, "标题安全区"),
+          el("div", { class: "visual-hero-caption-safe" }, "字幕安全区"),
+          previewHero,
+        );
+        const controls = el("div", { class: "visual-hero-placement-controls" });
+        const addPlacementSlider = (label, key, min, max, step) => {
+          const input = el("input", {
+            type: "range", min: String(min), max: String(max), step: String(step),
+            value: String(effectivePlacement[key]), disabled: locked ? "" : null,
+          });
+          input.addEventListener("change", () => {
+            overlay.placement = {
+              ...effectivePlacement,
+              preset_id: "source_hero_custom",
+              [key]: Number(input.value),
+            };
+            rebuild();
+          });
+          controls.append(el("label", {}, el("span", {}, label), input, el("small", {}, `${Math.round(Number(input.value) * 100)}%`)));
+        };
+        addPlacementSlider("主角左右", "position_x_ratio", .05, .95, .01);
+        addPlacementSlider("主角上下", "position_y_ratio", .05, .95, .01);
+        addPlacementSlider("主角大小", "size_ratio", .12, .92, .01);
+        controls.append(button("恢复推荐位置", "quiet small", () => {
+          overlay.placement = { ...recommendedPlacement };
+          rebuild();
+        }, locked));
+        placementPanel = el("div", { class: "visual-hero-placement-panel" },
+          preview,
+          controls,
+          el("div", { class: `visual-hero-placement-readout ${placementWarning ? "warning" : ""}` },
+            `${resolution.width}×${resolution.height} · 原始比例 ${resolution.aspect.toFixed(3)} · `,
+            `位置 ${Math.round(placementMetrics.x * 100)}% / ${Math.round(placementMetrics.y * 100)}% · `,
+            `窗口 ${Math.round(placementMetrics.widthRatio * 100)}% × ${Math.round(placementMetrics.heightRatio * 100)}%`,
+            placementWarning ? ` · ${placementWarning}` : " · 未进入标题或字幕安全区",
+          ),
+        );
+      }
+      const recommendButton = isVideo && ((asset.media_index || {}).vision_index_path || (asset.media_index || {}).coarse_index_path) ? button("按本段台词查看 V2 候选", "quiet small", async () => {
+        const query = String(((scene.narration || {}).text || scene.description || scene.title || "")).trim();
+        if (!query) return showToast("当前片段没有可用于匹配的台词或画面意图", true);
+        try {
+          mediaIndexRecommendations = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/recommendations?query=${encodeURIComponent(query)}&limit=6`);
+          const hasVisionEvidence = mediaIndexRecommendations.evidence_source === "vision_v2"
+            && (mediaIndexRecommendations.candidates || []).some((item) => Number(item.score || 0) > 0);
+          showToast(hasVisionEvidence
+            ? "已生成视觉分析 2.0 候选；请核对证据后采用到当前片段"
+            : "当前没有可采用的 V2 语义证据；系统不会用粗筛结果冒充画面理解");
+          activeView = "assets";
+          render();
+        } catch (error) { showToast(error.message || "台词匹配失败", true); }
+      }, locked) : null;
+      body.append(el("article", { class: `visual-block-card visual-layer-card ${locked ? "is-locked" : ""}` },
+        el("div", { class: "visual-block-thumb" }, media),
+        el("div", { class: "visual-block-detail" },
+          el("div", { class: "visual-block-title" }, el("strong", {}, `重点素材 ${index + 1} · ${overlay.id || "新片段"}`), status(locked ? "frozen" : "editable")),
+          selector,
+          el("div", { class: "visual-layer-time-grid" },
+            el("label", {}, "本段开始（秒）", startInput),
+            el("label", {}, "本段结束（秒）", endInput),
+            el("label", {}, "源视频入点（秒）", sourceIn),
+            el("label", {}, "源视频出点（秒）", sourceOut),
+          ),
+          fit,
+          placementPanel,
+          overlay.candidate_evidence ? el("div", { class: "visual-candidate-evidence" },
+            el("strong", {}, `视觉分析 2.0 · ${overlay.candidate_evidence.shot_id}`),
+            el("span", {}, `查询：${overlay.candidate_evidence.query || "未记录"}`),
+            el("small", {}, `索引 ${String(overlay.candidate_evidence.index_fingerprint || "").slice(0, 12)}`),
+          ) : null,
+          !isVideo && asset ? el("span", { class: "form-note" }, "图片无需设置源视频入点和出点。") : null,
+          el("div", { class: "inline-actions visual-block-actions" },
+            button(locked ? "解锁草案" : "锁定草案", locked ? "quiet small" : "small", () => { overlay.locked = !locked; rebuild(); }, !overlay.asset_id),
+            recommendButton,
+            button("删除", "danger small", () => {
+              if (locked) return showToast("请先解锁这个重点素材", true);
+              overlays.splice(index, 1);
+              rebuild();
+              rebuildActions();
+            }),
+          ),
+        ),
+      ));
+    });
+  };
+
+  const addOverlay = () => {
+    if (overlays.length >= 8) return showToast("单个场景最多配置 8 个重点素材片段", true);
+    const start = overlays.length ? Math.min(duration - .4, Number(overlays[overlays.length - 1].end_seconds || 0)) : 0;
+    const end = Math.min(duration, Math.max(start + .4, start + Math.min(2.5, duration)));
+    overlays.push({ id: "", role: "hero", asset_id: "", start_seconds: Number(start.toFixed(3)), end_seconds: Number(end.toFixed(3)), source_in_seconds: 0, source_out_seconds: Number((end - start).toFixed(3)), fit: "contain", muted: true, playback_rate: 1, placement: null, candidate_evidence: null, locked: false });
+    rebuild();
+    rebuildActions();
+  };
+  const save = () => mutate(`/scenes/${encodeURIComponent(scene.id)}/visual-composition`, {
+    method: "PUT",
+    body: {
+      version: 1,
+      expected_revision: original.revision,
+      layout_recipe: layoutRecipe,
+      overlays,
+      frame_style: frameStyle,
+    },
+  }, "画面布局已保存；请刷新本段审核预览确认最终效果");
+  rebuildActions = () => actionBar.replaceChildren(
+    layoutRecipe === "focus_card" ? button("添加重点素材", "quiet", addOverlay, overlays.length >= 8) : null,
+    button("保存画面组合", "primary", save),
+  );
+  layout.addEventListener("change", () => {
+    layoutRecipe = layout.value;
+    rebuild();
+    rebuildActions();
+  });
+  rebuild();
+  rebuildActions();
+  return el("section", { class: "visual-track visual-layer-editor" },
+    el("div", { class: "visual-track-head" },
+      el("div", {}, el("strong", {}, "画面布局与重点素材"), el("span", {}, "受约束的双层画面，不是自由剪辑轨道；预览与成片共用同一合同。")),
+      el("span", { class: "status editable" }, `v${Number(original.revision || 1)}`),
+    ),
+    el("label", { class: "control-group" }, el("span", { class: "control-label" }, "画面布局"), layout),
+    body,
+    actionBar,
+  );
+}
+
 function reviewCanvasProfile() {
   const profile = (state && state.project && state.project.render_profile) || {};
   const width = Number(profile.width || 0);
@@ -2365,6 +2777,32 @@ async function uploadAvatarFile(path, file) {
   ensureSelection();
   render();
   return state;
+}
+
+function uploadProjectAssetFile(file, values, itemIndex, itemCount) {
+  return new Promise((resolve, reject) => {
+    const params = new URLSearchParams({
+      filename: file.name,
+      name: itemCount === 1 && values.name ? values.name : file.name.replace(/\.[^.]+$/, ""),
+      license: values.license || "",
+    });
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", `/api/project/${encodedProjectId}/workbench/assets/uploads?${params.toString()}`);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.addEventListener("progress", (event) => {
+      if (!event.lengthComputable) return;
+      const percent = Math.min(100, Math.round(event.loaded / event.total * 100));
+      showToast(`正在导入第 ${itemIndex + 1}/${itemCount} 个素材：${percent}%`);
+    });
+    xhr.addEventListener("load", () => {
+      let payload = null;
+      try { payload = JSON.parse(xhr.responseText || "null"); } catch (error) { /* handled below */ }
+      if (xhr.status >= 200 && xhr.status < 300 && payload) resolve(payload);
+      else reject(new Error((payload || {}).detail || "本地素材导入失败"));
+    });
+    xhr.addEventListener("error", () => reject(new Error("本地素材导入连接中断")));
+    xhr.send(file);
+  });
 }
 
 async function loadAvatarScriptTemplatePreview(templateId) {
@@ -2571,7 +3009,7 @@ async function generateAvatarVoiceboxDrivingAudio(turnId, profileId) {
   await mutate(
     `/avatar-package/turns/${encodeURIComponent(turnId)}/driving-audio/voicebox/candidates/jobs`,
     { method: "POST", body: profileId ? { profile_id: profileId } : {} },
-    `${turnId} 正在用 Haike Video 本地配音生成候选音频；完成后可直接试听与采用`,
+    `${turnId} 正在用 OpenMontage 本地配音生成候选音频；完成后可直接试听与采用`,
   );
 }
 
@@ -2587,7 +3025,7 @@ async function refreshAvatarVoiceboxMappings() {
   await mutate(
     "/avatar-package/voicebox/mappings/refresh",
     { method: "POST", body: {} },
-    "已按 Haike Video 本地音色库重新识别同名说话人；重复同名音色会要求你手动指定",
+    "已按 OpenMontage 本地音色库重新识别同名说话人；重复同名音色会要求你手动指定",
   );
 }
 
@@ -2930,6 +3368,10 @@ async function savePresenterLayout(scene, payload, success) {
     render();
     showToast(success || "数字人版式已保存");
   } catch (error) { showToast(error.message || "数字人版式保存失败", true); }
+}
+
+async function saveStoryHeadlineLayout(payload) {
+  await mutate("/story-headline-layout", { method: "POST", body: payload }, "新闻小标题位置已保存；请刷新审核预览");
 }
 
 function updateStateWithoutReviewReload(nextState) {
@@ -3577,13 +4019,28 @@ function renderSidebar() {
   // 数字人口播项目在导入前也需要能够进入素材包页；不能等素材包
   // 已创建后才暴露入口，否则用户会被困在通用流程中。
   if (isAvatarProject()) navItems.splice(1, 0, ["avatar", "数字人素材"]);
-  const nav = el("nav", { class: "nav", "aria-label": "工作台分区" });
+  const nav = el("nav", { class: "nav project-nav", "aria-label": "当前项目工作区" });
   for (const [id, label] of navItems) {
     nav.append(el("button", { class: activeView === id ? "active" : "", type: "button", onclick: () => { activeView = id; render(); } }, label));
   }
-  return el("aside", { class: "sidebar" },
-    el("div", { class: "brand" }, el("div", { class: "brand-mark" }, "Haike Video / 海客视频工厂"), el("h1", {}, "海客视频工厂"), el("p", {}, "人审决策，而非手工剪辑")),
-    nav,
+  const globalNav = el("nav", { class: "global-nav", "aria-label": "全局工作区" },
+    el("div", { class: "global-nav-group" },
+      el("p", {}, "项目"),
+      el("a", { class: "global-nav-link", href: "/" }, "项目库"),
+    ),
+    el("div", { class: "global-nav-group" },
+      el("p", {}, "当前项目"),
+      nav,
+    ),
+    el("div", { class: "global-nav-group" },
+      el("p", {}, "通用工具"),
+      el("a", { class: "global-nav-link", href: `/audio?return=${encodeURIComponent(`/p/${projectId}`)}` }, "配音中心"),
+      el("a", { class: "global-nav-link", href: "/automation" }, "自动生产中心"),
+    ),
+  );
+  return el("aside", { class: "sidebar global-sidebar" },
+    el("a", { class: "global-brand", href: "/" }, el("span", {}, "HAIKE VIDEO / 导演台"), el("strong", {}, "海客导演台"), el("small", {}, "当前项目：", state.project.title || "未命名项目")),
+    globalNav,
     el("div", { class: "sidebar-foot" }, el("strong", {}, "当前原则"), el("br"), "按片段审核画面、字幕和配音；采用后只合成目标片段。"),
   );
 }
@@ -3594,14 +4051,12 @@ function renderTopbar() {
   const taskCenterButton = button(taskCenterButtonLabel(), "quiet", () => { taskCenterOpen = !taskCenterOpen; if (taskCenterOpen) trackTaskCenter(); render(); });
   taskCenterButton.dataset.taskCenterButton = "";
   return el("div", { class: "topbar-wrap" }, el("header", { class: "topbar" },
-    el("a", { class: "back-link", href: "/" }, "项目库"),
-    el("div", { class: "project-heading" }, el("p", { class: "eyebrow" }, "中文 AI 视频导演审核台"), el("h2", {}, project.title)),
+    el("div", { class: "project-heading" }, el("p", { class: "eyebrow" }, "项目总览 / 中文 AI 视频审核台"), el("h2", {}, project.title)),
     el("div", { class: "top-actions" },
       el("span", { class: "status editable" }, stateText),
       renderThemeToggle(),
       !state.persisted ? button("初始化并保存", "primary", () => mutate("/bootstrap", { method: "POST" }, "工作台已初始化")) : null,
       taskCenterButton,
-      el("a", { class: "button quiet", href: `/audio?return=${encodeURIComponent(`/p/${projectId}`)}` }, "通用配音中心"),
       button("AI 配置", "quiet", openAIConfig),
       button("刷新", "quiet", refresh),
       el("a", { class: "button quiet", href: `/p/${encodedProjectId}/board` }, "旧版看板"),
@@ -3992,6 +4447,115 @@ function renderScriptStudio(intake) {
   );
 }
 
+function isLocalMaterialVideo(asset) {
+  return String((asset || {}).type || "").toLowerCase() === "video"
+    && ["human_provided", "local_generated", "project_library"].includes(String((asset || {}).source_type || ""));
+}
+
+function localMaterialBatchState() {
+  return ((state || {}).automation || {}).media_index_batch || {};
+}
+
+function supportsLocalMaterialPreparation() {
+  // Static files can update before an already-running Python service is safely
+  // restarted.  Do not expose a button that its older API process cannot
+  // handle; the new backend advertises this durable queue in workbench state.
+  return Object.prototype.hasOwnProperty.call(((state || {}).automation || {}), "media_index_batch");
+}
+
+function localMaterialBatchActive(batch = localMaterialBatchState()) {
+  return ["queued", "generating"].includes(String(batch.status || ""));
+}
+
+async function uploadLocalMaterialPreparationFiles() {
+  if (localMaterialPreparationUploading || !localMaterialPreparationFiles.length) return;
+  localMaterialPreparationUploading = true;
+  render();
+  try {
+    const files = [...localMaterialPreparationFiles];
+    for (let index = 0; index < files.length; index += 1) {
+      state = await uploadProjectAssetFile(files[index], {
+        name: "",
+        license: "用户上传；发布前请确认使用权",
+      }, index, files.length);
+    }
+    localMaterialPreparationFiles = [];
+    ensureSelection();
+    showToast(`已导入并登记 ${files.length} 个本地素材；现在可以一键理解全部视频`);
+  } catch (error) {
+    showToast(error.message || "本地素材导入失败", true);
+  } finally {
+    localMaterialPreparationUploading = false;
+    render();
+  }
+}
+
+async function startLocalMaterialVisionBatch(assetIds) {
+  if (!assetIds.length || localMaterialBatchActive()) return;
+  const confirmed = window.confirm(
+    `将依次理解 ${assetIds.length} 个本地视频。系统只发送去重后的关键帧给当前 AI 视觉服务，不会上传整条视频；可能产生少量模型费用。\n\n同一时间只处理一个视频，已完成的素材不会重复提交。确认开始吗？`,
+  );
+  if (!confirmed) return;
+  try {
+    state = await api("/assets/media-index/vision-batch", {
+      method: "POST",
+      body: { asset_ids: assetIds, remote_vision_confirmed: true },
+    });
+    ensureSelection();
+    render();
+    showToast("已开始批量理解本地视频；脚本可以继续编写，不会被打断");
+  } catch (error) {
+    showToast(error.message || "批量画面理解启动失败", true);
+  }
+}
+
+function renderLocalMaterialPreparationCard() {
+  const localVideos = (state.assets || []).filter(isLocalMaterialVideo);
+  const batch = localMaterialBatchState();
+  const active = localMaterialBatchActive(batch);
+  const pending = localVideos.filter((asset) => !(asset.media_index || {}).vision_index_path);
+  const completed = localVideos.filter((asset) => Boolean((asset.media_index || {}).vision_index_path));
+  const failed = (batch.failed_assets || []).filter((item) => item && item.asset_id);
+  const fileInput = el("input", { type: "file", accept: "video/*", multiple: "", "aria-label": "选择本地视频素材" });
+  fileInput.addEventListener("change", () => {
+    localMaterialPreparationFiles = Array.from(fileInput.files || []);
+    render();
+  });
+  const selectedCount = localMaterialPreparationFiles.length;
+  const uploadLabel = localMaterialPreparationUploading
+    ? "正在导入…"
+    : selectedCount ? `导入 ${selectedCount} 个本地视频` : "选择本地视频";
+  const progress = active
+    ? `${Number((batch.progress || {}).completed || (batch.completed_asset_ids || []).length)}/${(batch.asset_ids || []).length} 已完成${batch.current_asset_id ? ` · 正在理解 ${batch.current_asset_id}` : ""}`
+    : completed.length ? `${completed.length}/${localVideos.length} 个已完成视觉理解` : localVideos.length ? `${localVideos.length} 个待理解` : "尚未导入视频";
+
+  return el("section", { class: "panel local-material-preparation-card" },
+    el("div", { class: "panel-head" }, el("div", {},
+      el("h4", {}, "本地素材准备"),
+      el("p", {}, "先导入并理解你已有的视频；这一步可与脚本整理同时进行，后续编排只使用有证据的镜头。"),
+    ), el("span", { class: `fact ${active ? "is-running" : ""}` }, progress)),
+    el("div", { class: "panel-body local-material-preparation-body" },
+      el("div", { class: "local-material-upload-row" },
+        fileInput,
+        button(uploadLabel, "quiet", uploadLocalMaterialPreparationFiles, localMaterialPreparationUploading || !selectedCount),
+      ),
+      selectedCount ? el("p", { class: "minor" }, `已选择：${localMaterialPreparationFiles.map((file) => file.name).join("、")}`) : null,
+      el("div", { class: "local-material-preparation-metrics" },
+        factBlock("本地视频", `${localVideos.length}`, "已登记到当前项目"),
+        factBlock("待理解", `${pending.length}`, "没有可复用的视觉索引"),
+        factBlock("已理解", `${completed.length}`, "后续可参与脚本和画面编排"),
+      ),
+      el("div", { class: "inline-actions" },
+        button(active ? "批量理解进行中…" : `一键理解全部本地视频${pending.length ? `（${pending.length}）` : ""}`, "primary", () => startLocalMaterialVisionBatch(pending.map((asset) => asset.id)), active || !pending.length || localMaterialPreparationUploading),
+        button("到素材库查看细节", "quiet", () => { activeView = "assets"; render(); }),
+      ),
+      active ? el("p", { class: "form-note" }, `${(batch.progress || {}).message || "正在按顺序建立镜头级视觉证据"}。单个失败不会中止其余视频；完成后可在素材库查看或重试失败项。`) : null,
+      failed.length ? el("p", { class: "minor warning" }, `有 ${failed.length} 个视频未完成理解，可在素材库查看原因并单独重试。`) : null,
+      el("p", { class: "form-note" }, "不会自动把素材放进成片，也不会覆盖已锁定片段；脚本通过后，系统才会基于这些镜头证据生成可审核的编排草案。"),
+    ),
+  );
+}
+
 function renderProjectLaunchpad() {
   const intake = state.project.intake || {};
   const action = state.persisted
@@ -3999,7 +4563,170 @@ function renderProjectLaunchpad() {
     : button("确认并保存工作台", "primary", () => mutate("/bootstrap", { method: "POST" }, "项目工作台已保存"));
   return el("section", { class: "page script-launchpad" },
     pageHeader("脚本工作台", "从一句想法，到可审核脚本", "输入标题和内容，再选择内置大模型的处理方式。", action),
-    el("div", { class: "script-launchpad-column" }, renderScriptStudio(intake)),
+    el("div", { class: "script-launchpad-column script-launchpad-flow" },
+      el("div", { class: "script-launchpad-primary" }, renderScriptStudio(intake)),
+      supportsLocalMaterialPreparation() ? el("aside", { class: "script-launchpad-materials" }, renderLocalMaterialPreparationCard()) : null,
+    ),
+  );
+}
+
+async function generateLocalMaterialOrchestration({ inputMode, direction }) {
+  try {
+    state = await api("/local-material-orchestration", {
+      method: "POST",
+      body: {
+        input_mode: inputMode,
+        direction: direction || "",
+        continuity_confirmations: localMaterialContinuityConfirmations,
+      },
+    });
+    showToast("已生成素材驱动编排草案；没有下载、生成或覆盖任何正式画面");
+  } catch (error) {
+    showToast(error.message || "素材驱动编排草案生成失败", true);
+  }
+  render();
+}
+
+async function adoptLocalMaterialOrchestration(scene, scenePlan) {
+  const draft = state.local_material_orchestration || {};
+  const composition = visualComposition(scene);
+  const timeline = scene.visual_timeline || {};
+  try {
+    state = await api(`/local-material-orchestration/scenes/${encodeURIComponent(scene.id)}/adopt`, {
+      method: "POST",
+      body: {
+        expected_orchestration_revision: draft.revision,
+        expected_composition_revision: composition.revision,
+        expected_timeline_revision: timeline.revision,
+      },
+    });
+    selectedSceneId = scene.id;
+    activeView = "review";
+    showToast(`已采用 ${scenePlan.visual_role === "local_full_bleed" ? "本地全屏动作" : "本地主角窗"}；请刷新本段审核预览确认画面`);
+  } catch (error) {
+    showToast(error.message || "采用本地素材草案失败", true);
+  }
+  render();
+}
+
+function localMaterialModeLabel(value) {
+  return ({
+    existing_script: "已有完整脚本",
+    topic_with_materials: "主题 + 本地素材",
+    materials_only: "只有本地素材",
+  })[value] || value;
+}
+
+function localMaterialRoleLabel(value) {
+  return ({
+    local_full_bleed: "本地全屏主画面",
+    local_focus_card: "本地主角窗",
+    stock_full_bleed: "下载动态背景",
+    hyperframes_full_bleed: "渲染讲解画面",
+    supporting_background: "低干扰动态背景",
+  })[value] || value;
+}
+
+function renderLocalMaterialOrchestrationPanel() {
+  const draft = state.local_material_orchestration || null;
+  let mode = (draft && draft.input_mode) || (state.scenes && state.scenes.length ? "existing_script" : "topic_with_materials");
+  const modeSelect = el("select", { "aria-label": "素材驱动编排输入模式" },
+    el("option", { value: "existing_script" }, "已有完整脚本：只做素材编排"),
+    el("option", { value: "topic_with_materials" }, "主题 + 本地素材：先建立能力地图"),
+    el("option", { value: "materials_only" }, "只有本地素材：先选内容方向"),
+  );
+  modeSelect.value = mode;
+  const direction = el("input", {
+    value: (draft && draft.direction) || "",
+    maxlength: "600",
+    placeholder: "主题模式请填本期方向；已有完整脚本可留空",
+    "aria-label": "本期方向",
+  });
+  const modeHint = el("p", { class: "form-note" });
+  const refreshHint = () => {
+    mode = modeSelect.value;
+    direction.disabled = mode === "existing_script" ? "" : null;
+    modeHint.textContent = mode === "existing_script"
+      ? "系统不会改写现有台词，只根据已完成的视觉理解生成可采用画面草案。"
+      : mode === "topic_with_materials"
+        ? "先看素材能展示什么，再把它作为后续脚本与画面的约束；画面不能当作事实来源。"
+        : "只展示素材能力地图，不会假装已经写好了脚本。确定方向后再进入完整脚本流程。";
+  };
+  modeSelect.addEventListener("change", refreshHint);
+  refreshHint();
+  const controls = el("div", { class: "local-material-controls" },
+    el("label", {}, "输入方式", modeSelect),
+    el("label", {}, "本期方向", direction),
+    button("生成编排草案", "primary", () => generateLocalMaterialOrchestration({ inputMode: modeSelect.value, direction: direction.value.trim() })),
+  );
+  const body = el("div", { class: "panel-body local-material-body" }, controls, modeHint);
+  if (!draft) {
+    body.append(el("div", { class: "local-material-empty" },
+      el("strong", {}, "先导入本地素材，再在这里统一编排"),
+      el("span", {}, "推荐顺序：导入视频 → 在素材库完成“理解画面” → 回到总览生成草案。分析可与脚本整理并行，但未采用前不会碰正式时间线。"),
+    ));
+  } else {
+    const preparation = draft.preparation || {};
+    body.append(el("div", { class: "local-material-preparation" },
+      el("span", {}, `输入：${localMaterialModeLabel(draft.input_mode)}`),
+      el("span", {}, `脚本：${preparation.script_status === "provided" ? "已提供，保持原文" : "未提供"}`),
+      el("span", {}, `素材分析：${preparation.local_material_status === "ready" ? "已就绪" : "待完成"}`),
+      el("span", {}, `方向：${preparation.direction_status === "confirmed" ? "已确认" : "待确认"}`),
+    ));
+    const capabilityCards = (draft.material_capability_map || []).map((capability) => {
+      const key = `${capability.asset_id}:${capability.shot_id}`;
+      const confirmed = localMaterialContinuityConfirmations.some((item) => `${item.asset_id}:${item.shot_id}` === key);
+      const markAtomic = button(confirmed ? "已确认完整动作" : "确认完整动作", "quiet small", () => {
+        if (!confirmed) localMaterialContinuityConfirmations.push({
+          asset_id: capability.asset_id,
+          shot_id: capability.shot_id,
+          confirmed: true,
+          source_in_seconds: capability.source_in_seconds,
+          source_out_seconds: capability.source_out_seconds,
+          continuity_group_id: `CG-${capability.asset_id}-${capability.shot_id}`,
+        });
+        generateLocalMaterialOrchestration({ inputMode: modeSelect.value, direction: direction.value.trim() });
+      }, capability.cut_policy === "atomic" || !capability.actions || !capability.actions.length);
+      return el("article", { class: "local-material-capability" },
+        el("div", {}, el("strong", {}, `${capability.asset_name} · ${capability.shot_id}`), el("span", { class: "minor" }, `${Number(capability.source_in_seconds).toFixed(2)}–${Number(capability.source_out_seconds).toFixed(2)} 秒 · ${capability.cut_policy === "atomic" ? "完整动作已确认" : "仅安全切点"}`)),
+        el("p", {}, capability.summary || "已有视觉理解证据"),
+        capability.entities && capability.entities.length ? el("span", { class: "minor" }, `主体：${capability.entities.join("、")}`) : null,
+        capability.actions && capability.actions.length ? el("span", { class: "minor" }, `动作：${capability.actions.join("、")}`) : null,
+        capability.unknowns && capability.unknowns.length ? el("span", { class: "minor warning" }, `不确定：${capability.unknowns.join("、")}`) : null,
+        el("div", { class: "inline-actions" }, markAtomic),
+      );
+    });
+    body.append(el("section", { class: "local-material-section" },
+      el("h5", {}, `素材能力地图 · ${(draft.material_capability_map || []).length} 段`),
+      capabilityCards.length ? el("div", { class: "local-material-capability-list" }, ...capabilityCards) : el("div", { class: "empty" }, "还没有可核验的本地视频镜头。请先在素材库完成视觉理解 2.0。"),
+    ));
+    const sceneCards = (draft.scene_plans || []).map((scenePlan) => {
+      const scene = (state.scenes || []).find((item) => item.id === scenePlan.scene_id);
+      const ready = scenePlan.status === "ready_for_adoption" && scene;
+      return el("article", { class: `local-material-scene-plan is-${scenePlan.status}` },
+        el("div", { class: "local-material-scene-head" },
+          el("strong", {}, scene ? `${scene.title || scene.id}` : scenePlan.scene_id),
+          status(scenePlan.status === "adopted" ? "approved" : ready ? "editable" : "needs_adjustment"),
+        ),
+        el("span", {}, `建议角色：${localMaterialRoleLabel(scenePlan.visual_role || (scenePlan.background_requirement || {}).role || "stock_full_bleed")}`),
+        scenePlan.matched_terms && scenePlan.matched_terms.length ? el("span", { class: "minor" }, `台词命中：${scenePlan.matched_terms.join("、")}`) : null,
+        scenePlan.background_requirement ? el("span", { class: "minor" }, `背景：${scenePlan.background_requirement.purpose || localMaterialRoleLabel(scenePlan.background_requirement.role)}`) : null,
+        ...(scenePlan.warnings || []).map((warning) => el("span", { class: "minor warning" }, warning)),
+        ready ? el("div", { class: "inline-actions" }, button("采用当前片段草案", "primary small", () => adoptLocalMaterialOrchestration(scene, scenePlan))) : null,
+      );
+    });
+    body.append(el("section", { class: "local-material-section" },
+      el("h5", {}, "片段编排草案"),
+      sceneCards.length ? el("div", { class: "local-material-scene-list" }, ...sceneCards) : el("div", { class: "empty" }, "确认方向后才会生成片段级计划。"),
+    ));
+    if ((draft.warnings || []).length) body.append(el("div", { class: "local-material-warnings" }, ...draft.warnings.map((warning) => el("span", {}, warning))));
+  }
+  return el("section", { class: "panel local-material-orchestration" },
+    el("div", { class: "panel-head" }, el("div", {},
+      el("h4", {}, "素材驱动编排"),
+      el("p", {}, "把本地连续动作、下载素材和渲染画面安排到同一条时间轴；草案必须逐片段采用，绝不自动覆盖成片。"),
+    ), draft ? el("span", { class: "fact" }, `草案 v${draft.revision || 1}`) : null),
+    body,
   );
 }
 
@@ -4031,6 +4758,7 @@ function renderOverview() {
   return el("section", { class: "page" },
     pageHeader("导演总览", "从脚本意图到可交付成片", "这里管理判断与交接，不提供逐帧手工剪辑。", actions),
     metrics,
+    renderLocalMaterialOrchestrationPanel(),
     renderReviewPreviewPanel(),
     renderFullPreviewPanel(),
     renderBackgroundMusicPanel(),
@@ -4375,8 +5103,43 @@ function renderReview() {
     el("div", { class: `review-layout review-layout--${layoutKind}${focusActive ? " is-focus" : ""}` },
       el("section", { class: "panel review-scene-panel" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "场景清单"), el("p", {}, "按脚本顺序审核"))), list),
       renderFrameStage(scene, focusActive),
-      el("div", { class: "review-side" }, renderNarrationReview(scene), renderSubtitleEditor(scene), renderReviewControls(scene)),
+      renderReviewEditor(scene),
     ),
+  );
+}
+
+const REVIEW_EDITOR_TABS = Object.freeze([
+  ["layout", "画面"],
+  ["assets", "素材"],
+  ["subtitles", "字幕"],
+  ["narration", "配音"],
+  ["avatar", "数字人"],
+  ["checks", "检查"],
+]);
+
+function renderReviewEditor(scene) {
+  const tabs = el("div", { class: "review-editor-tabs", role: "tablist", "aria-label": "当前片段编辑区" });
+  for (const [id, label] of REVIEW_EDITOR_TABS) {
+    const selected = reviewEditorTab === id;
+    tabs.append(el("button", {
+      type: "button",
+      role: "tab",
+      class: `review-editor-tab ${selected ? "active" : ""}`,
+      "aria-selected": selected ? "true" : "false",
+      onclick: () => { reviewEditorTab = id; render(); },
+    }, label));
+  }
+  let content = null;
+  if (reviewEditorTab === "subtitles") content = renderSubtitleEditor(scene);
+  else if (reviewEditorTab === "narration") content = renderNarrationReview(scene);
+  else content = renderReviewControls(scene, reviewEditorTab);
+  return el("aside", { class: "review-side review-editor" },
+    el("section", { class: "review-editor-shell" },
+      el("p", { class: "eyebrow" }, "当前片段编辑"),
+      tabs,
+      el("p", { class: "review-editor-note" }, "切换标签只改变编辑视图；不会自动保存、生成或修改本段时间线。"),
+    ),
+    content,
   );
 }
 
@@ -4643,7 +5406,7 @@ function renderVisualBatchPanel(scene) {
               copyInput("supporting_statement", "补充判断或证据", "补充说明"),
               el("label", { class: "visual-copy-field" }, el("small", {}, "画面要点（用｜分隔）"), nodeInput),
             ),
-            el("small", {}, "以上是生成前可审核的画面文案。动态图形只生成主体画面；数字人与模块化字幕仍由 Haike Video 叠加。"),
+            el("small", {}, "以上是生成前可审核的画面文案。动态图形只生成主体画面；数字人与模块化字幕仍由 OpenMontage 叠加。"),
           );
           else details.push(el("small", {}, "OpenAI 生图会在开始执行前再次提示费用；图片会转成该槽位长度的视频，便于无缝合成。"));
           return el("label", { class: "visual-query-plan" },
@@ -4745,7 +5508,7 @@ function renderReviewFocusToolbar(scene) {
 }
 
 function renderFrameStage(scene, focusActive = false) {
-  const preview = reviewPreview(scene);
+  const preview = reviewPlaybackSource(scene);
   const presenter = presenterFor(scene);
   const timing = scene.timing || {};
   const fit = scene.visual_fit || null;
@@ -4775,26 +5538,31 @@ function renderFrameStage(scene, focusActive = false) {
   const seek = (relative, play = false) => {
     updateTime(relative);
     if (video) {
-      video.currentTime = Math.min(Math.max(0, Number(relative || 0)), Math.max(0, video.duration - .03));
+      const target = Number(preview.offset_seconds || 0) + Number(relative || 0);
+      video.currentTime = Math.min(Math.max(0, target), Math.max(0, video.duration - .03));
       if (play) video.play().catch(() => {});
     }
   };
   reviewCaptionControllers.set(scene.id, { refresh: refreshCaption, seek });
   if (preview.status === "ready" && preview.output_path) {
-    video = el("video", { src: mediaURL(projectId, preview.output_path), controls: "", preload: "metadata", playsinline: "" });
+    video = el("video", { src: mediaURL(projectId, preview.output_path), controls: "", preload: "metadata", playsinline: "", "data-review-playback-source": preview.kind });
     video.addEventListener("loadedmetadata", () => seek(current));
     video.addEventListener("timeupdate", () => {
-      if (video.currentTime >= duration - .03) { video.currentTime = 0; updateTime(0); }
-      else updateTime(video.currentTime);
+      const relative = video.currentTime - Number(preview.offset_seconds || 0);
+      if (relative >= duration - .03) {
+        video.pause();
+        video.currentTime = Math.max(0, Number(preview.offset_seconds || 0));
+        updateTime(0);
+      } else if (relative >= 0) updateTime(relative);
     });
-    video.addEventListener("ended", () => { video.currentTime = 0; updateTime(0); });
+    video.addEventListener("ended", () => { video.currentTime = Math.max(0, Number(preview.offset_seconds || 0)); updateTime(0); });
     stage.append(video, caption);
   } else {
-    const reason = preview.status === "failed" ? (preview.error || "本段审核预览生成失败") : preview.status === "stale" ? (preview.stale_reason || "画面已变化，需要刷新预览") : "请先生成本段审核预览";
+    const reason = preview.status === "failed" ? (preview.error || "本段审核预览生成失败") : preview.status === "stale" ? (preview.stale_reason || "画面已变化，需要刷新预览") : "暂无已完成的全片或本段审核预览";
     stage.append(el("div", { class: "frame-placeholder" }, el("strong", {}, preview.status === "stale" ? "审核预览已过期" : "尚未生成可播放的审核片段"), el("br"), reason));
   }
-  player.append(stage, el("div", { class: "frame-overlay" }, status(scene.review_status), el("span", { class: "status editable" }, preview.resolution || "按项目画幅预览"), isAvatarProject() ? el("span", { class: "status editable" }, `数字人：${presenterTreatmentLabel(presenter.treatment)}`) : null));
-  const refreshLabel = preview.status === "ready" ? "刷新审核预览" : preview.status === "stale" ? "刷新已变更预览" : "生成本段审核预览";
+  player.append(stage, el("div", { class: "frame-overlay" }, status(scene.review_status), el("span", { class: "status editable" }, preview.resolution || "按项目画幅预览"), preview.kind === "full_preview" ? el("span", { class: "status editable" }, "复用全片预览") : null, isAvatarProject() ? el("span", { class: "status editable" }, `数字人：${presenterTreatmentLabel(presenter.treatment)}`) : null));
+  const refreshLabel = preview.kind === "scene" ? "刷新审核预览" : preview.status === "stale" ? "刷新已变更预览" : preview.kind === "full_preview" ? "生成独立片段预览" : "生成本段审核预览";
   const actions = el("div", { class: "review-player-actions" },
     button(refreshLabel, "primary", () => mutate(`/scenes/${encodeURIComponent(scene.id)}/review-preview`, { method: "POST" }, "本段可播放审核预览已生成")),
     preview.status === "ready" ? button("从当前时刻播放", "quiet", () => seek(Number(scrub.value), true)) : null,
@@ -4845,7 +5613,7 @@ function renderFrameStage(scene, focusActive = false) {
   for (const anchor of genericAnchors) keyframeSummary.append(el("div", { class: "keyframe-chip" }, button(anchorLabels[anchor.kind] || anchor.label, "small", () => seek(sceneRelativeTime(scene, anchor.time_seconds), true)), status(anchor.status), button("通过", "quiet small", () => updateAnchor(scene, anchor, "approved")), button("调整", "quiet small", () => updateAnchor(scene, anchor, "needs_adjustment"))));
   return el("section", { class: `frame-stage${focusActive ? " is-focus" : ""}` },
     focusActive ? renderReviewFocusToolbar(scene) : null,
-    el("div", { class: "panel light-review-panel" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, sceneName(scene)), el("p", {}, `${clock(scene.start_seconds)} — ${clock(scene.end_seconds)} · 以实际片段播放为主，锚点仅用于快速定位`))), el("div", { class: "panel-body" }, player, actions, scrub, anchors, el("div", { class: "frame-caption" }, scene.description || "请补充此场景的表达目标。"), isAvatarProject() ? el("div", { class: "report" }, `数字人版式：${presenterTreatmentLabel(presenter.treatment)}。审核预览使用本段原声，不拉伸语速或嘴型。`) : null, timing.voice_duration_seconds ? el("div", { class: "minor" }, `自然配音 ${Number(timing.voice_duration_seconds).toFixed(2)} 秒 · 当前片段 ${fmtDuration(duration)}`) : null, fit ? el("div", { class: `report ${fit.strategy === "needs_replacement" ? "bad" : ""}` }, `画面时长策略：${fit.strategy === "trim" ? "裁切现有素材" : fit.strategy === "brief_hold" ? "补足极短尾帧" : fit.strategy === "generated_motion" ? "图片动态片段" : "需要更换更长素材"}${fit.source_duration_seconds ? ` · 素材 ${Number(fit.source_duration_seconds).toFixed(2)} 秒` : ""}`) : null)),
+    el("div", { class: "panel light-review-panel" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, sceneName(scene)), el("p", {}, `${clock(scene.start_seconds)} — ${clock(scene.end_seconds)} · 以实际片段播放为主，锚点仅用于快速定位`))), el("div", { class: "panel-body" }, player, actions, scrub, anchors, preview.kind === "full_preview" ? el("div", { class: "review-preview-reuse-note" }, "正在复用已完成的全片审核预览，并已定位到本段起点；不会额外生成媒体。") : null, el("div", { class: "frame-caption" }, scene.description || "请补充此场景的表达目标。"), isAvatarProject() ? el("div", { class: "report" }, `数字人版式：${presenterTreatmentLabel(presenter.treatment)}。审核预览使用本段原声，不拉伸语速或嘴型。`) : null, timing.voice_duration_seconds ? el("div", { class: "minor" }, `自然配音 ${Number(timing.voice_duration_seconds).toFixed(2)} 秒 · 当前片段 ${fmtDuration(duration)}`) : null, fit ? el("div", { class: `report ${fit.strategy === "needs_replacement" ? "bad" : ""}` }, `画面时长策略：${fit.strategy === "trim" ? "裁切现有素材" : fit.strategy === "brief_hold" ? "补足极短尾帧" : fit.strategy === "generated_motion" ? "图片动态片段" : "需要更换更长素材"}${fit.source_duration_seconds ? ` · 素材 ${Number(fit.source_duration_seconds).toFixed(2)} 秒` : ""}`) : null)),
     el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "审核锚点"), el("p", {}, "关键帧保留为判断依据；点击即可回到对应时刻，不再挤占播放画面。"))), el("div", { class: "panel-body" }, keyframeSummary.children.length ? keyframeSummary : el("div", { class: "empty" }, "还没有关键帧锚点。先生成审核预览，再按需要生成或刷新关键帧。"))),
     renderSurgicalDirectivePanel(scene, () => Number(scrub.value), seek),
   );
@@ -5011,6 +5779,100 @@ function renderPresenterLayoutEditor(scene) {
   );
 }
 
+function storyHeadlineReuseGroups() {
+  const groups = new Map();
+  for (const scene of state.scenes || []) {
+    const storyId = String(scene.story_id || "").trim();
+    const headline = scene.headline_overlay && typeof scene.headline_overlay === "object" ? scene.headline_overlay : null;
+    if (!storyId || !headline) continue;
+    if (!groups.has(storyId)) groups.set(storyId, { story_id: storyId, headline, scenes: [] });
+    const group = groups.get(storyId);
+    if (!String(group.headline.line_1 || "").trim() && String(headline.line_1 || "").trim()) group.headline = headline;
+    group.scenes.push(scene);
+  }
+  return [...groups.values()].sort((a, b) => {
+    const aOrder = Math.min(...a.scenes.map((scene) => Number(scene.order || 0)));
+    const bOrder = Math.min(...b.scenes.map((scene) => Number(scene.order || 0)));
+    return aOrder - bOrder;
+  });
+}
+
+function renderStoryHeadlineText(headline, className = "") {
+  const line1 = String((headline || {}).line_1 || "").trim();
+  const line2 = String((headline || {}).line_2 || "").trim();
+  if (!line1 && !line2) return el("span", { class: `story-headline-empty ${className}`.trim() }, "未设置小标题文案");
+  return el("span", { class: `story-headline-copy ${className}`.trim() },
+    line1 ? el("span", { class: "story-headline-line-1" }, line1) : null,
+    line2 ? el("span", { class: "story-headline-line-2" }, line2) : null,
+  );
+}
+
+function renderStoryHeadlineReuseScope(scene) {
+  const activeStoryId = String((scene || {}).story_id || "").trim();
+  const groups = storyHeadlineReuseGroups();
+  if (!groups.length) return el("p", { class: "story-headline-scope-empty" }, "本项目还没有可核对的小标题复用关系。");
+  return el("div", { class: "story-headline-scope" },
+    el("div", { class: "story-headline-scope-head" },
+      el("strong", {}, "标题复用范围"),
+      el("span", {}, `${groups.length} 条新闻 · ${groups.reduce((total, group) => total + group.scenes.length, 0)} 个片段`),
+    ),
+    el("div", { class: "story-headline-scope-list" },
+      ...groups.map((group) => el("article", { class: `story-headline-scope-item ${group.story_id === activeStoryId ? "current" : ""}`.trim() },
+        el("div", { class: "story-headline-scope-title" },
+          el("span", { class: "story-headline-story-id" }, group.story_id),
+          renderStoryHeadlineText(group.headline, "compact"),
+          el("span", { class: "story-headline-scene-count" }, `${group.scenes.length} 个片段`),
+        ),
+        el("div", { class: "story-headline-scene-list" },
+          el("span", { class: "story-headline-scene-label" }, "应用片段"),
+          ...group.scenes.map((item) => el("span", {
+            class: `story-headline-scene-chip ${item.id === (scene || {}).id ? "selected" : ""}`.trim(),
+            title: item.description || item.title || item.id,
+          }, `${String(item.order || 0).padStart(2, "0")} · ${item.title || item.id}`)),
+        ),
+      )),
+    ),
+  );
+}
+
+function renderStoryHeadlineLayoutEditor(scene) {
+  const layout = storyHeadlineLayout();
+  const x = el("input", { type: "range", min: "0", max: ".76", step: ".01", value: String(layout.x ?? .36), "aria-label": "小标题左右位置" });
+  const y = el("input", { type: "range", min: "0", max: ".76", step: ".01", value: String(layout.y ?? .09), "aria-label": "小标题上下位置" });
+  const width = el("input", { type: "range", min: ".24", max: ".92", step: ".01", value: String(layout.width ?? .58), "aria-label": "小标题区域宽度" });
+  const height = el("input", { type: "range", min: ".07", max: ".24", step: ".005", value: String(layout.height ?? .125), "aria-label": "小标题区域高度" });
+  const readout = el("span", { class: "form-note" });
+  const preview = el("div", { class: "story-headline-layout-preview" }, renderStoryHeadlineText((scene || {}).headline_overlay));
+  const previewBox = el("div", { class: `presenter-layout-preview-box ${(state.project.intake || {}).aspect === "landscape" ? "landscape" : "portrait"}` }, preview, el("div", { class: "presenter-layout-caption-safe" }, "字幕安全区"));
+  function draft() {
+    const w = Number(width.value);
+    const h = Number(height.value);
+    return { x: Math.min(1 - w, Number(x.value)), y: Math.min(1 - h, Number(y.value)), width: w, height: h };
+  }
+  function repaint() {
+    const value = draft();
+    x.max = String(Math.max(0, 1 - value.width));
+    y.max = String(Math.max(0, 1 - value.height));
+    preview.style.left = `${value.x * 100}%`;
+    preview.style.top = `${value.y * 100}%`;
+    preview.style.width = `${value.width * 100}%`;
+    preview.style.height = `${value.height * 100}%`;
+    readout.textContent = `位置 ${Math.round(value.x * 100)}% / ${Math.round(value.y * 100)}% · 区域 ${Math.round(value.width * 100)}% × ${Math.round(value.height * 100)}%`;
+  }
+  [x, y, width, height].forEach((input) => input.addEventListener("input", repaint));
+  repaint();
+  return el("div", { class: "presenter-layout-editor story-headline-layout-editor" },
+    el("strong", {}, "新闻小标题位置"),
+    el("p", { class: "form-note" }, `当前正在核对 ${(scene || {}).story_id || "未分组新闻"} · ${(scene || {}).title || "未命名片段"}。位置是项目级配置，保存后会应用到本期所有新闻小标题。`),
+    previewBox,
+    el("div", { class: "presenter-layout-sliders" }, el("label", {}, "左右", x), el("label", {}, "上下", y), el("label", {}, "宽度", width)),
+    el("div", { class: "presenter-layout-sliders" }, el("label", {}, "高度", height)),
+    readout,
+    renderStoryHeadlineReuseScope(scene),
+    button("保存并应用全部小标题", "quiet small", () => saveStoryHeadlineLayout(draft())),
+  );
+}
+
 function renderSubtitleEditor(scene) {
   const draft = subtitleDraftFor(scene);
   let style = draft.style;
@@ -5148,10 +6010,20 @@ function renderSubtitleEditor(scene) {
   );
 }
 
-function renderReviewControls(scene) {
+function renderReviewControls(scene, editorScope = "layout") {
   const presenter = presenterFor(scene);
   const avatarReady = isAvatarProject() && avatarTimelineApplied();
   const mainVisualNeeded = !isAvatarProject() || presenter.treatment !== "fullscreen";
+  const showLayout = editorScope === "layout";
+  const showAssets = editorScope === "assets";
+  const showAvatar = editorScope === "avatar";
+  const showChecks = editorScope === "checks";
+  const panelTitle = {
+    layout: ["画面布局", "数字人、小标题和主体画面分别按当前片段编辑。"],
+    assets: ["素材与重点画面", "选择来源、时间区间和重点素材；所有修改都留在当前片段。"],
+    avatar: ["数字人与小标题", "数字人原片、出镜方式与标题位置各自独立保存。"],
+    checks: ["审核与检查", "确认关键帧、记录批注，再决定是否通过本段。"],
+  }[editorScope] || ["片段编辑", "当前片段的可审核设置。"];
   const sources = ["human_provided", "web_download", "project_library", "ai_generated"];
   const choices = el("div", { class: "choice-grid" });
   for (const source of sources) choices.append(el("button", { class: `choice ${scene.source_strategy === source ? "selected" : ""}`, type: "button", onclick: () => mutate(`/scenes/${encodeURIComponent(scene.id)}`, { method: "PATCH", body: { source_strategy: source } }, "已记录素材来源策略") }, sourceLabels[source]));
@@ -5249,9 +6121,9 @@ function renderReviewControls(scene) {
       }),
     ));
   }
-  const panel = el("section", { class: "panel" },
-    el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "导演指令"), el("p", {}, "只描述目标与判断，不手调帧。"))),
-    isAvatarProject() ? el("div", { class: "panel-body control-group" },
+  const panel = el("section", { class: "panel review-director-panel", "data-review-editor-scope": editorScope },
+    el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, panelTitle[0]), el("p", {}, panelTitle[1]))),
+    (showLayout || showAvatar) && isAvatarProject() ? el("div", { class: "panel-body control-group" },
       el("span", { class: "control-label" }, "数字人出镜方式"),
       el("div", { class: "choice-grid" },
         ...[["fullscreen", "全屏主体"], ["pip_top_left", "左上角解说员"], ["custom", "自定义画中画"], ["hidden", "暂时隐藏"]].map(([treatment, label]) => el("button", { class: `choice ${presenter.treatment === treatment ? "selected" : ""}`, type: "button", disabled: avatarReady ? null : "", onclick: () => mutate(`/scenes/${encodeURIComponent(scene.id)}`, { method: "PATCH", body: { presenter_treatment: treatment } }, `已切换为${label}`) }, label)),
@@ -5260,7 +6132,9 @@ function renderReviewControls(scene) {
       avatarReady ? button(`替换 ${presenter.turn_id || "本段"} 数字人原片`, "quiet", () => { activeView = "avatar"; render(); }) : null,
       avatarReady && ["pip_top_left", "custom"].includes(presenter.treatment) ? renderPresenterLayoutEditor(scene) : null,
     ) : null,
-    mainVisualNeeded ? el("div", { class: "panel-body control-group" },
+    (showLayout || showAvatar) && !isAvatarProject() ? el("div", { class: "panel-body review-editor-empty" }, "这是无数字人项目；该片段没有数字人原片或出镜版式可编辑。") : null,
+    (showLayout || showAvatar) && scene.headline_overlay && Object.keys(scene.headline_overlay).length ? el("div", { class: "panel-body control-group" }, renderStoryHeadlineLayoutEditor(scene)) : null,
+    (showLayout || showAssets) && mainVisualNeeded ? el("div", { class: "panel-body control-group" },
       el("span", { class: "control-label" }, "这个场景的主体画面来自哪里？"),
       choices,
       scene.source_strategy === "ai_generated"
@@ -5273,17 +6147,18 @@ function renderReviewControls(scene) {
               ? el("div", { class: "source-branch-note" }, el("strong", {}, "项目素材库模式"), el("span", {}, "请在下方画面时间线中选择项目素材库中已登记的素材。"))
               : null,
       renderVisualTimelineEditor(scene),
+      renderVisualCompositionEditor(scene),
       generationPanel,
-    ) : el("div", { class: "panel-body keyframe-gate" }, el("strong", {}, "数字人全屏主体"), el("span", {}, "此场景直接使用已锁定的数字人母版和原声音频，不需要再选网络或 AI 主体素材。"), generationPanel),
-    keyframesRequired && keyframeReview
+    ) : (showLayout || showAssets) ? el("div", { class: "panel-body keyframe-gate" }, el("strong", {}, "数字人全屏主体"), el("span", {}, "此场景直接使用已锁定的数字人母版和原声音频，不需要再选网络或 AI 主体素材。"), generationPanel) : null,
+    showChecks && keyframesRequired && keyframeReview
       ? el("div", { class: "panel-body keyframe-gate" }, el("strong", {}, keyframeApprovalReady ? "关键帧审核已通过" : "请先逐帧审核"), el("span", {}, keyframeApprovalReady ? "通过后，首帧和高潮帧图片已生成 U-xxx 使用编号。" : "在中间画面逐张检查图片、字幕和画面调整说明，全部通过后才能通过场景。"))
       : null,
-    el("div", { class: "panel-body control-group" }, el("span", { class: "control-label" }, "审核批注 / 生成教案"), note, el("div", { class: "inline-actions" },
+    showChecks ? el("div", { class: "panel-body control-group" }, el("span", { class: "control-label" }, "审核批注 / 生成教案"), note, el("div", { class: "inline-actions" },
       button("记录批注", "", () => { if (!note.value.trim()) return showToast("请先填写批注", true); mutate("/annotations", { method: "POST", body: { scene_id: scene.id, anchor_kind: "climax_frame", text: note.value } }, "批注已写入决策记录"); }),
       button(keyframeApprovalReady || !keyframesRequired ? "场景通过" : "先通过关键帧", "primary", () => mutate(`/scenes/${encodeURIComponent(scene.id)}`, { method: "PATCH", body: { review_status: "approved" } }, "场景已标记为通过"), keyframesRequired && !keyframeApprovalReady),
       button("标记需要调整", "danger", () => mutate(`/scenes/${encodeURIComponent(scene.id)}`, { method: "PATCH", body: { review_status: "needs_adjustment" } }, "已标记为需要调整；如需换画面，请点击上方“一键换当前场景素材”")),
-    )),
-    scene.notes && scene.notes.length ? el("div", { class: "panel-body" }, el("span", { class: "control-label" }, "最近批注"), el("div", { class: "activity" }, scene.notes.slice(-3).reverse().map((item) => el("div", { class: "activity-item" }, el("time", {}, (item.at || "").slice(11, 16)), el("span", {}, item.text))))) : null,
+    )) : null,
+    showChecks && scene.notes && scene.notes.length ? el("div", { class: "panel-body" }, el("span", { class: "control-label" }, "最近批注"), el("div", { class: "activity" }, scene.notes.slice(-3).reverse().map((item) => el("div", { class: "activity-item" }, el("time", {}, (item.at || "").slice(11, 16)), el("span", {}, item.text))))) : null,
   );
   return panel;
 }
@@ -5397,7 +6272,7 @@ function renderNarrationReview(scene) {
         button(generating ? "正在生成候选配音…" : "生成候选配音", "primary", () => startSceneNarrationCandidate(scene, text.value, profile.value), generating || !voiceReady),
         button("管理通用音色", "quiet", openAudioCenter),
       ),
-      !voiceReady ? el("div", { class: "report bad" }, "Haike Video 本地配音当前不可用。请完成安装并在通用配音中心确认音色。") : null,
+      !voiceReady ? el("div", { class: "report bad" }, "OpenMontage 本地配音当前不可用。请完成安装并在通用配音中心确认音色。") : null,
       generating ? el("div", { class: "narration-job is-running" }, status("generating"), el("span", {}, `正在生成 ${job.version_id || "候选版本"}，页面完成后会自动刷新；不会覆盖当前成片。`)) : null,
       job.status === "failed" ? el("div", { class: "report bad" }, job.error || "候选配音生成失败，请检查本地配音服务后重试。") : null,
     ),
@@ -5511,6 +6386,113 @@ async function restoreAssetFromRecycleBin(assetId) {
   render();
 }
 
+async function startAssetMediaCoarseIndex(asset, transcribe = false) {
+  try {
+    state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/jobs`, {
+      method: "POST",
+      body: { stage: "coarse", transcribe },
+    });
+    showToast(transcribe ? "素材粗筛与本地语音识别已开始；长视频会在后台持续处理" : "素材粗筛已开始；只运行本地镜头检测与代表帧提取");
+  } catch (error) {
+    showToast(error.message || "素材粗筛启动失败", true);
+  }
+  render();
+}
+
+async function startAssetMediaFineIndex(asset) {
+  const duration = Number((asset.media_index || {}).duration_seconds || asset.duration_seconds || 0);
+  const startRaw = window.prompt("输入精筛开始时间（秒）", "0");
+  if (startRaw === null) return;
+  const start = Number(startRaw);
+  const endRaw = window.prompt("输入精筛结束时间（秒）", String(Math.min(duration || 30, start + 30)));
+  if (endRaw === null) return;
+  const end = Number(endRaw);
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < .4) return showToast("精筛区间无效，结束时间至少比开始时间晚 0.4 秒", true);
+  const transcribe = window.confirm("是否同时使用本机已安装的 faster-whisper 识别这个候选区间？\n\n不会下载模型，也不会调用付费服务；选择“取消”仍会完成密集关键帧精筛。");
+  try {
+    state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/jobs`, {
+      method: "POST",
+      body: { stage: "fine", start_seconds: start, end_seconds: end, transcribe },
+    });
+    showToast("候选区间精筛已开始");
+  } catch (error) {
+    showToast(error.message || "素材精筛启动失败", true);
+  }
+  render();
+}
+
+async function startAssetVisionUnderstanding(asset) {
+  const confirmed = window.confirm(
+    "画面理解会先在本机完成镜头切分、抽帧和去重，然后把选中的关键帧发送给当前 AI 配置中的视觉模型。\n\n不会上传整条视频；可能产生少量模型费用。确认开始吗？"
+  );
+  if (!confirmed) return;
+  try {
+    mediaVisionDetails = null;
+    state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/jobs`, {
+      method: "POST",
+      body: { stage: "vision", remote_vision_confirmed: true },
+    });
+    showToast("画面理解已开始：本地切镜头和去重后，将先验证视觉能力再识别关键帧");
+  } catch (error) {
+    showToast(error.message || "画面理解启动失败", true);
+  }
+  render();
+}
+
+async function loadAssetVisionDetails(asset) {
+  try {
+    mediaVisionDetails = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/vision?limit=80`);
+    showToast(`已加载 ${mediaVisionDetails.shot_count || 0} 个镜头的画面描述`);
+  } catch (error) {
+    showToast(error.message || "画面描述读取失败", true);
+  }
+  render();
+}
+
+async function requestAssetMediaRecommendations(asset) {
+  const query = window.prompt("输入需要匹配的台词或画面意图", "");
+  if (!query || !query.trim()) return;
+  try {
+    mediaIndexRecommendations = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/recommendations?query=${encodeURIComponent(query.trim())}&limit=6`);
+    showToast(mediaIndexRecommendations.evidence_source === "vision_v2"
+      && (mediaIndexRecommendations.candidates || []).some((item) => Number(item.score || 0) > 0)
+      ? "已按视觉分析 2.0 的镜头证据生成候选"
+      : "当前只有镜头证据，没有足够文本证据；系统没有伪造语义匹配");
+  } catch (error) {
+    showToast(error.message || "素材推荐失败", true);
+  }
+  render();
+}
+
+async function adoptVisionCandidateToSelectedScene(candidate) {
+  const scene = selectedScene();
+  if (!scene) return showToast("请先在片段工作台选择要采用素材的片段", true);
+  if (!mediaIndexRecommendations || mediaIndexRecommendations.evidence_source !== "vision_v2") {
+    return showToast("只有视觉分析 2.0 的可核验证据可以一键采用", true);
+  }
+  if (Number(candidate.score || 0) <= 0 || candidate.evidence_kind !== "vision") {
+    return showToast("该镜头没有命中当前查询，只能浏览，不能自动采用", true);
+  }
+  try {
+    const composition = visualComposition(scene);
+    state = await api(`/assets/${encodeURIComponent(mediaIndexRecommendations.asset_id)}/media-index/recommendations/${encodeURIComponent(candidate.segment_id)}/adopt`, {
+      method: "POST",
+      body: {
+        scene_id: scene.id,
+        query: mediaIndexRecommendations.query,
+        expected_revision: composition.revision,
+      },
+    });
+    selectedSceneId = scene.id;
+    activeView = "review";
+    mediaIndexRecommendations = null;
+    showToast(`已将 ${candidate.segment_id} 采用到当前片段草案；请调整主角窗并刷新本段审核预览`);
+  } catch (error) {
+    showToast(error.message || "采用视觉候选失败", true);
+  }
+  render();
+}
+
 function renderAssets() {
   const audit = assetLibraryAudit;
   const summary = (audit && audit.summary) || {};
@@ -5549,6 +6531,22 @@ function renderAssets() {
     const refs = row.references && row.references.length
       ? row.references.slice(0, 3).map((reference) => el("span", { class: "usage-chip", title: reference.kind }, reference.label))
       : el("span", { class: "minor" }, row.history_usage_count ? `历史使用 ${row.history_usage_count} 次，当前未引用` : "当前未引用");
+    const indexState = asset.media_index || {};
+    const currentIndexJob = ((state.automation || {}).media_index || {});
+    const indexRunning = currentIndexJob.asset_id === asset.id && ["queued", "generating"].includes(currentIndexJob.status);
+    const videoActions = String(asset.type || "").toLowerCase() === "video" && row.status !== "trashed" ? el("div", { class: "asset-media-index-actions" },
+      button(indexRunning ? "分析中…" : indexState.coarse_index_path ? "重建粗筛" : "粗筛素材", "quiet small", () => startAssetMediaCoarseIndex(asset, false), indexRunning),
+      indexState.coarse_index_path && (indexState.transcript_status || {}).status !== "available"
+        ? button("补本地语音语义", "quiet small", () => startAssetMediaCoarseIndex(asset, true), indexRunning)
+        : null,
+      indexState.coarse_index_path ? button("精筛区间", "quiet small", () => startAssetMediaFineIndex(asset), indexRunning) : null,
+      indexState.coarse_index_path ? button("按台词找候选", "quiet small", () => requestAssetMediaRecommendations(asset), indexRunning) : null,
+      button(indexState.vision_index_path ? "重新理解画面" : "理解画面（Luna）", "quiet small", () => startAssetVisionUnderstanding(asset), indexRunning),
+      indexState.vision_index_path ? button("查看画面描述", "quiet small", () => loadAssetVisionDetails(asset), indexRunning) : null,
+      indexRunning ? el("span", { class: "minor" }, `${(currentIndexJob.progress || {}).message || (currentIndexJob.stage === "fine" ? "精筛正在运行" : currentIndexJob.stage === "vision" ? "画面理解正在运行" : "粗筛正在运行")}；同一媒体运行资源不会并发。`) : null,
+      indexState.status === "completed" ? el("span", { class: "minor" }, `已完成${indexState.stage === "fine" ? "精筛" : indexState.stage === "vision" ? "画面理解" : "粗筛"}${indexState.vision_shot_count ? ` · ${indexState.vision_shot_count} 个镜头 / ${indexState.vision_frame_count || 0} 张送模帧` : indexState.segment_count ? ` · ${indexState.segment_count} 个粗筛窗口` : ""}`) : null,
+      indexState.status === "failed" ? el("span", { class: "minor warning" }, indexState.error || "素材分析失败") : null,
+    ) : null;
     body.append(el("tr", { class: `asset-audit-row is-${row.status}` },
       el("td", { class: "asset-select-cell" }, checkbox),
       el("td", {}, el("span", { class: "asset-code" }, row.id), el("span", { class: "asset-name" }, row.name), row.duplicate_count > 1 ? el("span", { class: "asset-duplicate" }, `重复文件组 · ${row.duplicate_count} 项`) : null),
@@ -5556,7 +6554,7 @@ function renderAssets() {
       el("td", {}, el("span", { class: `asset-audit-status ${row.status}` }, assetAuditLabels[row.status] || row.status), el("div", { class: "minor" }, row.cleanup_reason)),
       el("td", { class: "asset-reference-cell" }, refs),
       el("td", {}, el("div", { class: "minor" }, formatAssetBytes(row.size_bytes)), row.path ? el("div", { class: "minor path" }, row.path) : null, row.missing_paths && row.missing_paths.length ? el("div", { class: "minor warning" }, `缺失：${row.missing_paths.join("、")}`) : null),
-      el("td", {}, row.status === "trashed" ? button("恢复", "quiet small", () => restoreAssetFromRecycleBin(row.id)) : null),
+      el("td", {}, row.status === "trashed" ? button("恢复", "quiet small", () => restoreAssetFromRecycleBin(row.id)) : videoActions),
     ));
   }
   const table = el("table", { class: "asset-table asset-audit-table" }, el("thead", {}, el("tr", {}, el("th", {}, "选择"), el("th", {}, "稳定素材"), el("th", {}, "类型与来源"), el("th", {}, "健康状态"), el("th", {}, "当前引用"), el("th", {}, "空间与路径"), el("th", {}, "操作"))), body);
@@ -5566,6 +6564,61 @@ function renderAssets() {
     factBlock("重复文件", `${summary.duplicate_group_count || 0} 组`, "只提示，不会自动删除"),
     factBlock("需处理", `${(summary.missing_count || 0) + (summary.record_only_count || 0)}`, `缺失 ${summary.missing_count || 0} · 仅登记 ${summary.record_only_count || 0}`),
   ) : el("div", { class: "asset-audit-empty" }, el("strong", {}, "还未扫描素材库"), el("span", {}, "扫描会识别当前引用、可回收空间、重复文件与缺失路径；不会删除或移动任何文件。"));
+  const recommendationPanel = mediaIndexRecommendations ? el("section", { class: "panel asset-media-recommendations" },
+    el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "带证据的素材候选"), el("p", {}, `${mediaIndexRecommendations.asset_id} · ${mediaIndexRecommendations.query}`)), button("收起", "quiet small", () => { mediaIndexRecommendations = null; render(); })),
+    el("div", { class: "panel-body" },
+      (mediaIndexRecommendations.candidates || []).length ? el("div", { class: "media-recommendation-list" }, ...(mediaIndexRecommendations.candidates || []).map((candidate) => {
+        const canAdopt = mediaIndexRecommendations.evidence_source === "vision_v2"
+          && candidate.evidence_kind === "vision" && Number(candidate.score || 0) > 0;
+        const frame = candidate.representative_frame || {};
+        return el("article", { class: `media-recommendation ${canAdopt ? "has-evidence" : "visual-only"}` },
+          frame.path ? el("img", { class: "media-recommendation-frame", src: mediaURL(projectId, frame.path), alt: `${candidate.segment_id || "候选镜头"} 代表证据帧`, loading: "lazy" }) : null,
+          el("div", { class: "media-recommendation-copy" },
+            el("strong", {}, `${candidate.segment_id || "粗筛区间"} · ${Number(candidate.start_seconds).toFixed(2)}–${Number(candidate.end_seconds).toFixed(2)} 秒`),
+            candidate.vision_summary ? el("span", {}, candidate.vision_summary) : null,
+            candidate.entities && candidate.entities.length ? el("span", { class: "minor" }, `主体：${candidate.entities.join("、")}`) : null,
+            candidate.actions && candidate.actions.length ? el("span", { class: "minor" }, `动作：${candidate.actions.join("、")}`) : null,
+            el("span", {}, candidate.reason),
+            candidate.transcript ? el("span", { class: "minor" }, candidate.transcript) : null,
+            candidate.unknowns && candidate.unknowns.length ? el("span", { class: "minor warning" }, `不确定：${candidate.unknowns.join("、")}`) : null,
+            el("span", { class: "minor" }, `证据：${mediaIndexRecommendations.evidence_source || candidate.evidence_kind || "粗筛"}${mediaIndexRecommendations.index_fingerprint ? ` · 索引 ${mediaIndexRecommendations.index_fingerprint.slice(0, 12)}` : ""}`),
+            canAdopt ? button("采用到当前片段", "primary small", () => adoptVisionCandidateToSelectedScene(candidate)) : el("span", { class: "minor" }, "仅供人工浏览，不会自动采用。"),
+          ),
+        );
+      })) : el("div", { class: "empty" }, "没有可用候选。"),
+    ),
+  ) : null;
+  const visionPanel = mediaVisionDetails ? el("section", { class: "panel asset-vision-details" },
+    el("div", { class: "panel-head" },
+      el("div", {},
+        el("h4", {}, "镜头级画面理解"),
+        el("p", {}, `${mediaVisionDetails.asset_id} · ${mediaVisionDetails.shot_count || 0} 个镜头 · ${(mediaVisionDetails.vision || {}).model || "模型未记录"}`),
+      ),
+      button("收起", "quiet small", () => { mediaVisionDetails = null; render(); }),
+    ),
+    el("div", { class: "panel-body vision-shot-list" },
+      ...((mediaVisionDetails.shots || []).map((shot) => {
+        const description = shot.description || {};
+        const entities = (description.entities || []).map((item) => item.name).filter(Boolean);
+        const actions = (description.actions || []).map((item) => item.name).filter(Boolean);
+        return el("article", { class: "vision-shot-card" },
+          el("div", { class: "vision-shot-copy" },
+            el("strong", {}, `${shot.shot_id} · ${Number(shot.start_seconds).toFixed(2)}–${Number(shot.end_seconds).toFixed(2)} 秒`),
+            el("span", {}, description.summary || "暂无结构化描述"),
+            entities.length ? el("span", { class: "minor" }, `主体：${entities.join("、")}`) : null,
+            actions.length ? el("span", { class: "minor" }, `动作：${actions.join("、")}`) : null,
+            description.unknowns && description.unknowns.length ? el("span", { class: "minor warning" }, `不确定：${description.unknowns.join("、")}`) : null,
+          ),
+          el("div", { class: "vision-frame-strip" }, ...((shot.frames || []).slice(0, 5).map((frame) =>
+            el("figure", { class: "vision-frame" },
+              el("img", { src: mediaURL(projectId, frame.path), alt: `${shot.shot_id} ${frame.frame_id}`, loading: "lazy" }),
+              el("figcaption", {}, `${Number(frame.time_seconds).toFixed(2)}s · ${frame.sampling_reason || "证据帧"}`),
+            )
+          ))),
+        );
+      })),
+    ),
+  ) : null;
   return el("section", { class: "page" },
     pageHeader("素材库", "让每个素材有去向，也让每次清理可恢复", "扫描只读取项目资产；批量清理只会移动当前未引用、自动生成或下载的素材到项目回收站，绝不直接永久删除。", el("div", { class: "inline-actions" }, button("扫描素材库", "primary", scanAssetLibrary, assetLibraryAuditLoading), button("AI 生图", "", () => imageDialog.showModal()), button("登记素材", "", () => assetDialog.showModal()))),
     el("section", { class: "panel asset-governance" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "素材健康与回收"), el("p", {}, audit ? `最近扫描：${new Date(audit.generated_at).toLocaleString()}` : "建议在批量生成、替换或合成全片前扫描一次。"))), el("div", { class: "panel-body" },
@@ -5581,6 +6634,8 @@ function renderAssets() {
       audit ? el("p", { class: "form-note" }, selectedCleanableCount ? `已选择 ${selectedCleanableCount} 个可清理素材，预计释放 ${formatAssetBytes(selectedCleanableBytes)}。` : "人工提供与项目素材库内容默认受保护；重复文件仅作提示，由你决定是否保留。") : null,
     )),
     el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "可追溯素材台账"), el("p", {}, audit ? `显示 ${rows.length}/${auditRows.length} 项；回收站内素材可直接恢复。` : `${state.assets.length} 个稳定素材，${state.usages.length} 次使用记录`))), el("div", { class: "panel-body" }, audit ? (rows.length ? table : el("div", { class: "empty" }, "当前筛选没有匹配素材。")) : el("div", { class: "empty" }, "请先扫描素材库，生成可治理的引用与空间报告。"))),
+    recommendationPanel,
+    visionPanel,
     el("div", { class: "grid-2" },
       el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "来源决策规则"))), el("div", { class: "panel-body policy-list" }, policy("人工提供", "保留原文件路径、提供人和授权信息。"), policy("网络下载", "需补来源链接、许可与下载时间；不能只写“网上找的”。"), policy("AI / 本地生成", "版本、模型或工具信息应记录到素材版本。"))),
       el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "素材治理规则"))), el("div", { class: "panel-body policy-list" }, policy("当前引用", "时间线、当前配音、数字人、关键帧审核和未结束的局部任务都会锁定素材。"), policy("回收站", "清理是移动而不是删除；保留编号、使用历史和原始路径，可一键恢复。"), policy("重复文件", "按内容哈希识别，仅提示重复，不会擅自删除仍在使用的素材。"))),
@@ -6108,7 +7163,7 @@ function renderCloudTurnCard(turn, speakerNames, packageState) {
     }, !audio));
   }
   const audioOrigin = audio && audio.source_type === "voicebox_generated"
-    ? `Haike Video 本地配音 · ${audio.profile_name || "未标注音色"}`
+    ? `OpenMontage 本地配音 · ${audio.profile_name || "未标注音色"}`
     : "已上传音频";
   const candidateBlocks = candidateTakes.map((candidate) => el("div", { class: "cloud-audio-preview narration-take" },
     el("div", { class: "take-head" }, el("strong", {}, `候选音频 · ${candidate.profile_name || "本地音色"}`), status("candidate")),
@@ -6122,11 +7177,11 @@ function renderCloudTurnCard(turn, speakerNames, packageState) {
     audio ? el("div", { class: "cloud-audio-preview" },
       el("span", { class: "minor" }, `${audioOrigin} · ${audio.original_filename} · ${fmtDuration(audio.duration_seconds)} · 该时长将成为片段时长`),
       el("audio", { controls: "", src: mediaURL(projectId, audio.path) }),
-    ) : el("p", { class: "minor" }, "尚未采用驱动音频。可上传已有音频，或用 Haike Video 本地配音按本轮台词生成候选；单段最多 20 秒。"),
+    ) : el("p", { class: "minor" }, "尚未采用驱动音频。可上传已有音频，或用 OpenMontage 本地配音按本轮台词生成候选；单段最多 20 秒。"),
     el("div", { class: "voicebox-turn-control" },
       el("label", { class: "control-label" }, "本轮本地音色（生成内容固定为上方台词）", profile),
       el("span", { class: `minor ${mapping.status !== "ready" ? "voicebox-mapping-warning" : ""}` }, `${voiceboxSelectionLabel(mapping)}：${mapping.detail || "将在开始生成时确认"}`),
-      !voiceReady ? el("div", { class: "report bad" }, "Haike Video 本地配音当前不可用。你仍可上传现成驱动音频；如需生成，请先安装服务并到通用配音中心检查音色。") : null,
+      !voiceReady ? el("div", { class: "report bad" }, "OpenMontage 本地配音当前不可用。你仍可上传现成驱动音频；如需生成，请先安装服务并到通用配音中心检查音色。") : null,
       voiceJob.status === "generating" ? el("div", { class: "narration-job is-running" }, status("generating"), el("span", {}, `正在生成 ${voiceJob.profile_name || "本地音色"} 候选音频；不会覆盖当前已采用音频。`)) : null,
       voiceJob.status === "failed" ? el("div", { class: "report bad" }, voiceJob.error || "本地候选音频生成失败，请检查服务后重试。") : null,
     ),
@@ -6459,7 +7514,7 @@ function renderVoiceboxBatchPanel(packageState) {
     ), button("重新识别同名音色", "quiet small", refreshAvatarVoiceboxMappings, running || !voiceReady)),
     el("div", { class: "panel-body" },
       el("div", { class: "voicebox-speaker-routes" }, mappingCards),
-      !voiceReady ? el("div", { class: "report bad" }, "Haike Video 本地配音当前不可用。请先在通用配音中心确认服务与音色可用；仍可上传已有音频。") : null,
+      !voiceReady ? el("div", { class: "report bad" }, "OpenMontage 本地配音当前不可用。请先在通用配音中心确认服务与音色可用；仍可上传已有音频。") : null,
       unresolved.length ? el("div", { class: "report bad" }, `请先为 ${unresolved.map((item) => item.speaker_name).join("、")} 指定音色，再开始批量配音。`) : null,
       el("div", { class: "voicebox-batch-actions" },
         el("label", { class: "intake-field" }, el("span", {}, "批量模式"), mode),
@@ -6805,15 +7860,27 @@ function render() {
 
 assetForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const values = Object.fromEntries(new FormData(assetForm).entries());
+  const data = new FormData(assetForm);
+  const values = Object.fromEntries([...data.entries()].filter(([key]) => key !== "upload_files"));
+  const files = Array.from(assetForm.elements.upload_files.files || []);
+  const submit = assetForm.querySelector('button[type="submit"]');
+  if (submit) submit.disabled = true;
   try {
-    state = await api("/assets", { method: "POST", body: values });
+    if (files.length) {
+      for (let index = 0; index < files.length; index += 1) {
+        state = await uploadProjectAssetFile(files[index], values, index, files.length);
+      }
+    } else {
+      if (!String(values.path || "").trim()) throw new Error("请选择电脑中的素材文件，或填写项目内相对路径");
+      state = await api("/assets", { method: "POST", body: values });
+    }
     assetDialog.close();
     assetForm.reset();
     ensureSelection();
     render();
-    showToast("素材已登记，并获得稳定编号");
+    showToast(files.length ? `已导入并登记 ${files.length} 个本地素材` : "素材已登记，并获得稳定编号");
   } catch (error) { showToast(error.message || "素材登记失败", true); }
+  finally { if (submit) submit.disabled = false; }
 });
 
 imageForm.addEventListener("submit", async (event) => {

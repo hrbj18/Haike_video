@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "haike_video/artifacts/script",
+  "$id": "openmontage/artifacts/script",
   "title": "Production Script",
   "description": "Timestamped script produced by the Script Writer agent.",
   "type": "object",

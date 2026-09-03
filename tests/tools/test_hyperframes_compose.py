@@ -1158,7 +1158,7 @@ def test_scaffold_uses_frozen_tech_brief_style_composition(tmp_path: Path):
                             "presenter": {"x": .055, "y": .105, "width": .285, "height": .305},
                             "caption": {"x": .07, "y": .81, "width": .86, "height": .135},
                         },
-                        "caption_policy": {"owner": "haike_video-subtitle-module", "baked_into_hyperframes": False},
+                        "caption_policy": {"owner": "openmontage-subtitle-module", "baked_into_hyperframes": False},
                     },
                 },
             },
@@ -1321,7 +1321,7 @@ def test_daily_story_overlay_owns_headline_so_hyperframes_does_not_bake_duplicat
     html = HyperFramesCompose()._generate_tech_brief_v1_index_html(
         style_context={
             "scene_recipe": "relationship_map",
-            "headline_policy": {"owner": "haike_video-story-overlay", "render_in_hyperframes": False},
+            "headline_policy": {"owner": "openmontage-story-overlay", "render_in_hyperframes": False},
             "graphic_copy": {"headline": "不应被HY重复渲染的新闻标题", "center_label": "关系", "nodes": ["甲", "乙", "丙"]},
         },
         width=1080, height=1920, total_duration=5,

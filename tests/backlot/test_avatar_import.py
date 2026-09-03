@@ -412,6 +412,54 @@ def test_presenter_layout_template_can_apply_to_one_speaker_without_retiming(pro
     assert [scene["start_seconds"] for scene in saved["scenes"]] == [0.0, 2.0]
 
 
+def test_exact_clock_manifest_expands_one_click_master_limit_without_trimming(projects_root):
+    project = make_project(projects_root)
+    package = avatar_mod.initialize_avatar_package(project, {
+        "import_mode": "longform", "max_duration_seconds": 1,
+        "speaker_change_gap_seconds": 0.25,
+    })
+    role_ledger = {
+        "duration_seconds": 2.0,
+        "sample_rate": 16_000,
+        "channels": 1,
+        "sample_width": 2,
+        "video_fps": 25,
+        "samples_per_video_frame": 640,
+        "video_frame_count": 50,
+        "sample_frame_count": 32_000,
+        "content_sample_frames": 32_000,
+        "final_padding_sample_frames": 0,
+    }
+    manifest_turns = []
+    for turn in package["turns"]:
+        manifest_turns.append({
+            "turn_id": turn["turn_id"], "speaker_id": turn["speaker_id"],
+            "text_sha256": hashlib.sha256(turn["text"].encode("utf-8")).hexdigest(),
+            "sample_rate": 16_000,
+            "source_start_seconds": 0.0, "source_end_seconds": 2.0,
+            "speech_start_seconds": 0.0, "speech_end_seconds": 1.0,
+            "source_start_frame": 0, "source_end_frame_exclusive": 50,
+            "source_start_sample": 0, "source_end_sample": 32_000,
+            "speech_start_sample": 0, "speech_end_sample": 16_000,
+        })
+    manifest = {
+        "version": "avatar-turn-timing-v2",
+        "contract": {"video_fps": 25, "frame_alignment": "final_role_track_once"},
+        "roles": {role: dict(role_ledger) for role in ("yaya", "mengmeng")},
+        "turns": manifest_turns,
+    }
+    avatar_mod.apply_longform_timing_manifest(project, manifest)
+    avatar_mod.approve_exact_clock_manifest_cuts(project)
+
+    with pytest.raises(AvatarImportError, match="超过一键数字人 4.00 秒安全上限"):
+        avatar_mod.ensure_exact_clock_assembly_duration_limit(project, maximum_seconds=4)
+    updated = avatar_mod.ensure_exact_clock_assembly_duration_limit(project, maximum_seconds=300)
+
+    # 2 + 2 seconds of native role audio, one 0.25 second speaker gap, and
+    # one second muxing tolerance. No speech is dropped or time-stretched.
+    assert updated["settings"]["max_duration_seconds"] == pytest.approx(5.25)
+
+
 def test_avatar_source_package_allows_custom_default_treatment(projects_root):
     package = avatar_mod.initialize_avatar_package(make_project(projects_root), {"default_treatment": "custom"})
 

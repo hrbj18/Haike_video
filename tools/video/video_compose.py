@@ -857,6 +857,9 @@ class VideoCompose(BaseTool):
         "explainer-teacher": "Explainer",
         "cinematic-trailer": "CinematicRenderer",
         "documentary-montage": "CinematicRenderer",
+        # Internal direct-composition sentinel used by the Backlot focus-card
+        # materializer. It is intentionally not a public proposal family.
+        "layered-content": "CinematicRenderer",
         "product-reveal": "Explainer",
         "screen-demo": "Explainer",
         "presenter": "TalkingHead",
@@ -1061,7 +1064,7 @@ class VideoCompose(BaseTool):
 
         # Remotion's bundler resolves `remotion` and friends by walking up from the
         # entry file to find node_modules — so the entry must live under
-        # remotion-composer/ at render time. But Haike Video's project convention is
+        # remotion-composer/ at render time. But OpenMontage's project convention is
         # repo-root projects/<slug>/, where artifacts/assets/renders/ already live.
         # Resolution: keep the source of truth under projects/<slug>/ and auto-stage
         # a directory junction (Windows) / symlink (Unix) at

@@ -85,7 +85,7 @@ function renderPreflight() {
     ["事实与技术兜底", fallback.configured ? `${fallback.model || "已配置"} · 仅服务不可用时接管` : "未配置 Luna 技术兜底", !fallback.configured],
     ["写稿黄金样板", `${Number(golden.loaded_count || 0)} 份用户批准样板已加载`, Number(golden.loaded_count || 0) < 1],
     ["抖音热度信号", douyinDetail, douyin.state !== "ok"],
-    ["双主持语音", "Haike Video 本地同名音色 · 两条长音频后切割", false],
+    ["双主持语音", "海客视频本地同名音色 · 两条长音频后切割", false],
     ["数字人算力", "精确帧工作流 2094449979141218305 · Standard 24GB · Plus禁用", false],
     ["画面合同", `${config.aspect === "portrait" ? "1080×1920" : config.aspect} · 4:5 源 · ${config.avatar?.shape === "circle" ? "圆形" : "可调外框"}`, false],
     ["成片默认项", `${config.background_music?.enabled ? "新闻背景音乐" : "无背景音乐"} · 默认字幕 · 不自动发布`, !scheduler.healthy && config.enabled],
@@ -302,7 +302,7 @@ async function startTarget(target, label) {
     const response = await fetch("/api/daily-automation/runs", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target_date: target }) });
     const body = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(body.detail || `${label}失败`);
-    setMessage(`${target} 已由 Haike Video 后台接管；关闭浏览器不会中断任务。`);
+    setMessage(`${target} 已由海客视频后台接管；关闭浏览器不会中断任务。`);
     await refresh();
   } catch (error) {
     setMessage(error.message || `${label}失败`, true);

@@ -1,4 +1,4 @@
-"""Operate an Haike Video avatar source package without the browser workbench."""
+"""Operate an OpenMontage avatar source package without the browser workbench."""
 
 from __future__ import annotations
 

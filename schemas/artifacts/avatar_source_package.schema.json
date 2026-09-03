@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "haike_video/artifacts/avatar_source_package",
+  "$id": "openmontage/artifacts/avatar_source_package",
   "title": "Avatar Source Package",
   "description": "Provider-neutral contract for manually uploaded or API-generated multi-speaker avatar source media.",
   "type": "object",
@@ -248,9 +248,11 @@
         "uploaded_at": { "type": "string" },
         "id": { "type": "string", "pattern": "^AVAC-[A-Za-z0-9-]{8,80}$" },
         "state": { "type": "string", "enum": ["candidate", "current", "superseded"] },
-        "source_type": { "type": "string", "enum": ["uploaded", "voicebox_generated"] },
+        "source_type": { "type": "string", "enum": ["uploaded", "voicebox_generated", "cloud_tts_generated"] },
         "profile_id": { "type": "string", "minLength": 1 },
         "profile_name": { "type": "string", "minLength": 1 },
+        "voice_provider_id": { "type": "string", "enum": ["voicebox_tts", "doubao"] },
+        "voice_provider_name": { "type": "string", "minLength": 1 },
         "voice_selection_source": { "type": "string", "enum": ["manual", "same_name", "default"] },
         "batch_id": { "type": "string", "pattern": "^AVAB-[A-Za-z0-9-]{8,80}$" },
         "script_text_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },
@@ -260,7 +262,7 @@
       "additionalProperties": false
     },
     "drivingAudioJob": {
-      "description": "One per-turn local Voicebox generation job. It never changes the provider input until its candidate is explicitly adopted.",
+      "description": "One per-turn TTS generation job. It freezes provider and profile and never changes the avatar-provider input until its candidate is explicitly adopted.",
       "type": "object",
       "required": ["job_id", "status", "candidate_id", "profile_id", "profile_name", "script_text_sha256", "started_at", "error"],
       "properties": {
@@ -269,6 +271,8 @@
         "candidate_id": { "type": "string", "pattern": "^AVAC-[A-Za-z0-9-]{8,80}$" },
         "profile_id": { "type": "string", "minLength": 1 },
         "profile_name": { "type": "string", "minLength": 1 },
+        "provider_id": { "type": "string", "enum": ["voicebox_tts", "doubao"] },
+        "provider_name": { "type": "string", "minLength": 1 },
         "voice_selection_source": { "type": "string", "enum": ["manual", "same_name", "default"] },
         "batch_id": { "type": "string", "pattern": "^AVAB-[A-Za-z0-9-]{8,80}$" },
         "script_text_sha256": { "type": "string", "pattern": "^[a-f0-9]{64}$" },

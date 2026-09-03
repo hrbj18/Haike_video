@@ -698,7 +698,7 @@ class TestCapabilityMetadata:
             "kling_official",
             "openai",
             "piper",
-            "haike_video_local_tts",
+            "openmontage_local_tts",
         }
 
 

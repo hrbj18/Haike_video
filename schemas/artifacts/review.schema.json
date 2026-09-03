@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "haike_video/artifacts/review",
+  "$id": "openmontage/artifacts/review",
   "title": "Stage Review",
   "description": "Structured review findings and stage-agent dispositions from the Reviewer.",
   "type": "object",

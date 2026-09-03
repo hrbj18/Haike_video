@@ -4,10 +4,10 @@
 
 ## 生产与调度
 
-- 一条龙流程由 Haike Video 工作台和后台任务系统调度；Codex负责开发、诊断和测试，不作为唯一生产者。
+- 一条龙流程由 OpenMontage 工作台和后台任务系统调度；Codex负责开发、诊断和测试，不作为唯一生产者。
 - 每日窗口为北京时间上一自然日 00:00—24:00，计划时间为凌晨 03:00。
 - 自动流程只产出待审核预览，不自动发布。
-- 本地配音由 Haike Video 自带 Qwen3-TTS localhost 服务负责，不再启动或依赖独立 Voicebox。上层 `VoiceboxTTS` 类名、`voicebox_tts` source_tool 和历史资产目录暂时保留为兼容标识，不代表外部运行依赖。
+- 本地配音由 OpenMontage 自带 Qwen3-TTS localhost 服务负责，不再启动或依赖独立 Voicebox。上层 `VoiceboxTTS` 类名、`voicebox_tts` source_tool 和历史资产目录暂时保留为兼容标识，不代表外部运行依赖。
 - 重型 TTS 依赖与主环境隔离；模型和私有克隆音色不进 Git。公开仓库提供三种中文预设，雅雅/檬檬通过私有音色包跨机器迁移。默认只驻留一个1.7B模型，全部本地生成串行执行。
 - Windows计划任务每日03:00启动，启用 `WakeToRun`、`StartWhenAvailable`、`IgnoreNew` 和12小时上限。2026-08-29 03:20设一次性Codex守护，固定检查2026-08-28目标日期；只从安全阶段幂等恢复，不重复启动或重提未知付费任务。
 

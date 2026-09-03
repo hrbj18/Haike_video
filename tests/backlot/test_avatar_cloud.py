@@ -90,6 +90,19 @@ def create_role(tmp_path: Path, speaker_id: str, name: str) -> dict:
     return roles_mod.finalize_role_reference_upload(role["role_id"], "front", temporary, target, image.name)
 
 
+def test_role_voice_binding_is_explicit_and_unique(project: Path, tmp_path: Path) -> None:
+    yaya = create_role(tmp_path, "yaya", "雅雅")
+    mengmeng = create_role(tmp_path, "mengmeng", "檬檬")
+    bound = roles_mod.set_avatar_role_voice_binding(yaya["role_id"], {
+        "id": "voice-yaya", "name": "雅雅音色", "provider_id": "local", "provider_name": "本地配音",
+    })
+
+    assert bound["voice_binding"]["profile_id"] == "voice-yaya"
+    assert roles_mod.find_avatar_role_by_voice_profile("voice-yaya")["role_id"] == yaya["role_id"]
+    with pytest.raises(roles_mod.AvatarRoleError, match="已关联角色"):
+        roles_mod.set_avatar_role_voice_binding(mengmeng["role_id"], {"id": "voice-yaya", "name": "重复音色"})
+
+
 def upload_presenter(project: Path, tmp_path: Path, speaker_id: str, color: str) -> None:
     presenter = tmp_path / f"{speaker_id}-presenter.png"
     Image.new("RGB", (720, 1280), color).save(presenter)
@@ -482,6 +495,47 @@ def test_voicebox_take_is_auditioned_before_becoming_cloud_driving_audio(project
     assert applied_turn["status"] == "audio_ready"
     assert (project / applied_turn["driving_audio"]["path"]).is_file()
     validate_artifact("avatar_source_package", adopted)
+
+
+def test_doubao_take_uses_frozen_cloud_profile_without_local_fallback(project, monkeypatch):
+    avatar_mod.initialize_avatar_package(project, {"generation_mode": "dashscope_wan_s2v"})
+    monkeypatch.setattr(cloud_mod, "_probe_audio", lambda _path: {
+        "duration_seconds": 3.25, "codec": "pcm_s16le", "sample_rate": 24000, "channels": 1,
+    })
+    cloud_profile = {
+        "id": "doubao:yaya",
+        "name": "雅雅",
+        "provider_id": "doubao",
+        "provider_name": "豆包云端配音",
+        "provider_voice_id": "cloud-yaya",
+        "available": True,
+    }
+    monkeypatch.setattr(cloud_mod, "read_audio_center", lambda: {
+        "provider": {"status": "available"},
+        "default_voice": cloud_profile,
+        "profiles": [cloud_profile],
+    })
+    monkeypatch.setattr(cloud_mod, "get_voice_profile", lambda profile_id: cloud_profile if profile_id == "doubao:yaya" else None)
+    calls = []
+
+    def fake_generate_voice_audio(**kwargs):
+        calls.append(kwargs)
+        output = Path(kwargs["output_path"])
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"RIFFcloud")
+        return SimpleNamespace(success=True, error=None, data={"metadata_path": "timing.json"})
+
+    monkeypatch.setattr(cloud_mod, "generate_voice_audio", fake_generate_voice_audio)
+
+    queued = cloud_mod.start_voicebox_driving_audio_candidate(project, "T001", {"profile_id": "doubao:yaya"})
+    assert queued["turns"][0]["driving_audio_job"]["provider_id"] == "doubao"
+    ready = cloud_mod.generate_voicebox_driving_audio_candidate(project, "T001")
+    candidate = ready["turns"][0]["driving_audio_candidates"][0]
+
+    assert calls[0]["profile"]["provider_voice_id"] == "cloud-yaya"
+    assert candidate["source_type"] == "cloud_tts_generated"
+    assert candidate["voice_provider_id"] == "doubao"
+    validate_artifact("avatar_source_package", ready)
 
 
 def _voicebox_catalog() -> dict:

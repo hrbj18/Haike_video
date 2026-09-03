@@ -2,7 +2,7 @@
   "version": 1,
   "profiles": [
     {
-      "id": "haike_video-qwen-serena",
+      "id": "openmontage-qwen-serena",
       "name": "Qwen Serena",
       "description": "温暖、自然的中文女声预设，无需参考音频。",
       "language": "zh",
@@ -12,7 +12,7 @@
       "default_engine": "qwen_custom_voice"
     },
     {
-      "id": "haike_video-qwen-vivian",
+      "id": "openmontage-qwen-vivian",
       "name": "Qwen Vivian",
       "description": "明亮、清晰的中文女声预设，无需参考音频。",
       "language": "zh",
@@ -22,7 +22,7 @@
       "default_engine": "qwen_custom_voice"
     },
     {
-      "id": "haike_video-qwen-dylan",
+      "id": "openmontage-qwen-dylan",
       "name": "Qwen Dylan",
       "description": "稳重、清晰的中文男声预设，无需参考音频。",
       "language": "zh",

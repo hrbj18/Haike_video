@@ -82,8 +82,28 @@ def prepared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dic
         "pexels": {"available": True}, "text_ai": {"available": True, "model": "fake-text"},
         "hyperframes": {"available": True, "status": "available"},
     }
-    monkeypatch.setattr(pipeline, "_presenter_images", lambda: images)
+    presenter_bindings = {
+        role: {
+            "role_id": f"AR-{role}-test", "role_name": label,
+            "voice_profile_id": profiles[role]["id"], "voice_profile_name": profiles[role]["name"],
+            "presenter_path": str(images[role]), "presenter_filename": images[role].name,
+            "presenter_sha256": hashlib.sha256(images[role].read_bytes()).hexdigest(),
+        }
+        for role, label in pipeline.ROLE_LABELS.items()
+    }
+    monkeypatch.setattr(
+        pipeline,
+        "_resolve_presenter_images",
+        lambda *_args, **_kwargs: (images, presenter_bindings),
+    )
     monkeypatch.setattr(pipeline, "_voicebox_profiles", lambda: profiles)
+    monkeypatch.setattr(
+        pipeline,
+        "_avatar_voice_profiles",
+        lambda _payload=None, *, roles=None: {
+            role: profiles[role] for role in (roles if roles is not None else profiles)
+        },
+    )
     monkeypatch.setattr(pipeline, "preflight_local_whisper", lambda *args, **kwargs: {**asr, "load_tested": bool(kwargs.get("load_test"))})
     monkeypatch.setattr(pipeline, "list_local_whisper_models", lambda: [{"id": str(tmp_path / "rev-test"), "label": "faster-whisper-small"}])
     monkeypatch.setattr(
@@ -100,6 +120,86 @@ def prepared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dic
     )
     monkeypatch.setattr(pipeline, "collect_review_preview_capabilities", lambda **_kwargs: capabilities)
     return project, script
+
+
+def test_role_binding_materializes_presenter_images_into_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "role-binding"
+    project.mkdir()
+    library = tmp_path / "library"
+    library.mkdir()
+    profiles = {role: {"id": f"voice-{role}", "name": label} for role, label in pipeline.ROLE_LABELS.items()}
+    source_images = {}
+    roles_by_voice = {}
+    for role, label in pipeline.ROLE_LABELS.items():
+        source = library / f"{role}.png"
+        source.write_bytes((role * 150).encode("utf-8"))
+        digest = hashlib.sha256(source.read_bytes()).hexdigest()
+        avatar_role = {
+            "role_id": f"AR-{role}-binding", "name": label,
+            "references": [{"slot": "front", "path": f"assets/{role}.png", "sha256": digest}],
+        }
+        source_images[avatar_role["role_id"]] = source
+        roles_by_voice[profiles[role]["id"]] = avatar_role
+    monkeypatch.setattr(pipeline, "find_avatar_role_by_voice_profile", lambda profile_id: roles_by_voice.get(profile_id))
+    monkeypatch.setattr(pipeline, "role_front_reference", lambda role: role["references"][0])
+    monkeypatch.setattr(pipeline, "avatar_role_asset_file", lambda role_id, _path: source_images[role_id])
+
+    images, bindings = pipeline._resolve_presenter_images(project, profiles, refresh_from_role_library=True)
+
+    assert all(path.is_file() and project in path.parents for path in images.values())
+    assert {binding["role_name"] for binding in bindings.values()} == {"雅雅", "檬檬"}
+    assert (project / "artifacts" / "avatar-review-presenter-bindings.json").is_file()
+    _, frozen = pipeline._resolve_presenter_images(project, profiles, refresh_from_role_library=False)
+    assert frozen == bindings
+
+
+def test_role_binding_reports_missing_audio_center_association(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    project = tmp_path / "missing-role-binding"
+    project.mkdir()
+    monkeypatch.setattr(pipeline, "find_avatar_role_by_voice_profile", lambda _profile_id: None)
+    with pytest.raises(pipeline.AvatarReviewPreviewError, match="配音中心尚未为雅雅当前音色"):
+        pipeline._resolve_presenter_images(
+            project,
+            {"yaya": {"id": "voice-yaya", "name": "雅雅"}, "mengmeng": {"id": "voice-mengmeng", "name": "檬檬"}},
+            refresh_from_role_library=True,
+        )
+
+
+def test_complete_cloud_role_bindings_are_selected_without_local_tts(monkeypatch: pytest.MonkeyPatch) -> None:
+    profiles = {
+        "doubao:public_female": {
+            "id": "doubao:public_female", "name": "豆包公版女声", "provider_id": "doubao",
+            "provider_name": "豆包云端配音", "voice_signature": "sig-female", "available": True,
+        },
+        "doubao:public_male": {
+            "id": "doubao:public_male", "name": "豆包公版男声", "provider_id": "doubao",
+            "provider_name": "豆包云端配音", "voice_signature": "sig-male", "available": True,
+        },
+    }
+    roles = [
+        {
+            "role_id": "AR-yaya-cloud", "name": "雅雅",
+            "voice_binding": {"profile_id": "doubao:public_female"},
+            "references": [{"slot": "front", "path": "assets/yaya.png", "sha256": "y"}],
+        },
+        {
+            "role_id": "AR-mengmeng-cloud", "name": "檬檬",
+            "voice_binding": {"profile_id": "doubao:public_male"},
+            "references": [{"slot": "front", "path": "assets/mengmeng.png", "sha256": "m"}],
+        },
+    ]
+    monkeypatch.setattr(pipeline, "list_avatar_roles", lambda: {"roles": roles})
+    monkeypatch.setattr(pipeline, "get_voice_profile", lambda profile_id: profiles.get(profile_id))
+    monkeypatch.setattr(
+        pipeline,
+        "_voicebox_profiles",
+        lambda: pytest.fail("complete cloud bindings must not start or inspect local TTS"),
+    )
+
+    selected = pipeline._avatar_voice_profiles()
+
+    assert selected["yaya"]["id"] == "doubao:public_female"
+    assert selected["mengmeng"]["id"] == "doubao:public_male"
 
 
 class FakeTTS:
@@ -267,6 +367,33 @@ def test_preflight_and_start_freeze_two_roles_without_leaking_worker(prepared: t
     assert "worker_token" not in started
 
 
+def test_preflight_and_start_freeze_only_the_single_yaya_role(
+    prepared: tuple[Path, dict],
+) -> None:
+    project, script = prepared
+    single_script = {**script, "title": "单主持测试", "sections": [script["sections"][0]]}
+    write_json(project / "artifacts" / "script.json", single_script)
+    state = wb._load_for_write(project)
+    state["project"]["script_draft"] = {
+        "status": "approved", "script": single_script, "script_hash": pipeline._json_hash(single_script),
+    }
+    wb._save(project, state)
+
+    preflight = pipeline.avatar_review_preview_preflight(project, {"visual": {"planning_mode": "rule_mix"}})
+    assert preflight["ready"] is True
+    assert preflight["speaker_count"] == 1
+    assert preflight["active_roles"] == ["yaya"]
+    assert set(preflight["roles"]) == {"yaya"}
+
+    started = pipeline.start_avatar_review_preview_job(project, {
+        "confirmed": True, "budget_limit_cny": 5.0, "visual": {"planning_mode": "rule_mix"},
+    })
+    assert started["frozen_input"]["active_roles"] == ["yaya"]
+    assert set(started["frozen_input"]["roles"]) == {"yaya"}
+    frozen = pipeline._assert_frozen(project, pipeline._read_internal(project))
+    assert set(frozen["profiles"]) == {"yaya"}
+
+
 def test_prepare_longform_package_rebuilds_legacy_gap_settings(
     prepared: tuple[Path, dict], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -299,9 +426,36 @@ def test_prepare_longform_package_rebuilds_legacy_gap_settings(
     assert captured == [{
         "replace": True, "generation_mode": "runninghub_longform", "import_mode": "longform",
         "require_asr": True, "speaker_change_gap_seconds": 0.25,
-        "same_speaker_gap_seconds": 0.3, "default_treatment": "pip_top_left",
+        "same_speaker_gap_seconds": 0.3, "default_treatment": "custom",
         "background_mode": "opaque",
     }]
+
+
+def test_exact_clock_voice_plan_checks_five_minute_limit_before_runninghub(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manifest = {
+        "roles": {
+            "yaya": {"video_frame_count": 2_500},
+            "mengmeng": {"video_frame_count": 2_500},
+        },
+        "turns": [
+            {"speaker_id": "yaya"}, {"speaker_id": "mengmeng"},
+            {"speaker_id": "yaya"},
+        ],
+        "sha256": "verified-manifest",
+    }
+    monkeypatch.setattr(pipeline, "_verified_voice_timing_manifest", lambda *_args: manifest)
+    voice: dict = {}
+
+    plan = pipeline._validate_one_click_avatar_duration(tmp_path, voice)
+
+    assert plan["planned_master_seconds"] == pytest.approx(200.5)
+    assert plan["maximum_seconds"] == 300.0
+    assert voice["avatar_duration_plan"] == plan
+    monkeypatch.setattr(pipeline, "ONE_CLICK_AVATAR_MAX_DURATION_SECONDS", 200.0)
+    with pytest.raises(pipeline.AvatarReviewPreviewError, match="未提交 RunningHub"):
+        pipeline._validate_one_click_avatar_duration(tmp_path, {})
 
 
 def test_frozen_final_gap_contract_rejects_worker_input_drift(
@@ -407,7 +561,7 @@ def test_assemble_and_apply_builds_missing_scene_plan(
     result = pipeline._assemble_and_apply(project)
 
     assert result["scene_count"] == 2
-    assert applied == [{"default_treatment": "pip_top_left"}]
+    assert applied == [{"default_treatment": "custom"}]
     assert (project / "artifacts" / "scene_plan.json").is_file()
 
 
@@ -1096,6 +1250,37 @@ def test_active_plus_third_attempt_after_restart_is_polled_not_resubmitted(
     ]
 
 
+def test_transient_runninghub_status_query_retries_same_task_without_resubmit(
+    prepared: tuple[Path, dict], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _script = prepared
+
+    class FlakyQueryClient(SequencedRunningHub):
+        interrupted = False
+
+        def poll(self, task_id: str) -> dict:
+            if not self.interrupted:
+                self.interrupted = True
+                raise ConnectionResetError("synthetic transient query reset")
+            return super().poll(task_id)
+
+    client = FlakyQueryClient([])
+    patch_successful_local_stages(monkeypatch)
+    started = pipeline.start_avatar_review_preview_job(project, {
+        "confirmed": True, "budget_limit_cny": 5.0,
+        "allow_plus_on_oom": True, "visual": {"planning_mode": "rule_mix"},
+    })
+
+    completed = pipeline.run_avatar_review_preview_job(
+        project, started["job_id"], overrides=completed_parent_overrides(client),
+    )
+
+    assert completed["status"] == "completed"
+    assert len(client.submits) == 2
+    records = completed["phases"]["avatar_generation"]["output"]["roles"]
+    assert all("transient_poll_error_count" not in record for record in records.values())
+
+
 def test_standard_request_observed_as_plus_is_nonretryable_instance_drift(
     prepared: tuple[Path, dict],
 ) -> None:
@@ -1222,6 +1407,49 @@ def test_turn_tts_is_serial_ordered_and_failed_turn_resume_is_granular(
     assert result["timing_manifest"]["version"] == pipeline.TURN_TIMING_MANIFEST_VERSION
 
 
+def test_provider_neutral_turn_tts_normalizes_then_composes_exact_clock(
+    prepared: tuple[Path, dict], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _script = prepared
+    started = pipeline.start_avatar_review_preview_job(project, {
+        "confirmed": True, "budget_limit_cny": 5.0, "visual": {"planning_mode": "rule_mix"},
+    })
+    acquired = pipeline._acquire_worker(project, started["job_id"])
+    assert acquired is not None
+    _job_id, worker_token = acquired
+    context = pipeline._assert_frozen(project, pipeline._read_internal(project))
+    for role, profile in context["profiles"].items():
+        profile.update({
+            "provider_id": "doubao",
+            "provider_name": "豆包云端配音",
+            "voice_signature": f"cloud-{role}",
+        })
+    calls: list[tuple[str, str]] = []
+
+    def fake_generate_voice_audio(*, text: str, profile: dict, output_path: Path, language: str) -> SimpleNamespace:
+        calls.append((str(profile["id"]), text))
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        with wave.open(str(output_path), "wb") as output:
+            output.setnchannels(1)
+            output.setsampwidth(2)
+            output.setframerate(24_000)
+            output.writeframes(b"\x01\x00" * 24_000)
+        return SimpleNamespace(success=True, error=None)
+
+    monkeypatch.setattr(pipeline, "generate_voice_audio", fake_generate_voice_audio)
+
+    result = pipeline._generate_voice_tracks(project, started["job_id"], worker_token, context)
+
+    assert [profile_id for profile_id, _text in calls] == ["voice-yaya", "voice-mengmeng"]
+    assert all(turn["provider_id"] == "doubao" for turn in result["turns"].values())
+    for role in pipeline.ROLE_LABELS:
+        track = result["roles"][role]
+        assert track["sample_rate"] == 24_000
+        assert track["channels"] == 1
+        assert track["sample_width"] == 2
+        assert track["sample_frame_count"] % track["samples_per_video_frame"] == 0
+
+
 def test_role_track_silence_and_manifest_are_sample_exact(tmp_path: Path) -> None:
     project = tmp_path / "project"
     records = []
@@ -1315,3 +1543,30 @@ def test_four_turn_two_presenter_clock_manifest_stays_contiguous_without_manual_
         assert turns[0]["source_start_frame"] == 0
         assert turns[0]["source_end_frame_exclusive"] == turns[1]["source_start_frame"]
         assert turns[-1]["source_end_frame_exclusive"] == role_ledgers[role]["video_frame_count"]
+
+
+def test_visual_planner_error_falls_back_to_auditable_rule_mix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project, _script = make_project(tmp_path)
+    calls: list[str] = []
+
+    def fake_preview(_project: Path, policy: dict) -> dict:
+        mode = str(policy.get("planning_mode") or "")
+        calls.append(mode)
+        if mode == "ai_director":
+            raise wb.WorkbenchError("AI 画面规划失败：中转站无有效响应")
+        return {"status": "planned", "planner": {"mode": mode}, "items": []}
+
+    monkeypatch.setattr(pipeline.wb, "preview_visual_batch_plan", fake_preview)
+    reviewed, execution_policy, reason = pipeline._preview_supporting_visual_plan(project, {
+        "planning_mode": "ai_director",
+        "ai_planning_confirmed": True,
+    })
+
+    assert calls == ["ai_director", "rule_mix"]
+    assert execution_policy["planning_mode"] == "rule_mix"
+    assert "中转站无有效响应" in str(reason)
+    assert reviewed["planner"]["fallback_from"] == "ai_director"
+    assert "规则混合" in str(reviewed["planner"]["fallback_reason"])

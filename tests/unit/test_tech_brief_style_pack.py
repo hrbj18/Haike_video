@@ -52,6 +52,20 @@ def test_portrait_context_keeps_captions_out_of_graphic_copy():
     assert context["render_tokens"]["colors"]["orange"] == "#C87434"
 
 
+def test_story_scene_reserves_headline_for_openmontage_overlay():
+    scene = _scene()
+    scene["story_id"] = "S01"
+
+    context = build_style_context(
+        scene=scene, plan=_plan(), width=1080, height=1920, duration_seconds=8
+    )
+
+    assert context["headline_policy"] == {
+        "owner": "openmontage-story-overlay",
+        "render_in_hyperframes": False,
+    }
+
+
 def test_layout_variants_are_frozen_and_old_plans_keep_the_default_geometry():
     catalog = layout_variant_catalog()
     assert {item["id"] for item in catalog["relationship_map"]} == {"radial_map", "causal_chain", "convergence"}

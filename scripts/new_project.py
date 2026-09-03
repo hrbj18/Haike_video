@@ -1,4 +1,4 @@
-"""Create a portable Haike Video content project from the checked-in template."""
+"""Create a portable OpenMontage content project from the checked-in template."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from lib.workspace_paths import WorkspacePaths
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Create a new Haike Video content project")
+    parser = argparse.ArgumentParser(description="Create a new OpenMontage content project")
     parser.add_argument("--id", required=True, help="Lowercase ASCII project id, e.g. 004-ai-news")
     parser.add_argument("--title", required=True, help="Human-readable project title")
     parser.add_argument("--fps", type=int, default=25)

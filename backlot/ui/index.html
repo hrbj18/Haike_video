@@ -3,24 +3,65 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Backlot — 项目库</title>
+<meta name="theme-color" content="#f4ede0">
+<title>海客视频 — 项目库</title>
+<script>
+  // 暖纸张是默认主题；只有用户明确保存的深色偏好才进入深色。
+  try {
+    const themeKey = "backlot.theme";
+    const storedTheme = localStorage.getItem(themeKey);
+    const theme = storedTheme === "dark" ? "dark" : "light";
+    if (storedTheme !== theme) localStorage.setItem(themeKey, theme);
+    document.documentElement.dataset.theme = theme;
+  } catch (_) {
+    document.documentElement.dataset.theme = "light";
+  }
+</script>
 <link rel="stylesheet" href="/ui/board.css">
+<link rel="stylesheet" href="/ui/navigation.css">
 </head>
 <body>
-<div class="wrap">
-  <header class="slate">
+<div class="app-frame library-app-frame">
+  <aside class="global-sidebar" aria-label="主导航">
+    <a class="global-brand" href="/">
+      <span>HAIKE VIDEO</span>
+      <strong>海客视频</strong>
+      <small>项目、素材与审核制作工具</small>
+    </a>
+    <nav class="global-nav" aria-label="全局工作区">
+      <div class="global-nav-group">
+        <p>项目</p>
+        <a class="global-nav-link" href="/" aria-current="page">项目库</a>
+      </div>
+      <div class="global-nav-group">
+        <p>通用工具</p>
+        <a class="global-nav-link" href="/audio">配音中心</a>
+        <a class="global-nav-link" href="/automation">自动生产中心</a>
+      </div>
+    </nav>
+  </aside>
+  <div class="wrap library-shell">
+  <header class="slate library-slate">
     <div class="clapper"></div>
-    <div>
-      <span class="wordmark">Backlot</span>
+    <div class="library-heading">
+      <span class="wordmark">HAIKE VIDEO / PROJECT ARCHIVE</span>
       <h1>项目库</h1>
+      <p>把项目、素材与审核进度放在同一份可追溯的制作档案里。</p>
     </div>
     <span class="chip" id="count"></span>
     <div class="spacer"></div>
-    <a class="secondary-action library-automation-link" href="/automation">自动生产中心</a>
-    <a class="secondary-action library-audio-link" href="/audio">通用配音中心</a>
-    <button class="library-create" id="createProject" type="button">新建视频项目</button>
-    <span class="live idle" id="liveBadge"><span class="dot"></span><span id="liveText">暂无任务</span></span>
+    <div class="library-actions">
+      <button class="library-create" id="createProject" type="button">新建视频项目</button>
+      <span class="live idle" id="liveBadge"><span class="dot"></span><span id="liveText">暂无任务</span></span>
+    </div>
   </header>
+  <section class="library-intro" aria-label="项目库说明">
+    <div>
+      <span class="library-kicker">项目总览</span>
+      <strong>从项目身份开始，再进入脚本、素材与逐段审核。</strong>
+    </div>
+    <p>创建项目不会生成内容或消耗额度；预览与发布仍由人工确认。</p>
+  </section>
   <p class="library-message" id="libraryMessage" role="status" aria-live="polite"></p>
   <section class="daily-automation-panel" id="dailyAutomationPanel" aria-labelledby="dailyAutomationTitle">
     <button class="daily-automation-summary" id="toggleDailyAutomationPanel" type="button" aria-expanded="false">
@@ -196,6 +237,8 @@
     </div>
   </form>
 </dialog>
+</div>
+</div>
 <script type="module" src="/ui/library.js"></script>
 </body>
 </html>

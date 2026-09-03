@@ -24,7 +24,8 @@ from uuid import uuid4
 
 from PIL import Image, ImageFilter, ImageOps, UnidentifiedImageError
 
-from backlot.audio_center import read_audio_center
+from backlot.audio_center import get_voice_profile, read_audio_center
+from backlot.tts_runtime import generate_voice_audio
 from backlot.avatar_audio_clock import (
     AVATAR_VIDEO_FPS,
     AvatarAudioClockError,
@@ -655,8 +656,8 @@ def _script_text_hash(text: str) -> str:
 
 def _safe_voicebox_error(error: object) -> str:
     """Return a user-facing Voicebox failure without leaking local secrets."""
-    message = str(error or "Haike Video 本地配音未返回可试听的音频文件")
-    for variable in ("VOICEBOX_API_KEY", "OPENAI_API_KEY"):
+    message = str(error or "Haike Video 配音服务未返回可试听的音频文件")
+    for variable in ("VOICEBOX_API_KEY", "OPENAI_API_KEY", "DOUBAO_SPEECH_API_KEY"):
         secret = str(os.environ.get(variable) or "")
         if secret:
             message = message.replace(secret, "[已隐藏]")
@@ -725,6 +726,8 @@ def _driving_audio_record(
         record.update({
             "profile_id": str(profile["id"]),
             "profile_name": str(profile.get("name") or profile["id"]),
+            "voice_provider_id": str(profile.get("provider_id") or "voicebox_tts"),
+            "voice_provider_name": str(profile.get("provider_name") or "Haike Video 本地配音"),
             "script_text_sha256": _script_text_hash(str(turn["text"])),
         })
         selection_source = str(profile.get("selection_source") or "").strip()
@@ -809,7 +812,7 @@ def _normalise_voice_name(value: object) -> str:
 def _voicebox_catalog() -> tuple[dict, list[dict], dict[str, dict]]:
     catalog = read_audio_center()
     if str((catalog.get("provider") or {}).get("status") or "") != "available":
-        raise AvatarCloudError("Haike Video 本地配音当前不可用，请先完成安装并启动服务")
+        raise AvatarCloudError("OpenMontage 本地配音当前不可用，请先完成安装并启动服务")
     profiles = [
         dict(item)
         for item in (catalog.get("profiles") if isinstance(catalog.get("profiles"), list) else [])
@@ -937,7 +940,7 @@ def _reconcile_voicebox_speaker_mappings(package: dict, catalog: dict, profiles:
                 "profile_name": None,
                 "selection_source": "unavailable",
                 "status": "unavailable",
-                "detail": "通用配音中心没有可用音色，请先启动 Haike Video 本地配音或迁移音色",
+                "detail": "通用配音中心没有可用音色，请先启动 OpenMontage 本地配音或迁移音色",
                 "updated_at": _now(),
             }
         mappings.append(mapping)
@@ -1026,9 +1029,9 @@ def start_voicebox_driving_audio_candidate(project_dir: Path, turn_id: str, payl
     job = turn.get("driving_audio_job") if isinstance(turn.get("driving_audio_job"), dict) else {}
     if job.get("status") == "generating":
         raise AvatarCloudError(f"{turn['turn_id']} 的本地候选音频正在生成，请等待完成后再试")
-    if VoiceboxTTS().get_status().value != "available":
-        raise AvatarCloudError("Haike Video 本地配音当前不可用，请先完成安装并启动服务")
     profile, selection_source = _select_voicebox_profile(package, turn, request)
+    if profile.get("available") is False:
+        raise AvatarCloudError(f"{profile.get('provider_name') or '所选配音服务'}当前不可用，请先完成配置")
     text = str(turn.get("text") or "").strip()
     if not text:
         raise AvatarCloudError(f"{turn['turn_id']} 没有可生成配音的脚本文本，请先修正脚本")
@@ -1041,6 +1044,8 @@ def start_voicebox_driving_audio_candidate(project_dir: Path, turn_id: str, payl
         "candidate_id": candidate_id,
         "profile_id": str(profile["id"]),
         "profile_name": str(profile.get("name") or profile["id"]),
+        "provider_id": str(profile.get("provider_id") or "voicebox_tts"),
+        "provider_name": str(profile.get("provider_name") or "Haike Video 本地配音"),
         "voice_selection_source": selection_source,
         "script_text_sha256": _script_text_hash(text),
         "started_at": _now(),
@@ -1065,12 +1070,24 @@ def generate_voicebox_driving_audio_candidate(project_dir: Path, turn_id: str) -
             raise AvatarCloudError(f"{turn['turn_id']} 的本地候选音频缺少版本编号")
         output = project_dir / VOICEBOX_CANDIDATE_DIRECTORY / str(turn["turn_id"]) / "candidates" / f"{candidate_id}.wav"
         output.parent.mkdir(parents=True, exist_ok=True)
-        result = VoiceboxTTS().execute({
-            "text": str(turn["text"]),
-            "profile_id": str(job["profile_id"]),
-            "language": "zh",
-            "output_path": str(output),
-        })
+        runtime_profile = get_voice_profile(str(job["profile_id"]))
+        if not runtime_profile and str(job.get("provider_id") or "voicebox_tts") == "voicebox_tts":
+            # Backward-compatible local jobs only persisted a Voicebox profile
+            # id.  The local adapter can resolve that id without private cloud
+            # configuration, so old projects remain resumable.
+            runtime_profile = {
+                "id": str(job["profile_id"]),
+                "name": str(job.get("profile_name") or job["profile_id"]),
+                "provider_id": "voicebox_tts",
+            }
+        if not runtime_profile or str(runtime_profile.get("provider_id") or "voicebox_tts") != str(job.get("provider_id") or "voicebox_tts"):
+            raise AvatarCloudError(f"{turn['turn_id']} 冻结的配音音色配置已变化，请重新发起候选生成")
+        result = generate_voice_audio(
+            text=str(turn["text"]),
+            profile=runtime_profile,
+            output_path=output,
+            language="zh",
+        )
 
         package = _package(project_dir)
         turn = _find_turn(package, turn_id.upper())
@@ -1085,6 +1102,8 @@ def generate_voicebox_driving_audio_candidate(project_dir: Path, turn_id: str) -
         profile = {
             "id": current_job["profile_id"],
             "name": current_job["profile_name"],
+            "provider_id": current_job.get("provider_id") or "voicebox_tts",
+            "provider_name": current_job.get("provider_name") or "Haike Video 本地配音",
             "selection_source": current_job.get("voice_selection_source"),
             "batch_id": current_job.get("batch_id"),
         }
@@ -1095,7 +1114,7 @@ def generate_voicebox_driving_audio_candidate(project_dir: Path, turn_id: str) -
             f"Voicebox_{turn['turn_id']}_{candidate_id}.wav",
             candidate_id=candidate_id,
             state="candidate",
-            source_type="voicebox_generated",
+            source_type="cloud_tts_generated" if profile["provider_id"] == "doubao" else "voicebox_generated",
             profile=profile,
         )
         _audio_candidates(turn).append(record)
@@ -1121,7 +1140,7 @@ def apply_voicebox_driving_audio_candidate(project_dir: Path, turn_id: str, cand
     if not isinstance(candidate, dict) or candidate.get("state") != "candidate":
         raise AvatarCloudError("请先生成并试听一个有效的本地候选音频")
     if candidate.get("source_type") != "voicebox_generated":
-        raise AvatarCloudError("只能采用 Haike Video 本地配音生成的候选音频")
+        raise AvatarCloudError("只能采用 OpenMontage 本地配音生成的候选音频")
     if candidate.get("script_text_sha256") != _script_text_hash(str(turn.get("text") or "")):
         raise AvatarCloudError("该候选音频对应的台词已变化，请按最新脚本重新生成")
     audio_path = _safe_project_file(project_dir, str(candidate.get("path") or ""))
@@ -1165,8 +1184,6 @@ def start_voicebox_driving_audio_batch(project_dir: Path, payload: dict | None =
     if existing_batch and existing_batch.get("status") in {"queued", "running"}:
         # A repeated click is a safe resume request, not a second concurrent queue.
         return package
-    if VoiceboxTTS().get_status().value != "available":
-        raise AvatarCloudError("Haike Video 本地配音当前不可用，请先完成安装并启动服务")
     catalog, profiles, by_id = _voicebox_catalog()
     mappings = _reconcile_voicebox_speaker_mappings(package, catalog, profiles, by_id)
     mapping_by_speaker = {str(item["speaker_id"]): item for item in mappings}

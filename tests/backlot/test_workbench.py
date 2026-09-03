@@ -74,7 +74,7 @@ def test_daily_story_headlines_reuse_one_asset_for_all_scenes_in_story(tmp_path:
     assert overlays[0]["story_id"] == "S01"
     assert overlays[0]["start_seconds"] == 0
     assert overlays[0]["end_seconds"] == 10
-    assert overlays[0]["x"] == int(1080 * .36)
+    assert overlays[0]["x"] == int(1080 * .04)
     assert {item["story_id"] for item in report["assets"]} == {"S01", "S02"}
     assert all((tmp_path / item["path"]).is_file() for item in report["assets"])
 
@@ -90,6 +90,23 @@ def test_daily_story_headline_preserves_space_inside_latin_product_name(tmp_path
     _, report = workbench_mod._daily_story_headline_overlays(tmp_path, state, 1080, 1920)
 
     assert report["assets"][0]["line_1"] == "GPT-5.6 Sol"
+
+
+def test_daily_story_headline_uses_persisted_project_layout(tmp_path: Path):
+    state = {
+        "story_headline_layout": {"x": .04, "y": .08, "width": .56, "height": .12},
+        "scenes": [{
+            "story_id": "S01", "start_seconds": 0, "end_seconds": 5,
+            "headline_overlay": {"mode": "two_line", "line_1": "全球首个", "line_2": "太空算力云开放服务"},
+        }],
+    }
+
+    overlays, report = workbench_mod._daily_story_headline_overlays(tmp_path, state, 1080, 1920)
+
+    assert overlays[0]["x"] == int(1080 * .04)
+    assert overlays[0]["y"] == int(1920 * .08)
+    assert overlays[0]["width"] == int(1080 * .56)
+    assert report["placement"] == {"x": 43, "y": 153, "width": 604, "height": 230}
 
 
 def test_visual_timeline_hot_swap_keeps_scene_story_id():
@@ -174,6 +191,104 @@ def test_video_loudness_normalization_uses_measured_two_pass_and_peak_headroom(t
     assert source.read_bytes() == b"normalized"
     assert report["normalization_true_peak_target_dbtp"] == -2.0
     assert report["acceptance_true_peak_limit_dbtp"] == -1.0
+
+
+def test_video_loudness_normalization_rechecks_after_aac_peak_overshoot(tmp_path, monkeypatch):
+    source = tmp_path / "edge-preview.mp4"
+    source.write_bytes(b"mixed")
+    captured: list[list[str]] = []
+    measurements = iter([
+        {
+            "integrated_lufs": -14.3,
+            "true_peak_dbtp": -0.97,
+            "loudness_range_lu": 2.5,
+            "threshold_lufs": -24.0,
+        },
+        {
+            "integrated_lufs": -14.6,
+            "true_peak_dbtp": -1.24,
+            "loudness_range_lu": 2.5,
+            "threshold_lufs": -24.3,
+        },
+    ])
+
+    monkeypatch.setattr(workbench_mod, "_ffmpeg_available", lambda: "ffmpeg")
+    monkeypatch.setattr(workbench_mod, "_analyze_loudnorm", lambda *_args, **_kwargs: {
+        "input_i": -15.3,
+        "input_tp": -0.96,
+        "input_lra": 2.6,
+        "input_thresh": -25.5,
+        "target_offset": 0.2,
+    })
+    monkeypatch.setattr(workbench_mod, "_measure_integrated_loudness", lambda *_args: next(measurements))
+
+    def fake_run(command):
+        captured.append(list(command))
+        Path(command[-1]).write_bytes(b"normalized")
+        return True, "ok"
+
+    monkeypatch.setattr(workbench_mod, "_run_media", fake_run)
+
+    report = workbench_mod._normalize_video_loudness(tmp_path, source, target_lufs=-14.0)
+
+    assert len(captured) == 2
+    safety_filter = captured[1][captured[1].index("-af") + 1]
+    assert safety_filter == "volume=-0.230dB"
+    assert report["peak_safety_attenuation_db"] == pytest.approx(-0.23)
+    assert report["true_peak_dbtp"] == -1.24
+
+
+def test_video_loudness_preview_records_warning_without_blocking(tmp_path, monkeypatch):
+    source = tmp_path / "review-preview.mp4"
+    source.write_bytes(b"mixed")
+    monkeypatch.setattr(workbench_mod, "_ffmpeg_available", lambda: "ffmpeg")
+    monkeypatch.setattr(workbench_mod, "_analyze_loudnorm", lambda *_args, **_kwargs: {
+        "input_i": -15.6,
+        "input_tp": -2.0,
+        "input_lra": 2.6,
+        "input_thresh": -25.5,
+        "target_offset": 0.0,
+    })
+    monkeypatch.setattr(workbench_mod, "_measure_integrated_loudness", lambda *_args: {
+        "integrated_lufs": -15.6,
+        "true_peak_dbtp": -2.0,
+        "loudness_range_lu": 2.5,
+        "threshold_lufs": -24.0,
+    })
+    monkeypatch.setattr(workbench_mod, "_run_media", lambda command: (Path(command[-1]).write_bytes(b"normalised") or True, "ok"))
+
+    report = workbench_mod._normalize_video_loudness(
+        tmp_path,
+        source,
+        target_lufs=-14.0,
+        enforce_acceptance=False,
+    )
+
+    assert report["acceptance_enforced"] is False
+    assert report["acceptance_status"] == "warning"
+
+
+def test_video_loudness_formal_render_keeps_hard_acceptance(tmp_path, monkeypatch):
+    source = tmp_path / "formal.mp4"
+    source.write_bytes(b"mixed")
+    monkeypatch.setattr(workbench_mod, "_ffmpeg_available", lambda: "ffmpeg")
+    monkeypatch.setattr(workbench_mod, "_analyze_loudnorm", lambda *_args, **_kwargs: {
+        "input_i": -15.6,
+        "input_tp": -2.0,
+        "input_lra": 2.6,
+        "input_thresh": -25.5,
+        "target_offset": 0.0,
+    })
+    monkeypatch.setattr(workbench_mod, "_measure_integrated_loudness", lambda *_args: {
+        "integrated_lufs": -15.6,
+        "true_peak_dbtp": -2.0,
+        "loudness_range_lu": 2.5,
+        "threshold_lufs": -24.0,
+    })
+    monkeypatch.setattr(workbench_mod, "_run_media", lambda command: (Path(command[-1]).write_bytes(b"normalised") or True, "ok"))
+
+    with pytest.raises(workbench_mod.WorkbenchError, match="响度未达到发布容差"):
+        workbench_mod._normalize_video_loudness(tmp_path, source, target_lufs=-14.0)
 
 
 def test_atomic_write_retries_transient_windows_access_denial(tmp_path, monkeypatch):
@@ -497,6 +612,41 @@ def test_asset_library_audit_cleanup_and_restore_endpoints(client, projects_root
     assert next(item for item in restored.json()["assets"] if item["id"] == asset_id)["lifecycle"]["status"] == "active"
 
 
+@pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg is required for uploaded-video validation")
+def test_local_video_upload_is_streamed_validated_and_registered(client, projects_root):
+    project = make_project(projects_root)
+    source = projects_root / "duck-upload.mp4"
+    subprocess.run([
+        _ffmpeg_available(), "-y", "-f", "lavfi", "-i", "color=c=navy:s=160x90:r=10:d=1",
+        "-an", "-c:v", "libx264", "-pix_fmt", "yuv420p", str(source),
+    ], check=True, capture_output=True)
+
+    response = client.put(
+        "/api/project/film/workbench/assets/uploads?filename=../../duck.mp4&name=机器鸭本地素材&license=已授权",
+        content=source.read_bytes(),
+        headers={"Content-Type": "application/octet-stream"},
+    )
+
+    assert response.status_code == 200, response.text
+    asset = response.json()["assets"][-1]
+    assert asset["name"] == "机器鸭本地素材"
+    assert asset["type"] == "video"
+    assert asset["source_type"] == "human_provided"
+    assert asset["path"].startswith("assets/uploads/asset-")
+    assert (project / asset["path"]).is_file()
+    assert asset["duration_seconds"] >= .9
+    assert asset["resolution"] == {"width": 160, "height": 90}
+    assert not list((project / "assets" / "uploads").glob(".incoming-*"))
+
+    invalid = client.put(
+        "/api/project/film/workbench/assets/uploads?filename=payload.exe",
+        content=b"not-media",
+        headers={"Content-Type": "application/octet-stream"},
+    )
+    assert invalid.status_code == 422
+    assert "视频或图片" in invalid.json()["detail"]
+
+
 def test_subtitles_are_split_into_short_phrase_cues(projects_root):
     project = make_project(projects_root)
     scenes = [{"id": "scene-a", "start_seconds": 0, "end_seconds": 10, "script_section_id": "s1"}]
@@ -744,7 +894,8 @@ def test_workbench_client_exposes_persistent_light_dark_theme_switch(client, pro
     assert page.status_code == 200
     assert script.status_code == 200
     assert stylesheet.status_code == 200
-    assert 'localStorage.getItem("backlot.theme")' in page.text
+    assert 'const storedTheme = localStorage.getItem(themeKey);' in page.text
+    assert 'const theme = storedTheme === "dark" ? "dark" : "light";' in page.text
     assert 'const THEME_KEY = "backlot.theme"' in script.text
     assert "renderThemeToggle()" in script.text
     assert "切换至${nextLabel}主题" in script.text
@@ -1063,6 +1214,572 @@ def test_visual_timeline_rejects_gaps_and_saves_seamless_blocks(client, projects
     assert len({item["usage_id"] for item in blocks}) == 2
 
 
+def test_visual_composition_defaults_to_old_full_bleed_without_changing_timeline(projects_root):
+    project = make_project(projects_root)
+    state = workbench_mod.bootstrap_workbench(project)
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+
+    original_blocks = list(scene["visual_timeline"]["blocks"])
+    composition = scene["visual_composition"]
+
+    assert composition["layout_recipe"] == "full_bleed"
+    assert composition["overlays"] == []
+    assert scene["visual_timeline"]["blocks"] == original_blocks
+
+
+def test_visual_composition_endpoint_saves_precise_focus_card_and_invalidates_preview(client, projects_root):
+    project = make_project(projects_root)
+    (project / "assets" / "hero.png").write_bytes(b"hero")
+    state = client.post("/api/project/film/workbench/bootstrap").json()
+    added = client.post("/api/project/film/workbench/assets", json={
+        "name": "机器鸭特写", "type": "image", "source_type": "human_provided", "path": "assets/hero.png",
+    }).json()["assets"][-1]
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+    response = client.put("/api/project/film/workbench/scenes/scene-a/visual-composition", json={
+        "expected_revision": scene["visual_composition"]["revision"],
+        "layout_recipe": "focus_card",
+        "overlays": [{
+            "start_seconds": .5, "end_seconds": 3.5, "asset_id": added["id"],
+            "source_in_seconds": 0, "source_out_seconds": 3, "fit": "contain",
+        }],
+        "frame_style": {"width_ratio": .8, "height_ratio": .5, "border_radius_ratio": .02, "border_color": "#AADDFF", "shadow": "soft"},
+    })
+
+    assert response.status_code == 200, response.text
+    saved = next(item for item in response.json()["scenes"] if item["id"] == "scene-a")
+    assert saved["visual_composition"]["layout_recipe"] == "focus_card"
+    assert saved["visual_composition"]["overlays"][0]["id"] == "VL-001"
+    assert saved["visual_composition"]["overlays"][0]["start_seconds"] == .5
+    assert saved["review_preview"]["status"] == "idle"
+    assert "画面布局已更新" in saved["review_preview"]["stale_reason"]
+    assert response.json()["automation"]["render"]["status"] in {"idle", "stale"}
+
+
+def test_visual_composition_accepts_safe_source_aspect_placement_and_rejects_speed_or_drift(client, projects_root):
+    project = make_project(projects_root)
+    source = project / "assets" / "video" / "landscape-hero.mp4"
+    source.write_bytes(b"hero-video")
+    state = client.post("/api/project/film/workbench/bootstrap").json()
+    added = client.post("/api/project/film/workbench/assets", json={
+        "name": "横屏机械鸭", "type": "video", "source_type": "human_provided",
+        "path": "assets/video/landscape-hero.mp4", "duration_seconds": 4,
+        "resolution": {"width": 1920, "height": 1080},
+    }).json()["assets"][-1]
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+    base = {
+        "expected_revision": scene["visual_composition"]["revision"],
+        "layout_recipe": "focus_card",
+        "overlays": [{
+            "id": "VL-001", "role": "hero", "asset_id": added["id"],
+            "start_seconds": .5, "end_seconds": 3.5,
+            "source_in_seconds": .25, "source_out_seconds": 3.25,
+            "fit": "contain", "muted": True, "playback_rate": 1,
+            "placement": {
+                "preset_id": "landscape_hero_center",
+                "position_x_ratio": .5, "position_y_ratio": .47,
+                "size_ratio": .74, "aspect_mode": "source", "max_height_ratio": .78,
+            },
+        }],
+    }
+
+    invalid_speed = client.put(
+        "/api/project/film/workbench/scenes/scene-a/visual-composition",
+        json={**base, "overlays": [{**base["overlays"][0], "playback_rate": .75}]},
+    )
+    assert invalid_speed.status_code == 422
+    assert "1 倍速" in invalid_speed.json()["detail"]
+
+    invalid_audio = client.put(
+        "/api/project/film/workbench/scenes/scene-a/visual-composition",
+        json={**base, "overlays": [{**base["overlays"][0], "muted": False}]},
+    )
+    assert invalid_audio.status_code == 422
+    assert "静音" in invalid_audio.json()["detail"]
+
+    invalid_drift = client.put(
+        "/api/project/film/workbench/scenes/scene-a/visual-composition",
+        json={**base, "overlays": [{**base["overlays"][0], "source_out_seconds": 2.25}]},
+    )
+    assert invalid_drift.status_code == 422
+    assert "1 帧" in invalid_drift.json()["detail"]
+
+    saved = client.put(
+        "/api/project/film/workbench/scenes/scene-a/visual-composition", json=base,
+    )
+    assert saved.status_code == 200, saved.text
+    overlay = next(item for item in saved.json()["scenes"] if item["id"] == "scene-a")["visual_composition"]["overlays"][0]
+    assert overlay["muted"] is True
+    assert overlay["playback_rate"] == 1
+    assert overlay["placement"] == {
+        "preset_id": "landscape_hero_center",
+        "position_x_ratio": .5,
+        "position_y_ratio": .47,
+        "size_ratio": .74,
+        "aspect_mode": "source",
+        "max_height_ratio": .78,
+    }
+
+
+def test_visual_composition_rejects_placement_outside_canvas(client, projects_root):
+    project = make_project(projects_root)
+    (project / "assets" / "hero.png").write_bytes(b"hero")
+    state = client.post("/api/project/film/workbench/bootstrap").json()
+    added = client.post("/api/project/film/workbench/assets", json={
+        "name": "横屏机械鸭图片", "type": "image", "source_type": "human_provided",
+        "path": "assets/hero.png", "resolution": {"width": 1600, "height": 900},
+    }).json()["assets"][-1]
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+
+    response = client.put("/api/project/film/workbench/scenes/scene-a/visual-composition", json={
+        "expected_revision": scene["visual_composition"]["revision"],
+        "layout_recipe": "focus_card",
+        "overlays": [{
+            "asset_id": added["id"], "start_seconds": 0, "end_seconds": 2,
+            "placement": {
+                "preset_id": "landscape_hero_center", "position_x_ratio": .05,
+                "position_y_ratio": .5, "size_ratio": .74,
+                "aspect_mode": "source", "max_height_ratio": .78,
+            },
+        }],
+    })
+
+    assert response.status_code == 422
+    assert "画布" in response.json()["detail"]
+
+
+def test_portrait_hero_recommendation_stays_above_landscape_caption_safe_zone():
+    placement = workbench_mod._recommended_visual_placement(
+        {"resolution": {"width": 720, "height": 1280}}, 1920, 1080,
+    )
+    source_aspect = 720 / 1280
+    width_ratio = min(
+        placement["size_ratio"],
+        placement["max_height_ratio"] * (1080 / 1920) * source_aspect,
+    )
+    height_ratio = width_ratio * (1920 / 1080) / source_aspect
+
+    assert placement["preset_id"] == "portrait_hero_center"
+    assert placement["position_y_ratio"] + height_ratio / 2 <= .78
+
+
+def test_vision_v2_candidate_adoption_writes_auditable_current_scene_draft(client, projects_root):
+    project = make_project(projects_root)
+    source = project / "assets" / "video" / "duck-skating.mp4"
+    source.write_bytes(b"duck-skating-source")
+    frame = project / "assets" / "duck-skating-frame.jpg"
+    frame.write_bytes(b"frame")
+    state = workbench_mod.bootstrap_workbench(project)
+    asset = workbench_mod._append_asset(project, state, {
+        "name": "机械鸭滑行", "type": "video", "source_type": "human_provided",
+        "path": "assets/video/duck-skating.mp4", "duration_seconds": 6,
+        "resolution": {"width": 1920, "height": 1080},
+    })
+    signature = "a" * 64
+    index_path = project / "artifacts" / "media-index" / "duck-vision.json"
+    write_json(index_path, {
+        "version": 2, "status": "completed", "signature": signature,
+        "source": {"fingerprint": workbench_mod.media_content_fingerprint(source)},
+        "vision": {"status": "completed", "model": "test-vision"},
+        "shots": [{
+            "shot_id": "SHOT-0002", "start_seconds": 2.5, "end_seconds": 5.5,
+            "description": {
+                "summary": "机械鸭在地面持续向前滑行",
+                "environment": "室内平整地面",
+                "entities": [{"name": "机械鸭"}],
+                "actions": [{"name": "滑行"}],
+                "screen_text": [], "unknowns": ["速度无法精确判断"],
+            },
+            "frames": [{
+                "frame_id": "FRAME-0002", "time_seconds": 3.5,
+                "path": "assets/duck-skating-frame.jpg", "selected_for_vision": True,
+            }],
+        }],
+    })
+    asset["media_index"] = {
+        "status": "completed", "stage": "vision",
+        "vision_index_path": "artifacts/media-index/duck-vision.json",
+    }
+    workbench_mod._save(project, state)
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+
+    recommendations = client.get(
+        f"/api/project/film/workbench/assets/{asset['id']}/media-index/recommendations",
+        params={"query": "机械鸭滑行", "limit": 6},
+    )
+    assert recommendations.status_code == 200, recommendations.text
+    result = recommendations.json()
+    assert result["evidence_source"] == "vision_v2"
+    assert result["index_fingerprint"] == signature
+    assert result["candidates"][0]["segment_id"] == "SHOT-0002"
+    assert result["candidates"][0]["entities"] == ["机械鸭"]
+    assert result["candidates"][0]["actions"] == ["滑行"]
+
+    adopted = client.post(
+        f"/api/project/film/workbench/assets/{asset['id']}/media-index/recommendations/SHOT-0002/adopt",
+        json={
+            "scene_id": "scene-a", "query": "机械鸭滑行",
+            "expected_revision": scene["visual_composition"]["revision"],
+        },
+    )
+
+    assert adopted.status_code == 200, adopted.text
+    saved_scene = next(item for item in adopted.json()["scenes"] if item["id"] == "scene-a")
+    overlay = saved_scene["visual_composition"]["overlays"][0]
+    assert saved_scene["visual_composition"]["layout_recipe"] == "focus_card"
+    assert overlay["asset_id"] == asset["id"]
+    assert overlay["source_in_seconds"] == 2.5
+    assert overlay["source_out_seconds"] == 5.5
+    assert overlay["end_seconds"] - overlay["start_seconds"] == 3
+    assert overlay["candidate_evidence"] == {
+        "source": "vision_v2", "shot_id": "SHOT-0002",
+        "query": "机械鸭滑行", "index_fingerprint": signature,
+    }
+    assert overlay["muted"] is True
+    assert overlay["playback_rate"] == 1
+    assert overlay["locked"] is False
+    assert "画面布局已更新" in saved_scene["review_preview"]["stale_reason"]
+
+
+def test_visual_composition_rejects_overlaps_stale_revision_and_locked_changes(client, projects_root):
+    project = make_project(projects_root)
+    (project / "assets" / "hero.png").write_bytes(b"hero")
+    client.post("/api/project/film/workbench/bootstrap")
+    added = client.post("/api/project/film/workbench/assets", json={
+        "name": "机器鸭特写", "type": "image", "source_type": "human_provided", "path": "assets/hero.png",
+    }).json()["assets"][-1]
+    initial = client.get("/api/project/film/workbench").json()
+    revision = next(item for item in initial["scenes"] if item["id"] == "scene-a")["visual_composition"]["revision"]
+    overlapping = client.put("/api/project/film/workbench/scenes/scene-a/visual-composition", json={
+        "expected_revision": revision, "layout_recipe": "focus_card",
+        "overlays": [
+            {"start_seconds": 0, "end_seconds": 2.5, "asset_id": added["id"]},
+            {"start_seconds": 2, "end_seconds": 4, "asset_id": added["id"]},
+        ],
+    })
+    assert overlapping.status_code == 422
+    assert "不能互相重叠" in overlapping.json()["detail"]
+
+    saved = client.put("/api/project/film/workbench/scenes/scene-a/visual-composition", json={
+        "expected_revision": revision, "layout_recipe": "focus_card",
+        "overlays": [{"id": "VL-001", "start_seconds": 0, "end_seconds": 2, "asset_id": added["id"], "locked": True}],
+    })
+    assert saved.status_code == 200
+    current = next(item for item in saved.json()["scenes"] if item["id"] == "scene-a")["visual_composition"]
+    stale = client.put("/api/project/film/workbench/scenes/scene-a/visual-composition", json={
+        "expected_revision": revision, "layout_recipe": "full_bleed", "overlays": current["overlays"],
+    })
+    assert stale.status_code == 409
+    assert "其他操作中更新" in stale.json()["detail"]
+    changed_locked = client.put("/api/project/film/workbench/scenes/scene-a/visual-composition", json={
+        "expected_revision": current["revision"], "layout_recipe": "focus_card",
+        "overlays": [{**current["overlays"][0], "end_seconds": 2.5}],
+    })
+    assert changed_locked.status_code == 422
+    assert "已锁定" in changed_locked.json()["detail"]
+
+    unsupported = client.put("/api/project/film/workbench/scenes/scene-a/visual-composition", json={
+        "version": 2, "expected_revision": current["revision"],
+        "layout_recipe": "focus_card", "overlays": current["overlays"],
+    })
+    assert unsupported.status_code == 422
+    assert "第 1 版" in unsupported.json()["detail"]
+
+
+def test_visual_composition_lock_metadata_does_not_change_preview_signature(projects_root):
+    project = make_project(projects_root)
+    (project / "assets" / "hero.png").write_bytes(b"hero")
+    state = workbench_mod.bootstrap_workbench(project)
+    asset = workbench_mod._append_asset(project, state, {
+        "name": "机器鸭特写", "type": "image", "source_type": "human_provided", "path": "assets/hero.png",
+    })
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+    scene["visual_composition"] = {
+        **workbench_mod._default_visual_composition(), "layout_recipe": "focus_card",
+        "overlays": [{
+            "id": "VL-001", "role": "hero", "asset_id": asset["id"],
+            "start_seconds": 0, "end_seconds": 2, "source_in_seconds": 0,
+            "source_out_seconds": 2, "fit": "contain", "locked": False,
+        }],
+    }
+    unlocked = workbench_mod._review_preview_signature(project, state, scene)
+    scene["visual_composition"]["overlays"][0]["locked"] = True
+
+    assert workbench_mod._review_preview_signature(project, state, scene) == unlocked
+
+
+def test_story_headline_layout_changes_scene_review_preview_signature(projects_root):
+    project = make_project(projects_root)
+    state = workbench_mod.bootstrap_workbench(project)
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+    scene["story_id"] = "S01"
+    scene["headline_overlay"] = {
+        "mode": "two_line", "line_1": "全球首个", "line_2": "太空算力云开放服务",
+    }
+    original = workbench_mod._review_preview_signature(project, state, scene)
+
+    state["story_headline_layout"] = {"x": .04, "y": .15, "width": .56, "height": .125}
+
+    assert workbench_mod._review_preview_signature(project, state, scene) != original
+
+
+def test_source_color_contract_tone_maps_only_hdr_inputs(monkeypatch, tmp_path):
+    hdr = tmp_path / "hdr.mp4"
+    sdr = tmp_path / "sdr.mp4"
+    monkeypatch.setattr(
+        workbench_mod,
+        "_video_color_metadata",
+        lambda path, _ffmpeg=None: {
+            "color_transfer": "arib-std-b67" if path == hdr else "bt709",
+        },
+    )
+
+    assert workbench_mod._source_to_sdr_bt709_filter(hdr, "ffmpeg") == workbench_mod._HDR_TO_SDR_BT709_FILTER
+    assert workbench_mod._source_to_sdr_bt709_filter(sdr, "ffmpeg") == workbench_mod._SDR_BT709_TAG_FILTER
+    assert "tonemap=" not in workbench_mod._source_to_sdr_bt709_filter(sdr, "ffmpeg")
+
+
+def test_focus_card_materializer_routes_one_layered_remotion_render(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    hero = project / "assets" / "hero.png"
+    hero.write_bytes(b"hero")
+    base = project / "renders" / "visual-timelines" / "base.mp4"
+    base.parent.mkdir(parents=True)
+    base.write_bytes(b"base")
+    state = workbench_mod.bootstrap_workbench(project)
+    asset = workbench_mod._append_asset(project, state, {
+        "name": "机器鸭特写", "type": "image", "source_type": "human_provided", "path": "assets/hero.png",
+        "resolution": {"width": 1600, "height": 900},
+    })
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+    scene["visual_composition"] = {
+        **workbench_mod._default_visual_composition(), "layout_recipe": "focus_card",
+        "overlays": [{
+            "id": "VL-001", "role": "hero", "asset_id": asset["id"],
+            "start_seconds": .5, "end_seconds": 3.5, "source_in_seconds": 0,
+            "source_out_seconds": 3, "fit": "contain", "muted": True,
+            "playback_rate": 1, "locked": False,
+            "placement": {
+                "preset_id": "landscape_hero_center", "position_x_ratio": .58,
+                "position_y_ratio": .45, "size_ratio": .7,
+                "aspect_mode": "source", "max_height_ratio": .78,
+            },
+        }],
+    }
+    calls = []
+
+    class FakeCompose:
+        def execute(self, payload):
+            calls.append(payload)
+            Path(payload["output_path"]).write_bytes(b"layered")
+            return SimpleNamespace(success=True, error=None)
+
+    monkeypatch.setattr(workbench_mod, "VideoCompose", FakeCompose)
+    monkeypatch.setattr(workbench_mod, "_materialize_scene_visual_timeline", lambda *_args: base)
+    monkeypatch.setattr(workbench_mod, "_probe_duration_seconds", lambda *_args, **_kwargs: 4.0)
+
+    output = workbench_mod._materialize_scene_visual_composition(project, state, scene, "ffmpeg")
+
+    assert output.is_file()
+    assert len(calls) == 1
+    props = calls[0]["composition_data"]
+    assert props["renderer_family"] == "layered-content"
+    assert props["scenes"][0]["kind"] == "layered"
+    assert props["scenes"][0]["overlays"][0]["startSeconds"] == .5
+    assert props["scenes"][0]["overlays"][0]["muted"] is True
+    assert props["scenes"][0]["overlays"][0]["playbackRate"] == 1
+    assert props["scenes"][0]["overlays"][0]["placement"] == {
+        "presetId": "landscape_hero_center", "positionXRatio": .58,
+        "positionYRatio": .45, "sizeRatio": .7,
+        "aspectMode": "source", "maxHeightRatio": .78,
+        "sourceAspectRatio": pytest.approx(1600 / 900),
+    }
+    assert props["scenes"][0]["background"]["src"] == str(base.resolve())
+
+
+def test_focus_card_frame_contract_matches_javascript_half_up_and_quantized_rate(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    hero = project / "assets" / "video" / "half-frame.mp4"
+    hero.write_bytes(b"hero-video")
+    base = project / "renders" / "visual-timelines" / "base.mp4"
+    base.parent.mkdir(parents=True)
+    base.write_bytes(b"base")
+    state = workbench_mod.bootstrap_workbench(project)
+    state["settings"]["frame_rate"] = 30
+    asset = workbench_mod._append_asset(project, state, {
+        "name": "半帧边界视频", "type": "video", "source_type": "human_provided",
+        "path": "assets/video/half-frame.mp4", "duration_seconds": 1,
+    })
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+    scene["visual_composition"] = {
+        **workbench_mod._default_visual_composition(), "layout_recipe": "focus_card",
+        "overlays": [{
+            "id": "VL-001", "role": "hero", "asset_id": asset["id"],
+            "start_seconds": .150, "end_seconds": .551,
+            "source_in_seconds": .017, "source_out_seconds": .418,
+            "fit": "contain", "locked": False,
+        }],
+    }
+    calls = []
+
+    class FakeCompose:
+        def execute(self, payload):
+            calls.append(payload)
+            Path(payload["output_path"]).write_bytes(b"layered")
+            return SimpleNamespace(success=True, error=None)
+
+    monkeypatch.setattr(workbench_mod, "VideoCompose", FakeCompose)
+    monkeypatch.setattr(workbench_mod, "_materialize_scene_visual_timeline", lambda *_args: base)
+    monkeypatch.setattr(workbench_mod, "_probe_duration_seconds", lambda *_args, **_kwargs: 4.0)
+
+    workbench_mod._materialize_scene_visual_composition(project, state, scene, "ffmpeg")
+
+    overlay = calls[0]["composition_data"]["scenes"][0]["overlays"][0]
+    assert workbench_mod._nonnegative_frame(.150, 30) == 5
+    assert [overlay["startFrame"], overlay["endFrame"]] == [5, 17]
+    assert [overlay["trimBeforeFrame"], overlay["trimAfterFrame"]] == [1, 13]
+    assert overlay["playbackRate"] == 1
+    assert calls[0]["composition_data"]["durationFrames"] == 120
+
+
+def test_focus_card_new_video_is_normalized_to_silent_cfr_before_remotion(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    hero = project / "assets" / "video" / "raw-25fps.mp4"
+    hero.write_bytes(b"hero-video")
+    normalized = project / "renders" / "visual-compositions" / "sources" / "normalized.mp4"
+    normalized.parent.mkdir(parents=True)
+    normalized.write_bytes(b"normalized")
+    base = project / "renders" / "visual-timelines" / "base.mp4"
+    base.parent.mkdir(parents=True)
+    base.write_bytes(b"base")
+    state = workbench_mod.bootstrap_workbench(project)
+    state["settings"]["frame_rate"] = 30
+    asset = workbench_mod._append_asset(project, state, {
+        "name": "25帧机械鸭", "type": "video", "source_type": "human_provided",
+        "path": "assets/video/raw-25fps.mp4", "duration_seconds": 6,
+        "resolution": {"width": 1280, "height": 720},
+    })
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+    scene["visual_composition"] = {
+        **workbench_mod._default_visual_composition(), "layout_recipe": "focus_card",
+        "overlays": [{
+            "id": "VL-001", "role": "hero", "asset_id": asset["id"],
+            "start_seconds": 0, "end_seconds": 2,
+            "source_in_seconds": 2.5, "source_out_seconds": 4.5,
+            "fit": "contain", "muted": True, "playback_rate": 1,
+            "placement": workbench_mod._recommended_visual_placement(asset, 1920, 1080),
+            "locked": False,
+        }],
+    }
+    normalized_calls = []
+    compose_calls = []
+
+    monkeypatch.setattr(workbench_mod, "_materialize_scene_visual_timeline", lambda *_args: base)
+    monkeypatch.setattr(workbench_mod, "_probe_duration_seconds", lambda *_args, **_kwargs: 4.0)
+    monkeypatch.setattr(
+        workbench_mod,
+        "_materialize_focus_video_source",
+        lambda _project, source, start, end, fps, _ffmpeg: normalized_calls.append((source, start, end, fps)) or normalized,
+    )
+
+    class FakeCompose:
+        def execute(self, payload):
+            compose_calls.append(payload)
+            Path(payload["output_path"]).write_bytes(b"layered")
+            return SimpleNamespace(success=True, error=None)
+
+    monkeypatch.setattr(workbench_mod, "VideoCompose", FakeCompose)
+
+    workbench_mod._materialize_scene_visual_composition(project, state, scene, "ffmpeg")
+
+    assert normalized_calls == [(hero.resolve(), 75, 135, 30)]
+    overlay = compose_calls[0]["composition_data"]["scenes"][0]["overlays"][0]
+    assert overlay["src"] == str(normalized)
+    assert [overlay["trimBeforeFrame"], overlay["trimAfterFrame"]] == [0, None]
+    assert overlay["playbackRate"] == 1
+    assert overlay["muted"] is True
+
+
+def test_focus_card_normalization_removes_timecode_and_other_auxiliary_tracks(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    source = project / "assets" / "video" / "raw.mp4"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"raw")
+    captured: list[list[str]] = []
+
+    def fake_run(command: list[str]) -> tuple[bool, str]:
+        captured.append(command)
+        Path(command[-1]).write_bytes(b"normalized")
+        return True, ""
+
+    monkeypatch.setattr(workbench_mod, "_run_media", fake_run)
+    monkeypatch.setattr(workbench_mod, "_probe_duration_seconds", lambda *_args, **_kwargs: 2.0)
+
+    output = workbench_mod._materialize_focus_video_source(
+        project, source, 0, 60, 30, "ffmpeg",
+    )
+
+    assert output.is_file()
+    command = captured[0]
+    assert command[command.index("-map") + 1] == "0:v:0"
+    assert "-dn" in command
+    assert command[command.index("-map_metadata") + 1] == "-1"
+    assert command[command.index("-map_chapters") + 1] == "-1"
+    assert command[command.index("-write_tmcd") + 1] == "0"
+    assert "tpad=stop_mode=clone" in command[command.index("-vf") + 1]
+    assert command[command.index("-frames:v") + 1] == "60"
+
+
+def test_timeline_ripple_scales_visual_composition_display_bounds(projects_root):
+    project = make_project(projects_root)
+    state = workbench_mod.bootstrap_workbench(project)
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+    scene["visual_composition"] = {
+        **workbench_mod._default_visual_composition(), "layout_recipe": "focus_card",
+        "overlays": [{
+            "id": "VL-001", "role": "hero", "asset_id": "opening",
+            "start_seconds": .5, "end_seconds": 2,
+            "source_in_seconds": 10, "source_out_seconds": 11.5,
+            "fit": "contain", "locked": False,
+        }],
+    }
+    previous_revision = scene["visual_composition"]["revision"]
+
+    update = workbench_mod._build_timeline_update(state, {"scene-a": 6}, reason="test")
+    workbench_mod._apply_timeline_update(state, update)
+
+    overlay = scene["visual_composition"]["overlays"][0]
+    assert [overlay["start_seconds"], overlay["end_seconds"]] == [.75, 3.0]
+    assert [overlay["source_in_seconds"], overlay["source_out_seconds"]] == [10, 11.5]
+    assert scene["visual_composition"]["revision"] == previous_revision + 1
+
+
+def test_visual_composition_asset_is_not_cleanup_eligible(projects_root):
+    project = make_project(projects_root)
+    (project / "assets" / "managed").mkdir()
+    (project / "assets" / "managed" / "hero.png").write_bytes(b"hero")
+    state = workbench_mod.bootstrap_workbench(project)
+    asset = workbench_mod._append_asset(project, state, {
+        "name": "仅由重点卡片引用", "type": "image", "source_type": "human_provided",
+        "path": "assets/managed/hero.png",
+    })
+    scene = next(item for item in state["scenes"] if item["id"] == "scene-a")
+    scene["visual_composition"] = {
+        **workbench_mod._default_visual_composition(), "layout_recipe": "focus_card",
+        "overlays": [{
+            "id": "VL-001", "role": "hero", "asset_id": asset["id"],
+            "start_seconds": 0, "end_seconds": 2, "source_in_seconds": 0,
+            "source_out_seconds": 2, "fit": "contain", "locked": False,
+        }],
+    }
+    workbench_mod._save(project, state)
+
+    audit = workbench_mod.audit_asset_library(project)
+    row = next(item for item in audit["assets"] if item["id"] == asset["id"])
+    assert row["status"] == "active"
+    assert row["cleanup_eligible"] is False
+    assert any(item["kind"] == "visual_composition" for item in row["references"])
+
+
 def test_smart_visual_ranges_are_balanced_and_never_leave_a_tiny_tail():
     ten_seconds = workbench_mod._balanced_visual_ranges(0, 10.28, "auto")
     fifteen_seconds_auto = workbench_mod._balanced_visual_ranges(0, 15, "auto")
@@ -1223,7 +1940,7 @@ def test_ai_director_visual_plan_routes_slots_and_keeps_the_plan_editable(projec
     })
 
     planned = [block for block in preview["items"][0]["blocks"] if block["status"] == "planned"]
-    assert captured["caption_owner"] == "Haike Video 独立字幕层"
+    assert captured["caption_owner"] == "OpenMontage 独立字幕层"
     assert captured["preferences"]["allowed_routes"] == ["hyperframes", "stock_video"]
     assert captured["preferences"]["primary_image_policy"] == "manual_only"
     assert [block["route"] for block in planned] == ["stock_video", "hyperframes"]
@@ -1818,6 +2535,23 @@ def test_presenter_layout_batch_copy_does_not_copy_character_media(projects_root
     assert second["presenter"]["source_path"] == "assets/avatar/mengmeng.mp4"
 
 
+def test_story_headline_layout_persists_and_invalidates_only_headline_scenes(projects_root):
+    project = make_project(projects_root)
+    state = workbench_mod.bootstrap_workbench(project)
+    first, second = state["scenes"]
+    first["story_id"] = "S01"
+    first["headline_overlay"] = {"mode": "two_line", "line_1": "全球首个", "line_2": "太空算力云开放服务"}
+    first["review_preview"] = {"status": "ready", "output_path": "renders/first.mp4"}
+    second["review_preview"] = {"status": "ready", "output_path": "renders/second.mp4"}
+    workbench_mod._save(project, state)
+
+    updated = workbench_mod.update_story_headline_layout(project, {"x": .04, "y": .09, "width": .56, "height": .125})
+
+    assert updated["story_headline_layout"] == {"x": .04, "y": .09, "width": .56, "height": .125}
+    assert updated["scenes"][0]["review_preview"]["status"] == "stale"
+    assert updated["scenes"][1]["review_preview"]["status"] == "ready"
+
+
 def test_apply_selected_presenter_layout_only_changes_presentation(projects_root):
     project = make_project(projects_root)
     state = workbench_mod.bootstrap_workbench(project)
@@ -1877,10 +2611,10 @@ def test_new_projects_use_the_approved_circle_presenter_framing(projects_root):
     state = workbench_mod.bootstrap_workbench(project)
 
     layouts = state["presenter_layouts"]
-    template = next(item for item in layouts["templates"] if item["id"] == "pip_top_left")
+    template = next(item for item in layouts["templates"] if item["id"] == "pip_top_right")
 
-    assert layouts["default_template_id"] == "pip_top_left"
-    assert template["geometry"] == {"x": .04, "y": .03, "width": .29}
+    assert layouts["default_template_id"] == "pip_top_right"
+    assert template["geometry"] == {"x": .675, "y": .04, "width": .29}
     assert template["shape"] == "circle"
     assert template["crop_bottom"] == 0.0
     assert template["face_crop"] == {"x": .48, "y": .38, "zoom": 1.15}
@@ -1896,7 +2630,7 @@ def test_avatar_pip_bottom_crop_preserves_person_proportions(tmp_path, monkeypat
             "templates": [{
                 "id": "pip_top_left", "name": "左上角解说员",
                 "geometry": {"x": .04, "y": .04, "width": .25},
-                "crop_bottom": 0.0,
+                "crop_bottom": 0.0, "shape": "rounded",
             }],
         },
     }
@@ -1913,6 +2647,8 @@ def test_avatar_pip_bottom_crop_preserves_person_proportions(tmp_path, monkeypat
     assert geometry["height"] == 422
     assert "crop=iw:1688:0:0" in filters
     assert "scale=270:422" in filters
+    assert workbench_mod.AVATAR_PIP_FACE_LIGHTING_FILTER in filters
+    assert filters.index(workbench_mod.AVATAR_PIP_FACE_LIGHTING_FILTER) < filters.index("format=rgba")
     assert "trim=duration=8.000" in filters
 
 
@@ -2172,6 +2908,177 @@ def test_server_restart_recovers_a_pending_visual_batch(projects_root, monkeypat
 
     asyncio.run(recover())
     assert calls == [(project, "VBJ-recover")]
+
+
+def test_server_restart_recovers_one_pending_local_media_index(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    state = workbench_mod.bootstrap_workbench(project)
+    state["automation"]["media_index"] = {
+        "status": "generating", "job_id": "MIJ-recover", "asset_id": "S-001",
+        "stage": "coarse", "started_at": "2026-09-01T00:00:00Z", "request": {},
+    }
+    workbench_mod._save(project, state)
+    calls: list[tuple[Path, str]] = []
+
+    def fake_generate(path, expected_job_id):
+        calls.append((path, expected_job_id))
+        latest = workbench_mod._load_for_write(path)
+        latest["automation"]["media_index"].update({"status": "completed", "finished_at": workbench_mod._now()})
+        return workbench_mod._save(path, latest)
+
+    monkeypatch.setattr(server_mod, "generate_asset_media_index", fake_generate)
+    app = SimpleNamespace(state=SimpleNamespace(recovery_tasks=set(), media_index_tasks={}))
+
+    async def recover() -> None:
+        await server_mod._recover_workbench_background_jobs(app)
+        await asyncio.gather(*list(app.state.recovery_tasks))
+
+    asyncio.run(recover())
+    assert calls == [(project, "MIJ-recover")]
+    assert app.state.media_index_tasks == {}
+
+
+def test_local_material_vision_batch_runs_serially_and_keeps_individual_failures_isolated(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    workbench_mod.bootstrap_workbench(project)
+    second = project / "assets" / "video" / "candidate-2.mp4"
+    second.write_bytes(b"also-not-a-real-video")
+    first_state = workbench_mod.add_asset(project, {
+        "name": "机械鸭动作一", "type": "video", "source_type": "human_provided",
+        "path": "assets/video/candidate.mp4", "license": "测试授权",
+    })
+    second_state = workbench_mod.add_asset(project, {
+        "name": "机械鸭动作二", "type": "video", "source_type": "human_provided",
+        "path": "assets/video/candidate-2.mp4", "license": "测试授权",
+    })
+    asset_ids = [asset["id"] for asset in second_state["assets"] if asset.get("type") == "video"]
+
+    queued = workbench_mod.start_asset_media_index_batch(project, {
+        "asset_ids": asset_ids,
+        "remote_vision_confirmed": True,
+    })
+    batch = queued["automation"]["media_index_batch"]
+    assert batch["status"] == "queued"
+    assert batch["pending_asset_ids"] == asset_ids
+    with pytest.raises(workbench_mod.WorkbenchError, match="正在批量理解"):
+        workbench_mod.start_asset_media_index(project, asset_ids[0], {"stage": "coarse"})
+
+    calls: list[str] = []
+
+    def fake_generate(path: Path, job_id: str) -> dict:
+        calls.append(job_id)
+        latest = workbench_mod._load_for_write(path)
+        job = latest["automation"]["media_index"]
+        asset = next(item for item in latest["assets"] if item["id"] == job["asset_id"])
+        asset["media_index"] = {
+            "status": "completed", "stage": "vision", "job_id": job_id,
+            "vision_index_path": f"artifacts/media-index/{asset['id']}/vision.json",
+        }
+        job.update({"status": "completed", "finished_at": workbench_mod._now()})
+        return workbench_mod._save(path, latest)
+
+    monkeypatch.setattr(workbench_mod, "generate_asset_media_index", fake_generate)
+    completed = workbench_mod.generate_asset_media_index_batch(project, batch["job_id"])
+    finished = completed["automation"]["media_index_batch"]
+    assert finished["status"] == "completed"
+    assert finished["completed_asset_ids"] == asset_ids
+    assert finished["failed_assets"] == []
+    assert len(calls) == 2
+
+
+def test_local_material_vision_batch_recovers_completed_child_without_resubmitting(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    state = workbench_mod.bootstrap_workbench(project)
+    state = workbench_mod.add_asset(project, {
+        "name": "机械鸭已完成素材", "type": "video", "source_type": "human_provided",
+        "path": "assets/video/candidate.mp4", "license": "测试授权",
+    })
+    asset = next(item for item in state["assets"] if item["id"] == "S-002")
+    asset["media_index"] = {
+        "status": "completed", "stage": "vision", "job_id": "MIJ-child-completed",
+        "vision_index_path": "artifacts/media-index/S-002/vision.json",
+    }
+    state["automation"]["media_index"] = {
+        "status": "completed", "job_id": "MIJ-child-completed", "asset_id": "S-002", "stage": "vision",
+    }
+    state["automation"]["media_index_batch"] = {
+        "status": "generating", "job_id": "MIB-recover-child", "stage": "vision",
+        "asset_ids": ["S-002"], "pending_asset_ids": ["S-002"],
+        "completed_asset_ids": [], "failed_assets": [], "skipped_assets": [], "current_asset_id": "S-002",
+    }
+    workbench_mod._save(project, state)
+
+    def never_resubmit(*_args, **_kwargs):
+        raise AssertionError("completed child must not be submitted again")
+
+    monkeypatch.setattr(workbench_mod, "start_asset_media_index", never_resubmit)
+    completed = workbench_mod.generate_asset_media_index_batch(project, "MIB-recover-child")
+    batch = completed["automation"]["media_index_batch"]
+    assert batch["status"] == "completed"
+    assert batch["completed_asset_ids"] == ["S-002"]
+
+
+def test_server_restart_recovers_batch_without_launching_its_child_index_twice(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    state = workbench_mod.bootstrap_workbench(project)
+    state["automation"]["media_index_batch"] = {
+        "status": "generating", "job_id": "MIB-recover", "asset_ids": ["S-001"],
+        "pending_asset_ids": ["S-001"], "completed_asset_ids": [], "failed_assets": [],
+        "current_asset_id": "S-001",
+    }
+    state["automation"]["media_index"] = {
+        "status": "generating", "job_id": "MIJ-child", "asset_id": "S-001", "stage": "vision",
+    }
+    workbench_mod._save(project, state)
+    batch_calls: list[tuple[Path, str]] = []
+    child_calls: list[tuple[Path, str]] = []
+
+    def fake_batch(path: Path, expected_job_id: str) -> dict:
+        batch_calls.append((path, expected_job_id))
+        latest = workbench_mod._load_for_write(path)
+        latest["automation"]["media_index_batch"].update({"status": "completed", "finished_at": workbench_mod._now()})
+        return workbench_mod._save(path, latest)
+
+    def fake_child(path: Path, expected_job_id: str) -> dict:
+        child_calls.append((path, expected_job_id))
+        return workbench_mod.read_workbench(path)
+
+    monkeypatch.setattr(server_mod, "generate_asset_media_index_batch", fake_batch)
+    monkeypatch.setattr(server_mod, "generate_asset_media_index", fake_child)
+    app = SimpleNamespace(state=SimpleNamespace(recovery_tasks=set(), media_index_tasks={}, media_index_batch_tasks={}))
+
+    async def recover() -> None:
+        await server_mod._recover_workbench_background_jobs(app)
+        await asyncio.gather(*list(app.state.recovery_tasks))
+
+    asyncio.run(recover())
+    assert batch_calls == [(project, "MIB-recover")]
+    assert child_calls == []
+    assert app.state.media_index_batch_tasks == {}
+
+
+def test_server_starts_confirmed_local_material_vision_batch(client, projects_root, monkeypatch):
+    project = make_project(projects_root)
+    workbench_mod.bootstrap_workbench(project)
+    workbench_mod.add_asset(project, {
+        "name": "机械鸭本地视频", "type": "video", "source_type": "human_provided",
+        "path": "assets/video/candidate.mp4", "license": "测试授权",
+    })
+    launches: list[tuple[Path, str]] = []
+
+    def fake_launch(_app, path: Path, job_id: str):
+        launches.append((path, job_id))
+        return None
+
+    monkeypatch.setattr(server_mod, "_launch_media_index_batch_worker", fake_launch)
+    response = client.post("/api/project/film/workbench/assets/media-index/vision-batch", json={
+        "remote_vision_confirmed": True,
+    })
+    assert response.status_code == 200
+    batch = response.json()["automation"]["media_index_batch"]
+    assert batch["status"] == "queued"
+    assert batch["asset_ids"] == ["S-002"]
+    assert launches == [(project, batch["job_id"])]
 
 
 def test_workbench_records_source_anchor_assets_and_usage(client, projects_root):
@@ -2678,6 +3585,35 @@ def test_avatar_organize_script_preserves_every_txxx_turn_when_model_merges_sect
     assert state["project"]["script_draft"]["script"]["metadata"]["model_turn_contract_complete"] is False
 
 
+def test_avatar_organize_script_accepts_single_yaya_turn_contract(client, projects_root, monkeypatch):
+    project = make_project(projects_root)
+    write_json(project / "project.json", {
+        "project_id": "film", "title": "单主持整理", "pipeline_type": "avatar-spokesperson",
+    })
+    model_script = {
+        "version": "1.0", "title": "单主持整理", "total_duration_seconds": 10,
+        "sections": [{
+            "id": "T001", "turn_id": "T001", "speaker_id": "yaya", "speaker_name": "雅雅",
+            "label": "开场", "text": "模型润色后的第一条事实。", "start_seconds": 0, "end_seconds": 10,
+            "speaker_directions": "自然", "enhancement_cues": [],
+        }],
+    }
+    monkeypatch.setattr(
+        workbench_mod.OpenAIScript,
+        "execute",
+        lambda self, _inputs: SimpleNamespace(success=True, data={"model": "test-model", "script": model_script}, error=None),
+    )
+    response = client.post("/api/project/film/workbench/script-draft", json={
+        "mode": "organize_script", "organize_strength": "light_polish",
+        "video_title": "单主持整理", "source_text": "T001 雅雅：一条可被润色的事实。", "confirmed": True,
+    })
+
+    assert response.status_code == 200, response.text
+    sections = response.json()["project"]["script_draft"]["script"]["sections"]
+    assert [(item["turn_id"], item["speaker_id"]) for item in sections] == [("T001", "yaya")]
+    assert sections[0]["text"] == "模型润色后的第一条事实。"
+
+
 def test_script_mode_is_preserved_when_model_request_fails(client, projects_root, monkeypatch):
     make_project(projects_root)
     monkeypatch.setattr(
@@ -2996,7 +3932,7 @@ def test_interactive_project_page_is_workbench_but_static_board_is_preserved(cli
     workbench_script = client.get("/ui/workbench.js")
 
     assert workbench.status_code == 200
-    assert "海客视频工厂" in workbench.text
+    assert "海客导演台" in workbench.text
     assert "workbench.js" in workbench.text
     assert "board.js" in static_board.text
 
@@ -3234,6 +4170,26 @@ def test_separated_voicebox_narration_and_video_render_create_a_reviewable_final
     assert completed["automation"]["render"]["runtime"] == "ffmpeg"
     assert (project / completed["automation"]["render"]["output_path"]).is_file()
     assert all(segment["versions"][0].get("artifact_path") for segment in completed["segments"])
+
+
+def test_project_narration_freezes_cloud_provider_and_profile(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    workbench_mod.bootstrap_workbench(project)
+    monkeypatch.setattr(workbench_mod, "get_default_voice", lambda: {
+        "id": "doubao:yaya",
+        "name": "雅雅",
+        "provider_id": "doubao",
+        "provider_name": "豆包云端配音",
+        "default_engine": "doubao_speech_2_0",
+        "available": True,
+    })
+
+    queued = workbench_mod.start_project_narration(project, {"confirmed": True})
+
+    assert queued["automation"]["voice"]["provider"] == "doubao"
+    assert queued["automation"]["voice"]["provider_name"] == "豆包云端配音"
+    assert queued["automation"]["voice"]["profile_id"] == "doubao:yaya"
+    assert queued["automation"]["narration_generation"]["status"] == "generating"
 
 
 def test_full_preview_is_independent_from_approvals_and_batch_confirmation(projects_root, monkeypatch):

@@ -94,6 +94,21 @@ class TestBacklotServerApi:
         assert response.status_code == 200
         assert response.json() == {"ok": True, "app": "backlot"}
 
+    def test_material_vision_details_endpoint_is_project_scoped(self, client, projects_root, monkeypatch):
+        project = _make_project(projects_root, "vision-api")
+        calls = []
+
+        def fake_read(current_project: Path, asset_id: str, *, limit: int):
+            calls.append((current_project, asset_id, limit))
+            return {"asset_id": asset_id, "status": "completed", "shot_count": 1, "shots": []}
+
+        monkeypatch.setattr(server_mod, "read_asset_material_vision", fake_read)
+        response = client.get("/api/project/vision-api/workbench/assets/S-001/media-index/vision?limit=12")
+
+        assert response.status_code == 200
+        assert response.json()["shot_count"] == 1
+        assert calls == [(project, "S-001", 12)]
+
     def test_narration_gain_api_is_independent_from_music(self, client, projects_root, monkeypatch):
         _make_project(projects_root, "voice-level")
         monkeypatch.setattr(
