@@ -831,6 +831,146 @@ textarea, input, select { width: 100%; border: 1px solid var(--line-bright); bor
 :root[data-theme="light"] .scene-item.active .scene-time { color: #80614f; }
 :root[data-theme="light"] .scene-item.active .status { border-color: #c98966; color: #8b4628; background: #fff7ec; }
 
+/* Warm-paper completion: these are application controls, not media pixels.
+   Keep actual video/audio preview surfaces dark only where the source media
+   needs a neutral backdrop. */
+:root[data-theme="light"] :is(
+  .review-preview-panel,
+  .review-preview-preflight,
+  .review-preview-preflight-grid > div,
+  .review-preview-capability,
+  .review-preview-avatar-binding,
+  .review-preview-job,
+  .avatar-template-import,
+  .avatar-user-script-import,
+  .template-turn,
+  .script-paste-box,
+  .avatar-dropzone,
+  .avatar-turn,
+  .avatar-speaker,
+  .avatar-local-switch,
+  .avatar-cut-card,
+  .asr-diagnostic-card,
+  .asr-full-transcript,
+  .asr-turn-diagnostic,
+  .avatar-role,
+  .avatar-speaker-binding,
+  .cloud-job,
+  .avatar-render-spec,
+  .avatar-aspect-status,
+  .voicebox-turn-control,
+  .voicebox-batch-panel,
+  .voicebox-speaker-route,
+  .voicebox-batch-progress,
+  .avatar-handoff,
+  .visual-batch-live
+) {
+  border-color: #d8cdb8;
+  border-radius: 0;
+  background: #fbf6eb;
+  box-shadow: none;
+}
+:root[data-theme="light"] :is(
+  .review-preview-panel,
+  .avatar-template-import,
+  .avatar-user-script-import,
+  .avatar-local-switch,
+  .avatar-render-spec,
+  .voicebox-batch-panel
+) {
+  border-top: 3px solid #406b3a;
+  background: #f7eddd;
+}
+:root[data-theme="light"] .review-preview-planning-selector {
+  border-color: #9ebfc1;
+  border-radius: 0;
+  background: #e3f0ef;
+}
+:root[data-theme="light"] .review-preview-preflight.is-ready {
+  border-color: #91a58b;
+  background: rgba(64, 107, 58, .07);
+}
+:root[data-theme="light"] .review-preview-preflight.is-blocked {
+  border-color: #c78d88;
+  background: #f9e4e1;
+}
+:root[data-theme="light"] .review-preview-capability.ready,
+:root[data-theme="light"] .review-preview-zero-avatar {
+  border-color: #91a58b;
+  border-left-color: #406b3a;
+  background: rgba(64, 107, 58, .07);
+  color: #355e32;
+}
+:root[data-theme="light"] .review-preview-avatar-binding img,
+:root[data-theme="light"] .review-preview-avatar-binding-empty,
+:root[data-theme="light"] .avatar-role-thumb,
+:root[data-theme="light"] .avatar-presenter-preview,
+:root[data-theme="light"] .avatar-shot-empty,
+:root[data-theme="light"] .avatar-provider-input-preview {
+  border-radius: 0;
+  background: #eee1cb;
+}
+:root[data-theme="light"] .review-preview-avatar-binding-title { color: #406b3a !important; }
+:root[data-theme="light"] .review-preview-job.status-running,
+:root[data-theme="light"] .review-preview-job.status-queued,
+:root[data-theme="light"] .voicebox-batch-progress.is-running,
+:root[data-theme="light"] .visual-batch-live.is-running {
+  border-color: #c98966;
+  background: #f8e8d7;
+}
+:root[data-theme="light"] .review-preview-job.status-awaiting_human {
+  border-color: #bd8e54;
+  background: #fbf0d9;
+}
+:root[data-theme="light"] .review-preview-job.status-failed,
+:root[data-theme="light"] .review-preview-job.is-stale {
+  border-color: #c78d88;
+  background: #f9e4e1;
+}
+:root[data-theme="light"] .review-preview-job.status-completed:not(.is-stale) {
+  border-color: #91a58b;
+  background: rgba(64, 107, 58, .07);
+}
+:root[data-theme="light"] .review-preview-job-facts span {
+  border-color: #cbbda7;
+  background: #fffaf0;
+  color: #665d50;
+}
+:root[data-theme="light"] .review-preview-progress { background: #ded2bd; }
+:root[data-theme="light"] .review-preview-progress span { background: linear-gradient(90deg, #c14a2b, #406b3a); }
+:root[data-theme="light"] :is(
+  .review-preview-voice-relation,
+  .review-preview-gate,
+  .review-preview-manual,
+  .review-preview-poll-warning,
+  .review-preview-message-list,
+  .template-check.replace,
+  .avatar-transcript,
+  .avatar-handoff
+) {
+  border-left-color: #c14a2b;
+  background: #f8e8d7;
+  color: #7b582b;
+}
+:root[data-theme="light"] :is(.review-preview-voice-relation.changed, .review-preview-message-list.bad, .review-preview-error) {
+  border-left-color: #c78d88;
+  background: #f9e4e1;
+  color: #8d3832;
+}
+:root[data-theme="light"] .avatar-dropzone.active,
+:root[data-theme="light"] .avatar-role.selected {
+  border-color: #6ba2aa;
+  background: #e3f0ef;
+}
+:root[data-theme="light"] :is(.avatar-cut-card.approved, .voicebox-batch-progress.is-completed, .visual-batch-live.is-completed) {
+  border-color: #91a58b;
+  background: rgba(64, 107, 58, .07);
+}
+:root[data-theme="light"] :is(.avatar-cut-card.needs_manual, .voicebox-batch-progress.is-failed, .visual-batch-live.is-failed) {
+  border-color: #c78d88;
+  background: #f9e4e1;
+}
+
 @media (max-width: 760px) {
   .review-editor-tabs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .review-editor-tab:nth-child(3n) { border-right: 1px solid var(--line); }

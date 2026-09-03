@@ -27,7 +27,7 @@
 
 ## 当前阶段
 
-GitHub 私库为 `https://github.com/hrbj18/Haike_video`，`main`/`dev`/`v0.1.1` 均为 `50352aaa`；`START_HERE.md` 是接手入口，私有数据未进入 Git。新电脑按 `docs/DEPLOYMENT_WINDOWS_ZH-CN.md` 安装依赖后仍须迁移本地配置并授权真实短样本验证。
+GitHub：`https://github.com/hrbj18/Haike_video`；`dev` 为 `dc7bacf` 集成候选，`main`/`v0.1.1` 仍为 `50352aaa`。`START_HERE.md` 是接手入口；私有数据未进入 Git。新电脑安装后仍须迁移本地配置并授权真实短样本验证。
 
 ## 最近验证
 
@@ -49,6 +49,6 @@ GitHub 私库为 `https://github.com/hrbj18/Haike_video`，`main`/`dev`/`v0.1.1`
 
 1. 用遮挡、快动作、小主体长视频做规模验收；性能质量未知。
 2. 自动选材仍须保留 V2 证据和人工采用门，不得直接写入正式成片。
-3. 发布整理已就绪：白名单审计通过；回归后 `dev`→`main`，禁止脏树整推。
+3. `dev` 已含集成候选和暖纸张补丁；独立副本及 Linux 预发布验收后才可合入 `main`。
 4. 私有素材与配置不得经 GitHub 同步；真实 Pexels/RunningHub 验证仍需单独授权和预算。
-5. 项目库为暖纸张逐行清单，暖纸张默认、深色手选；左栏固定，片段六分区/预览回退/选中态完成；回归通过，无付费写入。
+5. 暖纸张为默认，深色仍可手选；工作台、审核预览和数字人导入 UI 已统一，媒体像素不改；回归通过，无付费写入。

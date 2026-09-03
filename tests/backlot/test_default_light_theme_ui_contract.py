@@ -37,3 +37,34 @@ def test_script_draft_editor_uses_warm_paper_tokens_in_light_theme():
     assert ':root[data-theme="light"] .script-edit-section' in source
     assert 'background: #fffaf0;' in source
     assert ':root[data-theme="light"] .script-sentence-number' in source
+
+
+def test_review_preview_and_avatar_import_chrome_finish_in_warm_paper_theme():
+    source = (UI_ROOT / "workbench.css").read_text(encoding="utf-8")
+    completion = source[source.index("/* Warm-paper completion:") :]
+
+    for selector in (
+        ".review-preview-panel",
+        ".review-preview-preflight",
+        ".review-preview-preflight-grid > div",
+        ".review-preview-capability",
+        ".review-preview-avatar-binding",
+        ".review-preview-job",
+        ".avatar-template-import",
+        ".avatar-user-script-import",
+        ".template-turn",
+        ".script-paste-box",
+        ".avatar-turn",
+        ".avatar-cut-card",
+        ".asr-diagnostic-card",
+        ".cloud-job",
+        ".voicebox-batch-panel",
+    ):
+        assert selector in completion
+
+    for token in ("background: #fbf6eb;", "background: #f7eddd;", "background: #f8e8d7;"):
+        assert token in completion
+
+    # A real preview video is intentionally not repainted: only UI chrome moves
+    # to the warm-paper theme, so source pixels retain their expected contrast.
+    assert ".review-preview-player video" not in completion
