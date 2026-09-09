@@ -41,7 +41,7 @@ Cybercab 两条复刻片到 `preview_ready`，未批准/发布。
 
 ## 当前阶段
 
-GitHub：`dev` 为 `dc7bacf` 集成候选，`main`/`v0.1.1` 为 `50352aaa`；私有数据不进 Git。新电脑仍须迁移配置和短样授权。
+GitHub：`dev` 发布 `29d2ecfa` 候选，`main`/`v0.1.1` 为 `50352aaa`；私有数据不进 Git。新电脑仍须迁移配置和短样授权。
 
 ## 最近验证
 

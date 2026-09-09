@@ -1,11 +1,11 @@
 # GitHub 与跨电脑部署
 
-更新时间：2026-09-01
+更新时间：2026-09-09
 
 ## 权威入口
 
 - 私有仓库：`https://github.com/hrbj18/Haike_video`
-- 发布状态：`main` 是稳定版、`dev` 是集成版；`v0.1.1` 与两分支当前均位于 `50352aaa92e083605bf1a75062adbec71199ff6c`。该版本新增可单独发送的核心密钥交接文档和隐藏输入的一键配置脚本。
+- 发布状态：`main`/`v0.1.1` 稳定版为 `50352aaa`；`dev` 已于 2026-09-09 发布 `29d2ecfa` 源码候选，包含统一生产队列、豆包 ASR、本地素材理解、户外互动两次剪辑和多标题图层。
 - 同事入口：GitHub 根目录 `START_HERE.md`；版本由 `VERSION`、`CHANGELOG.md` 和 `docs/handoff/RELEASE_STATUS.md` 共同定义。
 - Windows 完整步骤：`docs/DEPLOYMENT_WINDOWS_ZH-CN.md`
 - 环境变量模板：`.env.example`
