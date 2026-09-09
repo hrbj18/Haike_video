@@ -20,3 +20,13 @@ def test_organize_mode_uses_lower_creativity_than_generation_modes() -> None:
     assert OpenAIScript._temperature("organize_script", "faithful") < OpenAIScript._temperature("organize_script", "light_polish")
     assert OpenAIScript._temperature("organize_script", "light_polish") < OpenAIScript._temperature("expand_idea", "faithful")
     assert OpenAIScript._temperature("expand_idea", "faithful") <= OpenAIScript._temperature("from_scratch", "faithful")
+
+
+def test_news_prompt_requires_story_grouping_instead_of_role_or_turn_labels() -> None:
+    prompt = OpenAIScript._system_prompt("organize_script", "faithful", "news")
+
+    assert "同一件新闻的连续 section 必须复用同一个 story_id" in prompt
+    assert "story_id 表示新闻主题，不是 turn_id" in prompt
+    assert "不得使用主持人姓名、Txxx 轮次" in prompt
+    assert "news_section_kind=closing" in prompt
+    assert "结尾互动段绝不能继承前面新闻的小标题" in prompt

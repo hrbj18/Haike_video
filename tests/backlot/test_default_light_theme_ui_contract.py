@@ -68,3 +68,11 @@ def test_review_preview_and_avatar_import_chrome_finish_in_warm_paper_theme():
     # A real preview video is intentionally not repainted: only UI chrome moves
     # to the warm-paper theme, so source pixels retain their expected contrast.
     assert ".review-preview-player video" not in completion
+
+
+def test_project_toolbar_stays_visible_during_desktop_scroll_without_trapping_mobile():
+    source = (UI_ROOT / "workbench.css").read_text(encoding="utf-8")
+
+    assert ".topbar-wrap {\n  position: sticky;" in source
+    assert "z-index: 20;\n  top: 0;\n  background: var(--page);" in source
+    assert ".topbar-wrap { position: static; box-shadow: none; }" in source

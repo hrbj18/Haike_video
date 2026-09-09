@@ -4,9 +4,19 @@ import hashlib
 import json
 from pathlib import Path
 
+import pytest
+
 
 ROOT = Path(__file__).resolve().parents[2]
 CONFIG = ROOT / "config" / "runninghub"
+_LOCAL_WORKFLOW_FIXTURES = (
+    "infinitetalk_source_original_0016e65b.json",
+    "it24_fast_256x320_4s_v2.json",
+)
+pytestmark = pytest.mark.skipif(
+    not all((CONFIG / name).is_file() for name in _LOCAL_WORKFLOW_FIXTURES),
+    reason="本机 InfiniteTalk 优化夹具不随 GitHub 源码发布",
+)
 SOURCE = CONFIG / "infinitetalk_source_original_0016e65b.json"
 TARGET = CONFIG / "it24_fast_256x320_4s_v2.json"
 RECOMMENDED_TARGET = CONFIG / "InfiniteTalk 工作流 384×480推荐档 V2.json"

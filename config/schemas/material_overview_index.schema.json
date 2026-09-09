@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://haike.local/schemas/material_overview_index.schema.json",
+  "title": "素材快速概览索引 V1",
+  "type": "object",
+  "additionalProperties": true,
+  "required": ["version", "status", "source", "signature", "config", "probe", "sampling", "frames", "sheets", "cells", "index_path"],
+  "properties": {
+    "version": {"const": 1},
+    "status": {"enum": ["sheets_ready", "overview_completed", "completed", "overview_completed_detail_failed"]},
+    "source": {"type": "object", "required": ["path", "name", "fingerprint"]},
+    "signature": {"type": "string", "minLength": 16},
+    "config": {"type": "object"},
+    "probe": {"type": "object"},
+    "sampling": {"type": "object", "required": ["budget_max", "chapters"]},
+    "frames": {"type": "array", "minItems": 1},
+    "sheets": {"type": "array", "minItems": 1},
+    "cells": {"type": "array"},
+    "overview": {"type": "object"},
+    "detail": {"type": "object"},
+    "index_path": {"type": "string", "minLength": 1}
+  }
+}

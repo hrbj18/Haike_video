@@ -1765,6 +1765,37 @@ class HyperFramesCompose(BaseTool):
     }}
     .clip {{ position: absolute; inset: 0; }}
     .clip.video-clip, .clip.image-clip {{ object-fit: cover; width: 100%; height: 100%; }}
+    .clip.image-card {{
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-sizing: border-box;
+      padding: 240px 74px 300px;
+      background:
+        radial-gradient(circle at 18% 16%, color-mix(in srgb, var(--color-accent) 32%, transparent), transparent 36%),
+        radial-gradient(circle at 86% 76%, rgba(46, 126, 255, .24), transparent 38%),
+        linear-gradient(155deg, #10202d 0%, var(--color-bg) 58%, #071019 100%);
+      overflow: hidden;
+    }}
+    .clip.image-card::before {{
+      content: "";
+      position: absolute;
+      inset: 0;
+      opacity: .22;
+      background-image: linear-gradient(rgba(255,255,255,.08) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,.08) 1px, transparent 1px);
+      background-size: 72px 72px;
+    }}
+    .clip.image-card img {{
+      position: relative;
+      display: block;
+      width: min(86%, 900px);
+      height: min(66%, 1180px);
+      object-fit: contain;
+      border: 5px solid rgba(255,255,255,.92);
+      border-radius: 34px;
+      box-shadow: 0 28px 90px rgba(0,0,0,.48), 0 0 0 10px rgba(255,255,255,.08);
+      background: rgba(255,255,255,.08);
+    }}
     .clip.text-card {{ display: flex; align-items: center; justify-content: center; padding: 120px 160px; box-sizing: border-box; text-align: center; }}
     .clip.text-card h1 {{ font-family: var(--font-heading); font-weight: 700; font-size: 96px; line-height: 1.1; margin: 0; color: var(--color-fg); }}
     .clip.text-card .subtitle {{ font-size: 36px; margin-top: 24px; color: var(--color-accent); }}
@@ -1817,6 +1848,19 @@ class HyperFramesCompose(BaseTool):
             tween = (
                 f'tl.from("#{cut_id} h1", {{ y: 40, opacity: 0, duration: 0.6, '
                 f'ease: "power3.out" }}, {self._f(in_s + 0.1)});'
+            )
+            return html, tween
+
+        if ext in _IMAGE_EXTENSIONS and src_path and cut_type == "image_card":
+            rel = self._rel_from_workspace(str(src_path))
+            html = (
+                f'<div id="{cut_id}" class="clip image-card" '
+                f'data-start="{self._f(in_s)}" data-duration="{self._f(duration)}" '
+                f'data-track-index="1"><img src="{self._escape_attr(rel)}" alt=""></div>'
+            )
+            tween = (
+                f'tl.from("#{cut_id} img", {{ scale: 0.9, y: 36, opacity: 0, duration: 0.55, '
+                f'ease: "power3.out" }}, {self._f(in_s)});'
             )
             return html, tween
 

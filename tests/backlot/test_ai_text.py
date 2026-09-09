@@ -440,3 +440,17 @@ def test_refine_scene_copy_uses_neighbours_and_persists_editable_fields(tmp_path
     assert spec["components"] == ["虚拟身份", "粉丝积累", "品牌合作"]
     assert spec["copy_plan"]["status"] == "ready"
     assert "api_key" not in json.dumps(state, ensure_ascii=False).lower()
+def test_interaction_story_uses_exactly_one_provider_submit_contract(monkeypatch):
+    from backlot import ai_text
+
+    captured = {}
+
+    def fake_chat(system, context, **kwargs):
+        captured.update(kwargs)
+        return {"groups": []}, "configured-model"
+
+    monkeypatch.setattr(ai_text, "_chat_json", fake_chat)
+    raw, model = ai_text.plan_interaction_story({"utterances": []})
+    assert raw == {"groups": []} and model == "configured-model"
+    assert captured["allow_compatibility_retry"] is False
+    assert "timeout_seconds" in captured

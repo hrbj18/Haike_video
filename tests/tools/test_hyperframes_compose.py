@@ -1511,6 +1511,30 @@ def test_final_review_tracks_runtime_and_swap():
     assert "runtime_swap_detected" in pp
 
 
+def test_image_card_cut_keeps_source_contained_inside_designed_frame(tmp_path: Path):
+    from tools.video.hyperframes_compose import HyperFramesCompose
+
+    tool = HyperFramesCompose()
+    tool._workspace = tmp_path
+    source = tmp_path / "hero.png"
+    source.write_bytes(b"placeholder")
+
+    html, tween = tool._cut_to_html(
+        0,
+        {"type": "image_card", "source": str(source), "in_seconds": 0, "out_seconds": 3},
+        1080,
+        1920,
+    )
+
+    assert 'class="clip image-card"' in html
+    assert "<img " in html
+    assert "image-card" in tool._generate_index_html(
+        [{"type": "image_card", "source": str(source), "in_seconds": 0, "out_seconds": 3}],
+        {}, 1080, 1920, 3, {"--color-bg": "#111111", "--color-fg": "#FFFFFF", "--color-accent": "#FFAA00", "--font-body": "Inter", "--font-heading": "Inter"}, "card",
+    )
+    assert tween and "scale: 0.9" in tween
+
+
 def test_decision_log_has_render_runtime_category():
     schema_path = (
         Path(__file__).resolve().parent.parent.parent

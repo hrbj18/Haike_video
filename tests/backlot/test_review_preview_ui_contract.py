@@ -78,6 +78,75 @@ def test_story_headline_editor_shows_real_copy_and_reuse_scope() -> None:
     assert ".story-headline-scene-chip.selected" in WORKBENCH_CSS
 
 
+def test_multi_title_editor_exposes_layers_locking_safe_zone_and_versioned_save() -> None:
+    editor = _function_body("renderTextOverlayCompositionEditor")
+    save = _function_body("saveTextOverlayComposition")
+    assert '["titles", "标题图层"]' in WORKBENCH_JS
+    assert 'button("添加图层"' in editor
+    assert 'button("复制"' in editor
+    assert 'button("删除"' in editor
+    assert 'button("上移"' in editor and 'button("下移"' in editor
+    assert 'selected.locked ? "解锁图层" : "锁定图层"' in editor
+    assert 'class: "text-overlay-safe-zone"' in editor
+    assert '"开始秒", "start_seconds"' in editor
+    assert '"入场动画", "enter_animation"' in editor
+    assert '"退场动画", "exit_animation"' in editor
+    assert 'expected_revision: Number(composition.revision || 0)' in save
+    assert 'method: "PUT"' in save
+    assert '本地未保存编辑仍保留' in save
+    assert 'api(`/scenes/${encodeURIComponent(scene.id)}/review-preview`, { method: "POST" })' in save
+    assert '标题已保存，但左侧预览刷新失败' in save
+    assert ".text-overlay-canvas" in WORKBENCH_CSS
+
+
+def test_news_headlines_are_independent_managed_layers_in_title_editor() -> None:
+    composition = _function_body("textOverlayComposition")
+    editor = _function_body("renderTextOverlayCompositionEditor")
+    assert "state.text_overlay_editor_composition" in composition
+    assert 'selected.source_kind === "news_story"' in editor
+    assert 'selectControl("字号模式", "font_size_mode"' in editor
+    assert 'liveTextRangeControl("标题字号"' in editor
+    assert 'liveTextColorControl("标题文字颜色"' in editor
+    assert 'liveTextRangeControl("标题左右位置"' in editor
+    assert 'liveTextRangeControl("标题上下位置"' in editor
+    assert 'selected.locked || managed' in editor
+    assert "文案和时间跟随脚本" in editor
+    assert "拖动字号会自动切换为固定字号" in editor
+    assert ".text-overlay-managed-note" in WORKBENCH_CSS
+
+
+def test_title_editor_reuses_subtitle_live_preview_controls_and_styles() -> None:
+    editor = _function_body("renderTextOverlayCompositionEditor")
+    subtitle_editor = _function_body("renderSubtitleEditor")
+    assert 'class: "panel subtitle-editor text-overlay-editor"' in editor
+    assert 'subtitle-layout-preview-box' in editor
+    assert 'subtitle-style-grid text-overlay-quick-style' in editor
+    assert 'subtitle-position-grid text-overlay-quick-position' in editor
+    assert '高级设置：精确时间、阴影、内边距与动画' in editor
+    assert '还原未保存修改' in editor
+    assert 'liveTextRangeControl("标题字号"' in editor
+    assert 'liveTextRangeControl("字幕大小"' in subtitle_editor
+    assert 'liveTextColorControl("标题文字颜色"' in editor
+    assert 'liveTextColorControl("字幕颜色"' in subtitle_editor
+    assert 'saveAction.disabled = !textOverlayDraftDirty || textOverlayPreviewRefreshing' in editor
+    assert 'revertAction.disabled = !textOverlayDraftDirty' in editor
+    assert '保存并刷新左侧预览' in editor
+    assert '左侧是已保存的真实片段预览' in editor
+
+
+def test_title_editor_preview_matches_renderer_wrapping_and_size_contract() -> None:
+    scaler = _function_body("scaleTextOverlayToCanvas")
+    observer = _function_body("observeTextOverlayCanvas")
+    assert 'String(layer.font_size_mode || "auto") === "auto"' in scaler
+    assert 'document.createElement("canvas").getContext("2d")' in scaler
+    assert "measure.measureText" in scaler
+    assert "ResizeObserver" in observer
+    assert "releaseTextOverlayCanvasObservers();" in WORKBENCH_JS
+    assert ".text-overlay-canvas-layer" in WORKBENCH_CSS
+    assert "white-space: pre;" in WORKBENCH_CSS
+    assert ".text-overlay-canvas-line" in WORKBENCH_CSS
+
+
 def test_script_draft_generation_has_an_honest_in_flight_feedback_contract() -> None:
     generator = _function_body("renderScriptGeneratorForm")
     feedback = _function_body("updateScriptDraftGenerationFeedback")
@@ -115,7 +184,7 @@ def test_primary_action_is_limited_to_approved_supported_projects() -> None:
     assert "有数字人口播 · 唯一主操作" in WORKBENCH_JS
     assert "生成审核预览" in WORKBENCH_JS
     assert "进入数字人素材（高级）" in WORKBENCH_JS
-    assert "RunningHub Standard 24GB" in WORKBENCH_JS
+    assert "RunningHub Plus 48GB" in WORKBENCH_JS
     assert "Whisper 只记录诊断，不覆盖精确帧切点" in WORKBENCH_JS
     assert "不会因低置信度打断流程" in WORKBENCH_JS
     assert "renderReviewPreviewAvatarBindings" in WORKBENCH_JS
@@ -239,14 +308,10 @@ def test_avatar_oom_plus_authorization_is_explicit_in_preflight_url_and_start_pa
     )
     cases = json.loads(completed.stdout)
     assert cases["avatar"] == {
-        "path": (
-            "/automation/avatar-review-preview/preflight?planning_mode=ai_director"
-            "&budget_limit_cny=5&allow_plus_on_oom=true"
-        ),
+        "path": "/automation/avatar-review-preview/preflight?planning_mode=ai_director&budget_limit_cny=5",
         "body": {
             "confirmed": True,
             "budget_limit_cny": 5,
-            "allow_plus_on_oom": True,
             "visual": {"planning_mode": "ai_director"},
         },
     }
@@ -282,17 +347,15 @@ def test_avatar_start_confirmation_is_single_upfront_paid_and_audio_confirmation
     preflight = _function_body("renderReviewPreviewPreflight")
     assert "工作流未提供" in preflight
     assert "输出规格未提供" in preflight
-    assert "InfiniteTalk 精确帧工作流、448×560、Standard 24GB" in preflight
+    assert "InfiniteTalk 精确帧工作流、448×560、Plus 48GB" in preflight
 
 
 def test_avatar_single_confirmation_discloses_bounded_oom_recovery_and_budget() -> None:
     start = _function_body("startReviewPreviewJob")
     for required_copy in (
-        "每位主持最多 3 次",
-        "Standard 24GB 最多 2 次",
-        "Plus 48GB 最多 1 次",
-        "只有前两次都明确 OOM",
-        "结果不明绝不重提",
+        "每位主持默认提交 1 次 Plus 48GB",
+        "雅雅、檬檬会先分别持久化任务号，再在云端并行生成",
+        "结果不明或 Plus 仍明确 OOM 时停止",
         "本轮费用硬上限 ¥${Number(((preflight.budget || {}).limit_cny) || 5).toFixed(2)}",
     ):
         assert required_copy in start
@@ -550,6 +613,8 @@ def test_task_center_reports_waiting_human_separately_without_full_render() -> N
     assert "项等待人工确认" in summary
     assert "项等待人工确认" in button_label
     poll = _function_body("pollTaskCenter")
+    assert "/api/production-queue" in poll
+    assert "/workbench/tasks" not in poll
     assert "updateTaskCenterButton()" in poll
     assert "updateTaskCenterIsland()" in poll
     assert "render()" not in poll
@@ -630,6 +695,19 @@ def test_script_draft_exposes_sentence_editor_and_versioned_review_actions() -> 
     assert 'mutate("/script-draft/reopen"' in studio
     assert 'expected_revision: draft.revision' in studio
     assert ".script-sentence-row" in WORKBENCH_CSS
+
+
+def test_news_script_draft_exposes_story_headline_and_closing_controls() -> None:
+    editable = _function_body("scriptDraftEditableSections")
+    editor = _function_body("renderScriptDraftEditor")
+    assert "story_id" in editable
+    assert "news_headline" in editable
+    assert "scriptDraftLooksLikeNewsClosing" in editable
+    assert "新闻 story_id" in editor
+    assert "新闻小标题" in editor
+    assert "结尾互动段（不显示小标题）" in editor
+    assert "is_closing" in editor
+    assert ".script-news-fields" in WORKBENCH_CSS
 
 
 def test_organize_script_exposes_faithful_and_light_polish_choices() -> None:

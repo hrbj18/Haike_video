@@ -2787,6 +2787,7 @@ class VideoCompose(BaseTool):
         output_path = Path(inputs.get("output_path", str(input_path.with_stem(f"{input_path.stem}_overlay"))))
         codec = inputs.get("codec", "libx264")
         crf = inputs.get("crf", 23)
+        preset = inputs.get("preset")
 
         if not input_path.exists():
             return ToolResult(success=False, error=f"Input not found: {input_path}")
@@ -2812,6 +2813,13 @@ class VideoCompose(BaseTool):
                 return ToolResult(success=False, error=f"Overlay end must be after start: {asset_path}")
             duration = (end - start) if end is not None else None
             opacity = ov.get("opacity", 1.0)
+            enter_animation = str(ov.get("enter_animation") or "none").strip().lower()
+            exit_animation = str(ov.get("exit_animation") or "none").strip().lower()
+            enter_duration = max(0.0, float(ov.get("enter_duration_seconds", 0) or 0))
+            exit_duration = max(0.0, float(ov.get("exit_duration_seconds", 0) or 0))
+            if duration is not None:
+                enter_duration = min(enter_duration, duration)
+                exit_duration = min(exit_duration, max(0.0, duration - enter_duration))
 
             is_image = asset_path.suffix.lower() in {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
             if is_image:
@@ -2841,6 +2849,39 @@ class VideoCompose(BaseTool):
                     preparation.append(
                         f"format=rgba,geq=r='r(X,Y)':g='g(X,Y)':b='b(X,Y)':a='{alpha}'"
                     )
+                if duration is not None and (enter_animation == "scale" or exit_animation == "scale"):
+                    # Render the zoom on a fixed-size canvas.  Frame-evaluated
+                    # dimensions make FFmpeg framesync fail; dynamic scale+pad
+                    # can also retain stale rounded-corner pixels.
+                    full_zoom = 1.0 / 0.88
+                    zoom = f"{full_zoom:.8f}"
+                    if enter_animation == "scale" and enter_duration > 0:
+                        enter_frames = max(1, round(enter_duration * 30))
+                        zoom = (
+                            f"if(lt(on\\,{enter_frames})\\,"
+                            f"1+{full_zoom - 1.0:.8f}*on/{enter_frames}\\,{full_zoom:.8f})"
+                        )
+                    if exit_animation == "scale" and exit_duration > 0 and end is not None:
+                        exit_frames = max(1, round(exit_duration * 30))
+                        total_frames = max(1, round(duration * 30))
+                        exit_zoom = (
+                            f"if(gt(on\\,{total_frames - exit_frames})\\,"
+                            f"1+{full_zoom - 1.0:.8f}*({total_frames}-on)/{exit_frames}\\,{full_zoom:.8f})"
+                        )
+                        zoom = f"min({zoom}\\,{exit_zoom})"
+                    padded_w = max(w, int(w / 0.88 + 0.999))
+                    padded_h = max(h, int(h / 0.88 + 0.999))
+                    preparation.extend([
+                        "format=rgba",
+                        "fps=30",
+                        f"pad={padded_w}:{padded_h}:(ow-iw)/2:(oh-ih)/2:color=0x00000000",
+                        f"zoompan=z='{zoom}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={w}x{h}:fps=30",
+                        f"setpts=PTS-STARTPTS+{start:.6f}/TB",
+                    ])
+            if enter_animation == "fade" and enter_duration > 0:
+                preparation.extend(["format=rgba", f"fade=t=in:st={start:.6f}:d={enter_duration:.6f}:alpha=1"])
+            if exit_animation == "fade" and exit_duration > 0 and end is not None:
+                preparation.extend(["format=rgba", f"fade=t=out:st={end - exit_duration:.6f}:d={exit_duration:.6f}:alpha=1"])
             if float(opacity or 1.0) < 1.0:
                 preparation.extend(["format=rgba", f"colorchannelmixer=aa={max(0.0, float(opacity)):.4f}"])
             prepared_label = f"ov_prepared_{i}"
@@ -2851,8 +2892,31 @@ class VideoCompose(BaseTool):
             enable = f"between(t,{start:.6f},{end:.6f})" if end is not None else f"gte(t,{start:.6f})"
             out_label = f"v{i}"
 
+            overlay_x = str(x)
+            overlay_y = str(y)
+            slide_offset_x = max(24, int((int(ov.get("width", 0)) or 160) * .18))
+            slide_offset_y = max(24, int((int(ov.get("height", 0)) or 100) * .35))
+
+            def animated_axis(base: int, negative_name: str, positive_name: str, offset: int) -> str:
+                expression = str(base)
+                if exit_animation in {negative_name, positive_name} and exit_duration > 0 and end is not None:
+                    direction = -1 if exit_animation == negative_name else 1
+                    expression = (
+                        f"if(gt(t,{end - exit_duration:.6f}),"
+                        f"{base}+({direction * offset})*(t-{end - exit_duration:.6f})/{exit_duration:.6f},{base})"
+                    )
+                if enter_animation in {negative_name, positive_name} and enter_duration > 0:
+                    direction = -1 if enter_animation == negative_name else 1
+                    expression = (
+                        f"if(lt(t,{start + enter_duration:.6f}),"
+                        f"{base}+({direction * offset})*(1-(t-{start:.6f})/{enter_duration:.6f}),{expression})"
+                    )
+                return expression
+
+            overlay_x = animated_axis(x, "slide_left", "slide_right", slide_offset_x)
+            overlay_y = animated_axis(y, "slide_up", "slide_down", slide_offset_y)
             filter_parts.append(
-                f"[{prev_label}][{overlay_input}]overlay={x}:{y}:"
+                f"[{prev_label}][{overlay_input}]overlay=x='{overlay_x}':y='{overlay_y}':"
                 f"eof_action=pass:repeatlast=0:shortest=0:enable='{enable}'[{out_label}]"
             )
             prev_label = out_label
@@ -2863,7 +2927,10 @@ class VideoCompose(BaseTool):
         cmd.extend(input_args)
         cmd.extend(["-filter_complex", filter_complex])
         cmd.extend(["-map", f"[{prev_label}]", "-map", "0:a?"])
-        cmd.extend(["-c:v", codec, "-crf", str(crf), "-c:a", "copy"])
+        cmd.extend(["-c:v", codec, "-crf", str(crf)])
+        if preset:
+            cmd.extend(["-preset", str(preset)])
+        cmd.extend(["-c:a", "copy"])
         cmd.append(str(output_path))
 
         self.run_command(cmd)

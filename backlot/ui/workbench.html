@@ -23,6 +23,14 @@
 <a class="skip-link" href="#main-content">跳到主要内容</a>
 <div id="app" class="shell"></div>
 <div id="toast" class="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<script>
+  window.addEventListener("error", (event) => {
+    if (!String(event.filename || "").includes("workbench.js")) return;
+    const app = document.getElementById("app");
+    if (!app || app.childElementCount) return;
+    app.innerHTML = `<main class="workspace"><section class="panel"><div class="panel-body"><h1>导演台页面未能启动</h1><p>前端脚本加载失败（${event.lineno || "?"}:${event.colno || "?"}）。请刷新页面；若仍未恢复，请保留此位置用于排查。</p></div></section></main>`;
+  });
+</script>
 <dialog id="assetDialog" class="dialog">
   <form id="assetForm" method="dialog">
     <div class="dialog-heading"><div><p class="eyebrow">素材登记</p><h2>新增可追溯素材</h2></div><button type="button" class="icon-button" data-dialog-close="assetDialog" aria-label="关闭">关闭</button></div>

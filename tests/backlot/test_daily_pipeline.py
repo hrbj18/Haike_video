@@ -251,6 +251,7 @@ class FakeRunningHubClient:
     def __init__(self, outcomes: dict[str, list[dict]]):
         self.outcomes = outcomes
         self.submissions: list[dict] = []
+        self.events: list[tuple[str, str]] = []
         self._role_attempts = {"yaya": 0, "mengmeng": 0}
 
     def upload_file(self, path: Path, *, file_type: str) -> str:
@@ -266,9 +267,11 @@ class FakeRunningHubClient:
             "instance_type": instance_type,
             "exact_total_frames": exact_total_frames,
         })
+        self.events.append(("submit", task_id))
         return {"task_id": task_id}
 
     def poll(self, task_id: str) -> dict:
+        self.events.append(("poll", task_id))
         result = self.outcomes[task_id].pop(0)
         # The production client always provides a documented usage snapshot.
         # Keep fake outcomes equally auditable so Lite rate guards are tested.
@@ -317,6 +320,13 @@ def _run(project_dir: Path) -> dict:
         "stages": {
             "voice": {"output": tracks},
             "avatar": {"status": "running", "output": {}},
+        },
+        # Most tests below exercise compatibility with already-frozen Lite
+        # jobs.  New production runs receive an explicit Plus policy from
+        # daily_automation and are covered separately.
+        "provider_policy": {
+            "runninghub_primary": "lite", "authorized_instance": "lite",
+            "lite_only": False, "lite_verified": True, "max_concurrency": 1,
         },
     }
 
@@ -507,6 +517,38 @@ def test_run_authorized_standard_uses_default_without_lite_guard(pipeline_contex
     result = generate_runninghub_avatars(run)
 
     assert [item["instance_type"] for item in fake.submissions] == ["default", "default"]
+    assert result["yaya"]["status"] == "completed"
+    assert result["mengmeng"]["status"] == "completed"
+
+
+def test_new_plus_policy_submits_both_roles_before_first_poll(pipeline_context: Path, monkeypatch):
+    plus_billing = {
+        "provider_usage": {"consume_money": 0.2, "task_cost_seconds": 120},
+        "observed_hourly_rate_cny": 6.0,
+        "observed_instance": "plus_48gb",
+    }
+    fake = FakeRunningHubClient({
+        "yaya-1": [{
+            "status": "SUCCEEDED", "video_url": "https://example/yaya.mp4",
+            "consume_money_cny": 0.2, "billing": plus_billing,
+        }],
+        "mengmeng-1": [{
+            "status": "SUCCEEDED", "video_url": "https://example/mengmeng.mp4",
+            "consume_money_cny": 0.2, "billing": plus_billing,
+        }],
+    })
+    monkeypatch.setattr("backlot.daily_pipeline.RunningHubLongCatClient", lambda: fake)
+    run = _run(pipeline_context)
+    run["provider_policy"] = {
+        "runninghub_primary": "plus_48gb", "authorized_instance": "plus",
+        "plus_48gb_allowed": True, "max_concurrency": 2,
+    }
+
+    result = generate_runninghub_avatars(run)
+
+    assert [item["instance_type"] for item in fake.submissions] == ["plus", "plus"]
+    assert [kind for kind, _task_id in fake.events[:2]] == ["submit", "submit"]
+    assert fake.events[2][0] == "poll"
     assert result["yaya"]["status"] == "completed"
     assert result["mengmeng"]["status"] == "completed"
 

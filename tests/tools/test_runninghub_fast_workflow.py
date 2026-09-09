@@ -3,11 +3,25 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from scripts.build_runninghub_fast_workflow import PROFILES
 
 
 ROOT = Path(__file__).resolve().parents[2]
 RUNNINGHUB = ROOT / "config" / "runninghub"
+
+_LOCAL_WORKFLOW_FIXTURES = (
+    "lc_fast_256x320_4s.json",
+    "lc_fast_256x320_4s_api.json",
+    "lc_24fast_256x320_4s_api.json",
+    "lc_24bal_256x320_4s_api.json",
+    "lc_safe_256x320_4s_api.json",
+)
+pytestmark = pytest.mark.skipif(
+    not all((RUNNINGHUB / name).is_file() for name in _LOCAL_WORKFLOW_FIXTURES),
+    reason="本机 RunningHub 优化夹具不随 GitHub 源码发布",
+)
 
 
 def _load(name: str) -> dict:

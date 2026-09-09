@@ -93,3 +93,24 @@ def test_review_preview_running_and_completed_counts_remain_independent():
     assert completed["completed_count"] == 1
     assert completed["tasks"][0]["stage"] == "等待人工观看"
     assert completed["tasks"][0]["result"]["readiness"] == "preview_ready"
+
+
+def test_interaction_second_pass_is_visible_in_task_center_and_ambiguous_waits_for_human():
+    state = {
+        "project": {"project_id": "outdoor"},
+        "automation": {
+            "interaction_second_pass": {
+                "job_id": "ISJ-1", "status": "ambiguous", "stage": "ambiguous",
+                "asset_id": "S-001", "safe_resume_point": "verify_story_request_acceptance",
+                "error": "模型请求受理状态待核对，已阻止自动重投",
+            },
+        },
+        "scenes": [],
+    }
+    payload = collect_tasks(state)
+    task = payload["tasks"][0]
+    assert payload["waiting_count"] == 1
+    assert task["kind"] == "interaction_second_pass"
+    assert task["target_view"] == "library"
+    assert task["stage"] == "等待核对模型受理状态"
+    assert task["safe_resume_point"] == "verify_story_request_acceptance"

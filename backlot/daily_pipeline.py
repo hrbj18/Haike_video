@@ -2,8 +2,8 @@
 
 The free research/script/project stages live in :mod:`daily_automation` so
 they can be tested without providers.  This module resumes that durable run,
-generates two long Voicebox tracks, creates two long RunningHub avatars on
-the frozen Standard 24GB workflow, aligns/cuts them, fills supporting visuals and renders a
+generates two long Voicebox tracks, creates two concurrent RunningHub avatars on
+the frozen Plus 48GB workflow, aligns/cuts them, fills supporting visuals and renders a
 review candidate.  Every externally billed task is persisted before polling.
 """
 
@@ -101,6 +101,7 @@ ROLE_PRESET_FALLBACK_IDS = {
 }
 LITE_RATE_CNY_PER_HOUR = 0.4
 STANDARD_RATE_CNY_PER_HOUR = 4.0
+PLUS_RATE_CNY_PER_HOUR = 6.0
 ROLE_RESERVATION_CNY = 2.5
 PRODUCTION_WORKFLOW_ID = INFINITETALK_448X560_EXACT_CLOCK_WORKFLOW_ID
 PRODUCTION_WORKFLOW_PROFILE = INFINITETALK_448X560_EXACT_CLOCK_PROFILE
@@ -257,10 +258,12 @@ def preflight_daily_media(run: dict[str, Any], *, persist: bool = True) -> dict[
     if str(runninghub.get("workflow_profile") or "") != PRODUCTION_WORKFLOW_PROFILE:
         issues.append(f"RunningHub 配置档必须为 {PRODUCTION_WORKFLOW_PROFILE}")
     runninghub_policy = config.get("runninghub") if isinstance(config.get("runninghub"), dict) else {}
-    if str(runninghub_policy.get("primary_instance") or "") != "default":
-        issues.append("正式生产必须使用 Standard 24GB（instanceType=default）")
-    if runninghub_policy.get("allow_plus") is not False:
-        issues.append("Plus 48GB 必须保持禁用")
+    if str(runninghub_policy.get("primary_instance") or "") != "plus":
+        issues.append("正式生产必须使用 Plus 48GB（instanceType=plus）")
+    if runninghub_policy.get("allow_plus") is not True:
+        issues.append("Plus 48GB 默认授权未启用")
+    if int(runninghub_policy.get("max_concurrency") or 0) != 2:
+        issues.append("双主持云端并发必须为 2")
     if float(config.get("max_budget_cny") or 0) > 5.0:
         issues.append("每日预算不得超过5元")
     if not shutil.which("ffmpeg"):
@@ -291,8 +294,9 @@ def preflight_daily_media(run: dict[str, Any], *, persist: bool = True) -> dict[
         "checked_at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "workflow_id": PRODUCTION_WORKFLOW_ID,
         "workflow_profile": PRODUCTION_WORKFLOW_PROFILE,
-        "instance_type": "default",
-        "allow_plus": False,
+        "instance_type": "plus",
+        "allow_plus": True,
+        "max_concurrency": 2,
         "budget_limit_cny": float(config.get("max_budget_cny") or 5.0),
         "voicebox_started": bool(voicebox.get("started")),
         "voicebox_profiles": {role: str(item.get("id") or "") for role, item in profiles.items()},
@@ -455,7 +459,10 @@ def _presenter_images() -> dict[str, Path]:
 
 
 def _estimated_cost(instance: str, elapsed_seconds: float, reserved: float) -> float:
-    rate = STANDARD_RATE_CNY_PER_HOUR if instance == "default" else LITE_RATE_CNY_PER_HOUR
+    rate = {
+        "plus": PLUS_RATE_CNY_PER_HOUR,
+        "default": STANDARD_RATE_CNY_PER_HOUR,
+    }.get(instance, LITE_RATE_CNY_PER_HOUR)
     # A small minimum keeps an absent provider billing field from being
     # mistaken for a free request, while the reservation remains the cap.
     return round(min(reserved, max(0.01, elapsed_seconds * rate / 3600.0)), 4)
@@ -495,17 +502,17 @@ def _unexpected_instance_error(record: dict[str, Any]) -> str | None:
         )
     if requested == "auto_lite" and observed == "unverified":
         return "RunningHub 未返回可核验的时长与费用字段，已停止提交后续角色，避免无法审计的自动扣费。"
+    if requested == "plus" and observed not in {"unverified", "plus", "plus_48gb"}:
+        return f"RunningHub 请求 Plus 48GB，但账单显示 {observed}；已停止并保留任务记录。"
     return None
 
 
 def _initial_avatar_instance(run: dict[str, Any]) -> tuple[str | None, str, str]:
     """Resolve the explicitly authorized initial RunningHub instance.
 
-    ``default`` is RunningHub's Standard 24GB API value.  Omitting the field
-    remains the only supported auto-scheduled Lite request form, but a
-    particular durable run may explicitly authorize Standard after a failed
-    Lite billing verification.  Keeping that choice in the run manifest makes
-    a paid resume auditable without weakening the global Lite safety gate.
+    New production defaults to ``plus`` (Plus 48GB).  Frozen legacy runs may
+    still explicitly request Standard or Lite; keeping that choice in the run
+    manifest makes paid resume auditable without rewriting old task contracts.
     """
     provider_policy = run.get("provider_policy") if isinstance(run.get("provider_policy"), dict) else {}
     approval_policy = run.get("approval_policy") if isinstance(run.get("approval_policy"), dict) else {}
@@ -514,9 +521,11 @@ def _initial_avatar_instance(run: dict[str, Any]) -> tuple[str | None, str, str]
         or approval_policy.get("authorized_instance")
         or ""
     ).strip().lower()
+    if provider_policy.get("lite_only") is True or requested in {"lite", "auto_lite"}:
+        return None, "auto_lite", "企业 Lite（自动调度）"
     if requested in {"default", "standard", "standard_24gb"}:
         return "default", "default", "Standard 24GB"
-    return None, "auto_lite", "企业 Lite（自动调度）"
+    return "plus", "plus", "Plus 48GB"
 
 
 def generate_runninghub_avatars(run: dict[str, Any]) -> dict[str, Any]:
@@ -529,6 +538,10 @@ def generate_runninghub_avatars(run: dict[str, Any]) -> dict[str, Any]:
     provider_policy = run.get("provider_policy") if isinstance(run.get("provider_policy"), dict) else {}
     lite_only = provider_policy.get("lite_only") is True
     initial_instance_type, initial_instance, initial_label = _initial_avatar_instance(run)
+    parallel_submission_enabled = (
+        initial_instance == "plus"
+        and int(provider_policy.get("max_concurrency") or 2) >= 2
+    )
     if lite_only and provider_policy.get("lite_verified") is not True:
         safety = daily_billing_safety()
         if safety.get("auto_schedule_eligible") is not True:
@@ -538,11 +551,9 @@ def generate_runninghub_avatars(run: dict[str, Any]) -> dict[str, Any]:
     output_dir = project_dir / "assets" / "video" / "daily-avatar"
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    # Submit only one new paid task at a time.  For auto-Lite, the first task's
-    # documented usage must prove the Lite rate before the second role starts.
-    # A durable run may instead contain explicit Standard 24GB authorization;
-    # that request uses instanceType=default and is still sequential so resume
-    # cannot accidentally duplicate either presenter.
+    # Persist each paid task identity before moving to the next role, but submit
+    # every eligible role before polling.  This lets both provider jobs run in
+    # parallel without concurrent writes to the durable project ledger.
     for role, label in ROLE_LABELS.items():
         record = records.setdefault(role, {"role": role, "label": label, "history": []})
         target = output_dir / f"{role}-longform.mp4"
@@ -638,9 +649,13 @@ def generate_runninghub_avatars(run: dict[str, Any]) -> dict[str, Any]:
             "submitted_at": time.time(), "reason": "run_authorized_initial_instance",
         })
         heartbeat_stage(run, "avatar", message=f"已提交 {label}{initial_label}数字人任务", output={"roles": records})
-        # Do not risk duplicate paid work. Subsequent daily runs can reuse
-        # already-completed long videos without contacting the provider.
-        break
+        # Continue immediately so the second presenter is submitted before the
+        # first one is polled to completion.  Each task id is already durable.
+        if not parallel_submission_enabled:
+            # Frozen Lite/Standard runs retain their original pilot-first
+            # sequencing.  Only the new Plus contract authorizes two paid
+            # provider tasks to be active at once.
+            break
 
     deadline = time.monotonic() + 8 * 60 * 60
     while time.monotonic() < deadline:
@@ -656,7 +671,11 @@ def generate_runninghub_avatars(run: dict[str, Any]) -> dict[str, Any]:
                 if record.get("operation_id"):
                     transition_paid_operation(run, str(record["operation_id"]), "running", task_id=record.get("task_id"))
                 continue
-            _settle_task(ledger, record, result, purpose=f"{label}{'Standard 24GB' if record.get('instance') == 'default' else '企业 Lite（自动调度）'}数字人")
+            instance_name = {
+                "plus": "Plus 48GB",
+                "default": "Standard 24GB",
+            }.get(str(record.get("instance") or ""), "企业 Lite（自动调度）")
+            _settle_task(ledger, record, result, purpose=f"{label}{instance_name}数字人")
             instance_blocker = _unexpected_instance_error(record)
             if instance_blocker:
                 record["status"] = "failed"
@@ -764,8 +783,8 @@ def generate_runninghub_avatars(run: dict[str, Any]) -> dict[str, Any]:
             record["status"] = "failed"
             raise DailyAutomationError(f"{label}数字人生成失败：{failure['message']}")
         heartbeat_stage(run, "avatar", message=f"{initial_label}数字人生成中：{sum(records[r].get('status') == 'completed' for r in records)}/2", output={"roles": records})
-        # The second role is only submitted after the first role completed.
-        # Auto-Lite additionally passes the billing guard above before resume.
+        # Legacy/resumed state may still contain an unsubmitted role.  Re-enter
+        # only when there is no active task; new Plus runs submit both up front.
         unsubmitted = next((role for role in ROLE_LABELS if records.get(role, {}).get("status") not in {"completed", "failed", "submitted", "running"}), None)
         active_submission = any(
             record.get("status") in {"submitted", "running"}
@@ -1223,9 +1242,13 @@ def run_daily_pipeline(target: date | str, *, trigger: str = "manual") -> dict[s
     run = read_run(target) or run
     _, requested_instance, _ = _initial_avatar_instance(run)
     avatar_message = (
-        "正在依次提交本次已授权的 RunningHub Standard 24GB 数字人"
-        if requested_instance == "default"
-        else "正在依次提交企业 Lite 数字人；Standard 仅限显存不足"
+        "正在提交 RunningHub Plus 48GB 双角色云端并行数字人"
+        if requested_instance == "plus"
+        else (
+            "正在依次提交本次已授权的 RunningHub Standard 24GB 数字人"
+            if requested_instance == "default"
+            else "正在依次提交企业 Lite 数字人；Standard 仅限显存不足"
+        )
     )
     stages: list[tuple[str, str, Any]] = [
         ("voice", "正在用同名 Voicebox 音色生成两条长音频", generate_long_voice_tracks),

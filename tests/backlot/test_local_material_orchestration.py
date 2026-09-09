@@ -53,6 +53,28 @@ def _index() -> dict:
     }
 
 
+def _overview_index() -> dict:
+    return {
+        "version": 1,
+        "signature": "c" * 64,
+        "status": "overview_completed",
+        "source": {"fingerprint": "d" * 64},
+        "overview": {
+            "status": "completed",
+            "chapters": [{
+                "chapter_id": "CHAPTER-01", "start_seconds": 0, "end_seconds": 10,
+                "summary": "机械鸭抓起小零件并放进收纳框。",
+                "subjects": [{"name": "机械鸭"}], "actions": [{"name": "抓起"}, {"name": "放入"}],
+                "usable_ranges": [{
+                    "label": "抓取画面", "start_seconds": 2, "end_seconds": 4,
+                    "evidence_cell_ids": ["SHEET-0001:R1C2", "SHEET-0001:R1C3"],
+                }],
+                "unknowns": ["联系表不能证明完整连续动作"],
+            }],
+        },
+    }
+
+
 def test_existing_script_is_preserved_and_local_evidence_becomes_a_draft_only():
     state = _state()
     before = copy.deepcopy(state["scenes"])
@@ -65,6 +87,19 @@ def test_existing_script_is_preserved_and_local_evidence_becomes_a_draft_only():
     assert draft["scene_plans"][0]["visual_role"] == "local_focus_card"
     assert draft["scene_plans"][1]["status"] == "needs_background"
     assert draft["material_capability_map"][0]["cut_policy"] == "safe_cut"
+
+
+def test_contact_sheet_overview_can_only_point_to_source_preview_not_create_a_timeline_sequence():
+    draft = build_orchestration_draft(_state(), {"LOCAL-DUCK": _overview_index()}, {"input_mode": "existing_script"})
+
+    capability = draft["material_capability_map"][0]
+    plan = draft["scene_plans"][0]
+    assert capability["evidence_level"] == "overview"
+    assert capability["requires_source_preview"] is True
+    assert capability["evidence"]["cell_ids"] == ["SHEET-0001:R1C2", "SHEET-0001:R1C3"]
+    assert plan["status"] == "needs_source_preview"
+    assert plan["source_preview"]["source_in_seconds"] == 2
+    assert draft["sequences"] == []
 
 
 def test_generic_robot_words_cannot_misplace_local_footage_and_short_landscape_uses_a_focus_card():
@@ -278,6 +313,9 @@ def test_workbench_client_makes_material_driven_draft_and_adoption_visible_witho
     assert "确认完整动作" in client
     assert "expected_orchestration_revision" in client
     assert "localMaterialContinuityConfirmations" in client
+    assert "scenePlan.source_preview" in client
+    assert "打开原视频复核" in client
+    assert "openLocalMaterialSourcePreview" in client
 
 
 def test_workbench_http_routes_create_a_draft_before_any_scene_adoption(tmp_path: Path, monkeypatch):

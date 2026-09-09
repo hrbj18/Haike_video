@@ -317,10 +317,11 @@ def default_config() -> dict[str, Any]:
             "premium_information_density": 20,
         },
         "runninghub": {
-            "primary_instance": "default",
+            "primary_instance": "plus",
             "standard_instance_type": "default",
-            "allow_plus": False,
-            "max_concurrency": 1,
+            "plus_instance_type": "plus",
+            "allow_plus": True,
+            "max_concurrency": 2,
         },
         "avatar": {
             "default_treatment": "pip_top_left",
@@ -367,15 +368,22 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise DailyAutomationError("无人值守 RunningHub 每日预算必须在 0—5 元之间")
     runninghub = config.get("runninghub") if isinstance(config.get("runninghub"), dict) else {}
     primary_instance = str(runninghub.get("primary_instance") or "").strip().lower()
-    if primary_instance not in {"lite", "default"}:
-        raise DailyAutomationError("RunningHub 默认实例只能是企业 Lite 或 Standard 24GB（default）")
+    if primary_instance not in {"lite", "default", "plus"}:
+        raise DailyAutomationError("RunningHub 默认实例只能是企业 Lite、Standard 24GB（default）或 Plus 48GB（plus）")
     if primary_instance == "lite" and runninghub.get("lite_request_mode") != "verified_lite_only":
         raise DailyAutomationError("企业 Lite 必须先通过实际账单验证，不能把自动调度当作 Lite 保证")
     if primary_instance == "default":
         if str(runninghub.get("standard_instance_type") or "") != "default":
             raise DailyAutomationError("Standard 24GB 的 RunningHub instanceType 必须为 default")
         if runninghub.get("allow_plus") is not False:
-            raise DailyAutomationError("每日自动生产禁止使用 RunningHub Plus 48GB")
+            raise DailyAutomationError("Standard 兼容模式不得隐式升级 RunningHub Plus 48GB")
+    if primary_instance == "plus":
+        if str(runninghub.get("plus_instance_type") or "") != "plus":
+            raise DailyAutomationError("Plus 48GB 的 RunningHub instanceType 必须为 plus")
+        if runninghub.get("allow_plus") is not True:
+            raise DailyAutomationError("Plus 48GB 默认模式必须显式启用 allow_plus")
+        if int(runninghub.get("max_concurrency") or 0) != 2:
+            raise DailyAutomationError("Plus 48GB 双主持模式必须将云端并发设为 2")
     if int(runninghub.get("max_concurrency") or 0) not in {1, 2}:
         raise DailyAutomationError("RunningHub 并发数只能是 1 或 2")
     resilience = config.get("text_resilience") if isinstance(config.get("text_resilience"), dict) else {}
@@ -525,11 +533,14 @@ def create_or_resume_run(target: date | str, *, trigger: str = "manual") -> dict
     start, end = target_window(target_value)
     config = read_config()
     runninghub_config = config.get("runninghub") if isinstance(config.get("runninghub"), dict) else {}
-    standard_default = str(runninghub_config.get("primary_instance") or "").strip().lower() == "default"
+    primary_instance = str(runninghub_config.get("primary_instance") or "").strip().lower()
+    standard_default = primary_instance == "default"
+    plus_default = primary_instance == "plus"
     provider_policy = {
-        "runninghub_primary": "standard_24gb" if standard_default else "lite",
+        "runninghub_primary": "plus_48gb" if plus_default else ("standard_24gb" if standard_default else "lite"),
         "ordinary_timeout_never_upgrades": True,
-        "plus_48gb_allowed": False,
+        "plus_48gb_allowed": plus_default,
+        "max_concurrency": int(runninghub_config.get("max_concurrency") or 1),
     }
     approval_policy = {
         "scope": "unattended_review_candidate",
@@ -538,7 +549,19 @@ def create_or_resume_run(target: date | str, *, trigger: str = "manual") -> dict
         "budget_limit_cny": float(config["max_budget_cny"]),
         "formal_publish_requires_human": True,
     }
-    if standard_default:
+    if plus_default:
+        provider_policy.update({
+            "authorized_instance": "plus",
+            "authorization_scope": "global_default",
+            "authorization_target_date": target_value.isoformat(),
+            "authorization_reason": "用户已将 RunningHub Plus 48GB 设为每日默认机型",
+            "authorization_recorded_at": _now(),
+        })
+        approval_policy.update({
+            "authorized_instance": "plus",
+            "runninghub_plus_48gb_preapproved": True,
+        })
+    elif standard_default:
         provider_policy.update({
             "authorized_instance": "default",
             "authorization_scope": "global_default",
@@ -954,6 +977,11 @@ def daily_billing_safety() -> dict[str, Any]:
 def provider_media_eligibility(run: dict[str, Any]) -> dict[str, Any]:
     """Evaluate provider authorization after content release, never as a script error."""
     approval = run.get("approval_policy") if isinstance(run.get("approval_policy"), dict) else {}
+    if approval.get("runninghub_plus_48gb_preapproved") is True and str(approval.get("authorized_instance")) == "plus":
+        return {
+            "eligible": True, "state": "authorized_plus_48gb",
+            "reason": "本日期运行已获得持久化的 Plus 48GB 默认授权",
+        }
     if approval.get("runninghub_standard_24gb_preapproved") is True and str(approval.get("authorized_instance")) == "default":
         return {
             "eligible": True, "state": "authorized_standard_24gb",
@@ -1176,7 +1204,7 @@ def _public_run(run: dict[str, Any] | None) -> dict[str, Any] | None:
         raw_error = str(failed_stage.get("error") or "")
         classification = classify_runninghub_failure(raw_error)
         if classification.get("is_oom"):
-            summary = "供应商明确报告显存不足；恢复时允许只为该角色升级 Standard 24GB。"
+            summary = "供应商在 Plus 48GB 上仍明确报告显存不足；已停止重复付费，等待工作流显存优化。"
         elif classification.get("kind") == "transient":
             summary = "网络或供应商临时连接失败；可以从当前阶段继续，仍保持企业 Lite，不会因此升级算力。"
         else:
@@ -2930,32 +2958,54 @@ def _ensure_daily_decision_log(project_dir: Path, run: dict[str, Any] | None = N
     value = _read_json(path) or {"version": "1.0", "project_id": project_dir.name, "decisions": []}
     decisions = value.setdefault("decisions", [])
     provider_policy = run.get("provider_policy") if isinstance((run or {}).get("provider_policy"), dict) else {}
-    standard_authorized = str(provider_policy.get("authorized_instance") or "").lower() in {"default", "standard", "standard_24gb"}
-    global_standard = str(provider_policy.get("authorization_scope") or "") == "global_default"
+    if not provider_policy:
+        runninghub = read_config().get("runninghub") or {}
+        configured_primary = str(runninghub.get("primary_instance") or "").strip().lower()
+        if configured_primary == "plus":
+            provider_policy = {
+                "authorized_instance": "plus",
+                "authorization_scope": "global_default",
+                "max_concurrency": int(runninghub.get("max_concurrency") or 2),
+            }
+        elif configured_primary == "default":
+            provider_policy = {
+                "authorized_instance": "default",
+                "authorization_scope": "global_default",
+            }
+    authorized_instance = str(provider_policy.get("authorized_instance") or "").lower()
+    standard_authorized = authorized_instance in {"default", "standard", "standard_24gb"}
+    plus_authorized = authorized_instance in {"plus", "plus_48gb"}
+    global_default = str(provider_policy.get("authorization_scope") or "") == "global_default"
+    selected_provider = "plus-48gb" if plus_authorized else ("standard-24gb" if standard_authorized else "enterprise-lite")
     provider_decision = {
-        "decision_id": "daily-provider-policy-v1",
+        "decision_id": "daily-provider-policy-v2",
         "stage": "production",
         "category": "provider_selection",
         "subject": "每日数字人 RunningHub 机型策略",
         "options_considered": [
-            {"option_id": "enterprise-lite", "label": "企业 Lite", "score": 0.4 if standard_authorized else 1.0, "reason": "全局默认低成本运行"},
+            {"option_id": "enterprise-lite", "label": "企业 Lite", "score": 1.0 if selected_provider == "enterprise-lite" else 0.3, "reason": "低成本兼容模式"},
             {
                 "option_id": "standard-24gb",
                 "label": "Standard 24GB",
-                "score": 1.0 if standard_authorized else 0.4,
-                "reason": (
-                    "用户已设为全局默认机型" if global_standard
-                    else ("当前运行已获明确单次授权" if standard_authorized else "仅在明确显存不足时作为恢复选项")
-                ),
-                **({} if standard_authorized else {"rejected_because": "不得因排队、慢速、超时、限流或网络错误升级"}),
+                "score": 1.0 if standard_authorized else 0.5,
+                "reason": "旧任务和显式兼容授权可继续恢复",
+            },
+            {
+                "option_id": "plus-48gb",
+                "label": "Plus 48GB",
+                "score": 1.0 if plus_authorized else 0.5,
+                "reason": "用户已授权为新任务默认机型，并允许双角色云端并行",
             },
         ],
-        "selected": "standard-24gb" if standard_authorized else "enterprise-lite",
+        "selected": selected_provider,
         "reason": (
-            ("用户已将 Standard 24GB 设为每日默认机型；Plus 48GB 禁用且每期仍受5元预算约束。" if global_standard
-             else f"用户针对 {run.get('target_date')} 明确授权 Standard 24GB；授权仅限该运行且受5元总预算约束。")
-            if standard_authorized
-            else "用户要求企业 Lite 始终优先，Standard 24GB 仅限明确 OOM/显存不足证据。"
+            "用户已将 Plus 48GB 设为新任务默认机型；双主持任务先保存两个任务号，再由云端并行生成，仍受5元总预算约束。"
+            if plus_authorized and global_default
+            else (
+                f"用户针对 {run.get('target_date')} 明确授权 Standard 24GB；授权仅限该运行且受5元总预算约束。"
+                if standard_authorized
+                else "该旧运行保持企业 Lite 兼容合同。"
+            )
         ),
         "user_visible": True,
         "user_approved": True,
@@ -2994,7 +3044,12 @@ def _ensure_daily_decision_log(project_dir: Path, run: dict[str, Any] | None = N
         },
     ]
     replacements = {item["decision_id"]: item for item in wanted}
-    retained = [item for item in decisions if not isinstance(item, dict) or str(item.get("decision_id")) not in replacements]
+    retired_decision_ids = {"daily-provider-policy-v1"}
+    retained = [
+        item for item in decisions
+        if not isinstance(item, dict)
+        or str(item.get("decision_id")) not in (set(replacements) | retired_decision_ids)
+    ]
     decisions[:] = retained + wanted
     _atomic_json(path, value)
     return value

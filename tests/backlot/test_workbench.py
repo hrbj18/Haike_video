@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 import subprocess
@@ -2986,6 +2987,57 @@ def test_local_material_vision_batch_runs_serially_and_keeps_individual_failures
     assert len(calls) == 2
 
 
+def test_local_material_overview_batch_runs_one_confirmed_full_flow_on_the_shared_serial_worker(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    workbench_mod.bootstrap_workbench(project)
+    state = workbench_mod.add_asset(project, {
+        "name": "机械鸭本地概览", "type": "video", "source_type": "human_provided",
+        "path": "assets/video/candidate.mp4", "license": "测试授权",
+    })
+    asset = next(item for item in state["assets"] if item.get("type") == "video")
+    asset_id = asset["id"]
+    # A contact-sheet checkpoint from an interrupted older attempt is not a
+    # completed high-efficiency workflow; the confirmed batch must continue it
+    # instead of permanently skipping the asset.
+    asset["media_index"] = {
+        "status": "failed", "stage": "overview",
+        "overview_index_path": f"artifacts/media-index/{asset_id}/overview.json",
+        "overview_status": "not_requested",
+    }
+    workbench_mod._save(project, state)
+
+    with pytest.raises(workbench_mod.WorkbenchError, match="批量高效率内容处理会在本地生成联系表后发送"):
+        workbench_mod.start_asset_media_index_batch(project, {"stage": "overview", "asset_ids": [asset_id]})
+
+    queued = workbench_mod.start_asset_media_index_batch(project, {
+        "stage": "overview", "asset_ids": [asset_id], "remote_vision_confirmed": True,
+    })
+    batch = queued["automation"]["media_index_batch"]
+    assert batch["stage"] == "overview"
+    assert batch["request"]["remote_vision_confirmed"] is True
+    assert batch["request"]["profile"] == "efficient"
+
+    observed = []
+
+    def fake_generate(path: Path, job_id: str) -> dict:
+        latest = workbench_mod._load_for_write(path)
+        job = latest["automation"]["media_index"]
+        observed.append((job["stage"], job["request"]["remote_vision_confirmed"], job["request"]["profile"]))
+        asset = next(item for item in latest["assets"] if item["id"] == job["asset_id"])
+        asset["media_index"] = {
+            "status": "completed", "stage": "overview", "job_id": job_id,
+            "overview_index_path": f"artifacts/media-index/{asset['id']}/overview.json",
+        }
+        job.update({"status": "completed", "finished_at": workbench_mod._now()})
+        return workbench_mod._save(path, latest)
+
+    monkeypatch.setattr(workbench_mod, "generate_asset_media_index", fake_generate)
+    completed = workbench_mod.generate_asset_media_index_batch(project, batch["job_id"])
+    assert completed["automation"]["media_index_batch"]["status"] == "completed"
+    assert completed["automation"]["media_index_batch"]["completed_asset_ids"] == [asset_id]
+    assert observed == [("overview", True, "efficient")]
+
+
 def test_local_material_vision_batch_recovers_completed_child_without_resubmitting(projects_root, monkeypatch):
     project = make_project(projects_root)
     state = workbench_mod.bootstrap_workbench(project)
@@ -3078,6 +3130,31 @@ def test_server_starts_confirmed_local_material_vision_batch(client, projects_ro
     batch = response.json()["automation"]["media_index_batch"]
     assert batch["status"] == "queued"
     assert batch["asset_ids"] == ["S-002"]
+    assert launches == [(project, batch["job_id"])]
+
+
+def test_server_starts_confirmed_material_overview_batch(client, projects_root, monkeypatch):
+    project = make_project(projects_root)
+    workbench_mod.bootstrap_workbench(project)
+    workbench_mod.add_asset(project, {
+        "name": "机械鸭快速概览", "type": "video", "source_type": "human_provided",
+        "path": "assets/video/candidate.mp4", "license": "测试授权",
+    })
+    launches: list[tuple[Path, str]] = []
+
+    def fake_launch(_app, path: Path, job_id: str):
+        launches.append((path, job_id))
+        return None
+
+    monkeypatch.setattr(server_mod, "_launch_media_index_batch_worker", fake_launch)
+    response = client.post("/api/project/film/workbench/assets/media-index/overview-batch", json={
+        "profile": "efficient", "remote_vision_confirmed": True,
+    })
+    assert response.status_code == 200
+    batch = response.json()["automation"]["media_index_batch"]
+    assert batch["status"] == "queued"
+    assert batch["stage"] == "overview"
+    assert batch["request"]["remote_vision_confirmed"] is True
     assert launches == [(project, batch["job_id"])]
 
 
@@ -3268,6 +3345,186 @@ def test_workbench_persists_production_intake_before_script_generation(client, p
     assert intake["materials_status"] == "partial"
     assert intake["style_status"] == "direction"
     assert intake["idea"] == "介绍每天读书十分钟为什么有用。"
+
+
+def test_news_video_type_preset_persists_defaults_and_builds_scene_title_contract(client, projects_root, monkeypatch):
+    project = projects_root / "news-preset"
+    (project / "artifacts").mkdir(parents=True)
+    write_json(project / "project.json", {
+        "project_id": "news-preset", "title": "新闻预设测试", "pipeline_type": "avatar-spokesperson",
+    })
+    track_path = project / "新闻传播序曲.wav"
+    track_path.write_bytes(b"fixture-music")
+    monkeypatch.setattr(workbench_mod, "resolve_music_track", lambda _track_id, _project_dir=None: (track_path, {
+        "id": "news-opening-01", "title": "新闻传播序曲", "duration_seconds": 60.0,
+        "source_calibration_db": -13.0,
+    }))
+
+    initial = workbench_mod.bootstrap_workbench(project)
+    initial["project"]["script_draft"] = {
+        "status": "approved",
+        "revision": 1,
+        "script": {
+            "version": "1.0", "title": "今日科技新闻", "total_duration_seconds": 8,
+            "sections": [
+                {"id": "sec-01", "label": "芯片出口规则变化", "text": "芯片出口规则出现新的调整。", "start_seconds": 0, "end_seconds": 4},
+                {"id": "sec-02", "label": "国产模型发布", "text": "国产模型发布了新版本。", "start_seconds": 4, "end_seconds": 8},
+            ],
+        },
+    }
+    workbench_mod._save(project, initial)
+
+    selected = client.put("/api/project/news-preset/workbench/video-type-preset", json={"preset": "news"})
+
+    assert selected.status_code == 200, selected.text
+    state = selected.json()
+    assert state["project"]["intake"]["video_type_preset"] == "news"
+    assert state["presenter_layouts"]["default_template_id"] == "pip_top_right"
+    assert state["story_headline_layout"] == workbench_mod.STORY_HEADLINE_LAYOUT_DEFAULT
+    assert state["music_policy"]["enabled"] is True
+    assert state["music_policy"]["track_id"] == "news-opening-01"
+    assert [section["story_id"] for section in state["project"]["script_draft"]["script"]["sections"]] == ["S01", "S02"]
+
+    planned = client.post("/api/project/news-preset/workbench/scene-plan")
+
+    assert planned.status_code == 200, planned.text
+    scenes = planned.json()["scenes"]
+    assert [scene["story_id"] for scene in scenes] == ["S01", "S02"]
+    assert all(scene["headline_overlay"]["placement"] == "top_left_beside_presenter" for scene in scenes)
+    assert all(scene["presenter"]["layout_template_id"] == "pip_top_right" for scene in scenes)
+
+    blocked = client.put("/api/project/news-preset/workbench/video-type-preset", json={"preset": "ordinary"})
+    assert blocked.status_code == 422
+    assert "分镜已建立" in blocked.json()["detail"]
+
+
+def test_avatar_news_normalization_preserves_story_groups_and_meaningful_headlines():
+    turns = [
+        {"turn_id": "T001", "speaker_id": "yaya", "speaker_name": "雅雅", "text": "模型发布。"},
+        {"turn_id": "T002", "speaker_id": "mengmeng", "speaker_name": "檬檬", "text": "能力升级。"},
+        {"turn_id": "T003", "speaker_id": "yaya", "speaker_name": "雅雅", "text": "服务宕机。"},
+    ]
+    generated = {
+        "title": "新闻分组",
+        "sections": [
+            {"turn_id": "T001", "speaker_id": "yaya", "text": "模型发布。", "story_id": "S01", "news_headline": "Astra新模型正式发布"},
+            {"turn_id": "T002", "speaker_id": "mengmeng", "text": "能力升级。", "story_id": "S01", "news_headline": "Astra新模型正式发布"},
+            {"turn_id": "T003", "speaker_id": "yaya", "text": "服务宕机。", "story_id": "S02", "news_headline": "多家AI服务集体宕机"},
+        ],
+    }
+
+    normalized = workbench_mod._normalize_avatar_turn_script(
+        generated, turns, title="新闻分组", organize_strength="faithful",
+    )
+    result = workbench_mod._apply_news_preset_to_script(normalized)
+
+    assert [item["story_id"] for item in result["sections"]] == ["S01", "S01", "S02"]
+    assert [item["news_headline"] for item in result["sections"]] == [
+        "Astra新模型正式发布", "Astra新模型正式发布", "多家AI服务集体宕机",
+    ]
+    assert result["news_story_contract"]["version"] == "1.1"
+    assert len(result["news_story_contract"]["stories"]) == 2
+
+
+def test_news_preset_never_uses_avatar_role_label_as_headline():
+    result = workbench_mod._apply_news_preset_to_script({
+        "sections": [{
+            "id": "section-001", "label": "T003 · 雅雅", "news_headline": "T003 · 雅雅",
+            "text": "Astra新模型支持自主操作电脑。", "start_seconds": 0, "end_seconds": 4,
+        }],
+    })
+
+    assert result["sections"][0]["news_headline"] == "Astra新模型支持自主操作电脑"
+    assert result["sections"][0]["headline_overlay"]["line_1"] != "T003 · 雅雅"
+
+
+def test_news_preset_excludes_a_final_interaction_closing_from_headline_contract():
+    result = workbench_mod._apply_news_preset_to_script({
+        "sections": [
+            {
+                "id": "section-001", "label": "T001 · 雅雅", "story_id": "S01",
+                "news_headline": "黄仁勋与OpenAI讨论AGI定义", "text": "双方讨论了AGI的定义。",
+            },
+            {
+                "id": "section-002", "label": "T002 · 檬檬", "story_id": "S01",
+                "news_headline": "黄仁勋与OpenAI讨论AGI定义", "text": "观点并不完全相同。",
+            },
+            {
+                "id": "section-003", "label": "T003 · 雅雅", "story_id": "S01",
+                "news_headline": "黄仁勋与OpenAI讨论AGI定义",
+                "text": "那你觉得AGI真的到来了吗？欢迎在评论区聊聊你的看法。",
+            },
+        ],
+    })
+
+    assert [item.get("story_id") for item in result["sections"]] == ["S01", "S01", None]
+    closing = result["sections"][-1]
+    assert closing["is_closing"] is True
+    assert closing["news_section_kind"] == "closing"
+    assert "news_headline" not in closing
+    assert "headline_overlay" not in closing
+    assert result["news_story_contract"]["stories"] == [
+        {"story_id": "S01", "headline": "黄仁勋与OpenAI讨论AGI定义"}
+    ]
+
+
+def test_news_draft_editor_saves_story_headlines_and_clears_closing(client, projects_root):
+    project = make_project(projects_root)
+    state = workbench_mod.bootstrap_workbench(project)
+    state["project"]["intake"]["video_type_preset"] = "news"
+    state["project"]["script_draft"] = {
+        "status": "draft",
+        "revision": 1,
+        "script": {
+            "version": "1.0", "title": "新闻草案", "total_duration_seconds": 9,
+            "news_story_contract": {
+                "version": "1.1", "style_id": "daily_news_headline_v1",
+                "stories": [{"story_id": "S01", "headline": "修改前的新闻小标题内容"}],
+            },
+            "sections": [
+                {"id": "sec-01", "label": "T001 · 雅雅", "text": "第一句。", "story_id": "S01", "news_headline": "修改前的新闻小标题内容"},
+                {"id": "sec-02", "label": "T002 · 檬檬", "text": "第二句。", "story_id": "S01", "news_headline": "修改前的新闻小标题内容"},
+                {"id": "sec-03", "label": "T003 · 雅雅", "text": "欢迎在评论区讨论。", "story_id": "S01", "news_headline": "修改前的新闻小标题内容"},
+            ],
+        },
+    }
+    workbench_mod._save(project, state)
+
+    saved = client.patch(
+        "/api/project/film/workbench/script-draft/content",
+        json={
+            "expected_revision": 1,
+            "title": "新闻草案",
+            "sections": [
+                {"id": "sec-01", "label": "T001 · 雅雅", "sentences": ["第一句。"], "story_id": "S02", "news_headline": "修改后的统一新闻小标题"},
+                {"id": "sec-02", "label": "T002 · 檬檬", "sentences": ["第二句。"], "story_id": "S02", "news_headline": "修改后的统一新闻小标题"},
+                {"id": "sec-03", "label": "T003 · 雅雅", "sentences": ["欢迎在评论区讨论。"], "is_closing": True},
+            ],
+        },
+    )
+
+    assert saved.status_code == 200, saved.text
+    script = saved.json()["project"]["script_draft"]["script"]
+    assert [item.get("story_id") for item in script["sections"]] == ["S02", "S02", None]
+    assert [item.get("news_headline") for item in script["sections"]] == [
+        "修改后的统一新闻小标题", "修改后的统一新闻小标题", None,
+    ]
+    assert script["sections"][-1]["is_closing"] is True
+    assert script["news_story_contract"]["stories"] == [
+        {"story_id": "S02", "headline": "修改后的统一新闻小标题"}
+    ]
+
+
+def test_video_type_preset_ui_exposes_local_only_news_defaults(client, projects_root):
+    make_project(projects_root)
+
+    script = client.get("/ui/workbench.js")
+
+    assert script.status_code == 200
+    assert "renderVideoTypePresetPanel" in script.text
+    assert "视频类型预设" in script.text
+    assert 'api("/video-type-preset", { method: "PUT"' in script.text
+    assert "新闻传播序曲" in script.text
 
 
 def test_script_draft_is_paid_confirmed_and_human_reviewable(client, projects_root, monkeypatch):
@@ -4192,6 +4449,53 @@ def test_project_narration_freezes_cloud_provider_and_profile(projects_root, mon
     assert queued["automation"]["narration_generation"]["status"] == "generating"
 
 
+def test_failed_project_narration_resume_reuses_completed_scene(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    workbench_mod.bootstrap_workbench(project)
+    ffmpeg = _ffmpeg_available()
+    assert ffmpeg
+    profile = {
+        "id": "doubao:test-voice", "name": "片男", "provider_id": "doubao",
+        "provider_name": "豆包云端配音", "available": True,
+    }
+    monkeypatch.setattr(workbench_mod, "get_default_voice", lambda: profile)
+    monkeypatch.setattr(workbench_mod, "get_voice_profile", lambda profile_id: profile if profile_id == profile["id"] else None)
+    calls = []
+
+    def synthesize(*, text, profile, output_path, language):
+        calls.append(output_path.stem)
+        if output_path.stem == "scene-b" and calls.count("scene-b") == 1:
+            return SimpleNamespace(success=False, data={}, error="temporary timeout")
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        subprocess.run([
+            ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1",
+            "-c:a", "pcm_s16le", str(output_path),
+        ], check=True, capture_output=True)
+        return SimpleNamespace(success=True, data={}, error=None)
+
+    monkeypatch.setattr(workbench_mod, "generate_voice_audio", synthesize)
+    workbench_mod.start_project_narration(project, {"confirmed": True})
+    with pytest.raises(workbench_mod.WorkbenchError, match="temporary timeout"):
+        workbench_mod.generate_project_narration(project)
+    failed = workbench_mod.mark_project_narration_failed(project, "temporary timeout")
+    first_before = next(scene for scene in failed["scenes"] if scene["id"] == "scene-a")["narration"]["versions"][0]
+    first_path = project / first_before["audio_path"]
+    first_hash = hashlib.sha256(first_path.read_bytes()).hexdigest()
+
+    queued = workbench_mod.start_project_narration(project, {"confirmed": True, "resume_failed": True})
+    assert queued["automation"]["voice"]["profile_id"] == profile["id"]
+    completed = workbench_mod.generate_project_narration(project)
+
+    assert calls == ["scene-a", "scene-b", "scene-b"]
+    first_after = next(scene for scene in completed["scenes"] if scene["id"] == "scene-a")["narration"]["versions"][0]
+    assert first_after["id"] == first_before["id"]
+    assert first_after["asset_id"] == first_before["asset_id"]
+    assert hashlib.sha256(first_path.read_bytes()).hexdigest() == first_hash
+    assert completed["automation"]["narration_generation"]["completed_scenes"] == 2
+    assert completed["automation"]["narration_generation"]["status"] == "completed"
+    assert (project / completed["automation"]["narration_generation"]["audio_path"]).is_file()
+
+
 def test_full_preview_is_independent_from_approvals_and_batch_confirmation(projects_root, monkeypatch):
     project = make_project(projects_root)
     state = workbench_mod.bootstrap_workbench(project)
@@ -4399,6 +4703,75 @@ def test_background_music_source_range_is_validated_and_invalidates_sample(proje
             "enabled": True, "track_id": track["id"],
             "source_start_seconds": 2.0, "source_end_seconds": 60.0,
         })
+
+
+def test_music_policy_persists_loop_and_zero_fades(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    state = workbench_mod.bootstrap_workbench(project)
+    track_path = project / "uploaded.wav"
+    track_path.write_bytes(b"music")
+    track = {
+        "id": "project-music-demo", "title": "本地音乐",
+        "filename": "project-music-demo.wav", "duration_seconds": 42.0,
+    }
+    monkeypatch.setattr(
+        workbench_mod, "resolve_music_track",
+        lambda _track_id, _project_dir=None: (track_path, track),
+    )
+
+    updated = workbench_mod.update_music_policy(project, {
+        "enabled": True, "track_id": track["id"], "playback_gain_db": 0,
+        "source_start_seconds": 0, "source_end_seconds": 30,
+        "loop": False, "fade_in_seconds": 0, "fade_out_seconds": 0,
+    })
+
+    assert updated["music_policy"]["loop"] is False
+    assert updated["music_policy"]["fade_in_seconds"] == 0
+    assert updated["music_policy"]["fade_out_seconds"] == 0
+
+
+@pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg is required for music-only audio validation")
+def test_music_only_audio_replaces_narration_and_respects_source_range(tmp_path: Path, monkeypatch):
+    ffmpeg = _ffmpeg_available()
+    assert ffmpeg
+    project = tmp_path / "music-only"
+    project.mkdir()
+    source = project / "reference.m4a"
+    subprocess.run([
+        ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=2",
+        "-c:a", "aac", str(source),
+    ], check=True, capture_output=True)
+    track = {
+        "id": "reference-track", "title": "对标原音轨",
+        "filename": source.name, "duration_seconds": 2.0,
+    }
+    monkeypatch.setattr(
+        workbench_mod, "resolve_music_track",
+        lambda _track_id, _project_dir=None: (source, track),
+    )
+    state = {
+        "automation": {
+            "audio_mode": "music_only",
+            "narration_generation": {"status": "idle", "audio_path": None},
+        },
+        "music_policy": {
+            "version": 3, "enabled": True, "track_id": track["id"],
+            "playback_gain_db": 0.0, "loop": False,
+            "source_start_seconds": 0.25, "source_end_seconds": 1.75,
+            "fade_in_seconds": 0.0, "fade_out_seconds": 0.0,
+        },
+    }
+    monkeypatch.setattr(workbench_mod, "_require_ready_network_assets", lambda *_args: None)
+
+    workbench_mod._require_renderable_project(project, state, state["automation"])
+    output, report = workbench_mod._materialize_music_only_audio(project, state, 1.0, ffmpeg)
+
+    assert output.is_file()
+    assert 0.95 <= workbench_mod._probe_duration_seconds(output, ffmpeg) <= 1.05
+    assert report["audio_mode"] == "music_only"
+    assert report["source_start_seconds"] == 0.25
+    assert report["source_end_seconds"] == 1.75
+    assert report["loop"] is False
 
 
 def test_audio_mix_signature_changes_for_narration_or_music(projects_root):

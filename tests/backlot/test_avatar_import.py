@@ -162,6 +162,35 @@ def test_frozen_longform_gaps_drive_final_turn_timeline(projects_root):
     assert avatar_mod._longform_turn_gap(package, 2) == pytest.approx(0.0)
 
 
+def test_exact_clock_longform_gaps_are_quantized_to_whole_video_frames():
+    package = {
+        "turns": [
+            {"speaker_id": "yaya"},
+            {"speaker_id": "yaya"},
+            {"speaker_id": "mengmeng"},
+        ],
+        "settings": {
+            "fps": 25,
+            "same_speaker_gap_seconds": 0.30,
+            "speaker_change_gap_seconds": 0.18,
+        },
+        "asr": {
+            "summary": {
+                "timing_manifest": {
+                    "version": "avatar-turn-timing-v3",
+                    "contract": {"video_fps": 25},
+                },
+            },
+        },
+    }
+
+    assert avatar_mod._requested_longform_turn_gap(package, 0) == pytest.approx(0.30)
+    assert avatar_mod._requested_longform_turn_gap(package, 1) == pytest.approx(0.18)
+    assert avatar_mod._longform_turn_gap(package, 0) == pytest.approx(0.28)
+    assert avatar_mod._longform_turn_gap(package, 1) == pytest.approx(0.16)
+    assert avatar_mod._longform_turn_gap(package, 2) == pytest.approx(0.0)
+
+
 def test_deterministic_timing_manifest_is_primary_and_whisper_only_reviews(projects_root):
     project = make_project(projects_root)
     package = avatar_mod.initialize_avatar_package(project, {"import_mode": "longform", "require_asr": True})
@@ -213,6 +242,59 @@ def test_exact_clock_v2_manifest_validates_integer_sample_and_frame_contract(pro
     broken["turns"][0]["source_end_sample"] -= 1
     with pytest.raises(AvatarImportError, match="25FPS"):
         avatar_mod.apply_longform_timing_manifest(project, broken)
+
+
+def test_exact_clock_v3_preserves_frame_authority_and_assembly_clock(projects_root):
+    project = make_project(projects_root)
+    package = avatar_mod.initialize_avatar_package(project, {
+        "import_mode": "longform", "require_asr": True,
+    })
+    manifest = exact_clock_manifest(package)
+    manifest["version"] = "avatar-turn-timing-v3"
+
+    applied = avatar_mod.apply_longform_timing_manifest(project, manifest)
+    transcripts = {
+        speaker["speaker_id"]: {
+            "text": "完全错误",
+            "segments": [{
+                "start": 3.0, "end": 3.2, "text": "完全错误",
+                "words": [{"start": 3.0, "end": 3.2, "word": "完全错误"}],
+            }],
+        }
+        for speaker in applied["speakers"]
+    }
+
+    issues = avatar_mod._review_deterministic_longform_turns(
+        applied, transcripts, applied["asr"]["summary"]["timing_manifest"],
+    )
+
+    assert applied["settings"]["fps"] == 25
+    assert applied["settings"]["audio_sample_rate"] == 24_000
+    assert applied["cut_plan"]["status"] == "approved"
+    assert applied["cut_plan"]["summary"]["needs_manual"] == 0
+    assert applied["cut_plan"]["summary"]["cut_authority"] == "exact_frame_manifest"
+    assert all(item["confidence"] == "exact_clock" for item in applied["cut_plan"]["items"])
+    assert {item["code"] for item in issues} == {"exact_clock_asr_diagnostic_warning"}
+
+
+def test_exact_clock_v3_can_materialize_cuts_when_whisper_is_unavailable(projects_root):
+    project = make_project(projects_root)
+    package = avatar_mod.initialize_avatar_package(project, {
+        "import_mode": "longform", "require_asr": True,
+    })
+    manifest = exact_clock_manifest(package)
+    manifest["version"] = "avatar-turn-timing-v3"
+    avatar_mod.apply_longform_timing_manifest(project, manifest)
+
+    result = avatar_mod.approve_exact_clock_manifest_cuts(
+        project,
+        diagnostic_error=RuntimeError("synthetic local ASR crash"),
+        model_name="faster-whisper-small",
+    )
+
+    assert result["cut_plan"]["status"] == "approved"
+    assert result["cut_plan"]["summary"]["cut_authority"] == "exact_frame_manifest"
+    assert all(item["confidence"] == "exact_clock" for item in result["cut_plan"]["items"])
 
 
 def test_exact_clock_v2_whisper_drift_is_diagnostic_and_never_opens_manual_gate(projects_root):
@@ -408,7 +490,9 @@ def test_presenter_layout_template_can_apply_to_one_speaker_without_retiming(pro
     first, second = saved["scenes"]
     assert first["presenter"]["layout_template_id"].startswith("custom-")
     assert first["presenter"]["treatment"] == "custom"
-    assert second["presenter"]["layout_template_id"] == "pip_top_left"
+    # The other speaker keeps the project default template; the current product
+    # default is the right-top presenter layout.
+    assert second["presenter"]["layout_template_id"] == "pip_top_right"
     assert [scene["start_seconds"] for scene in saved["scenes"]] == [0.0, 2.0]
 
 
@@ -455,9 +539,10 @@ def test_exact_clock_manifest_expands_one_click_master_limit_without_trimming(pr
         avatar_mod.ensure_exact_clock_assembly_duration_limit(project, maximum_seconds=4)
     updated = avatar_mod.ensure_exact_clock_assembly_duration_limit(project, maximum_seconds=300)
 
-    # 2 + 2 seconds of native role audio, one 0.25 second speaker gap, and
-    # one second muxing tolerance. No speech is dropped or time-stretched.
-    assert updated["settings"]["max_duration_seconds"] == pytest.approx(5.25)
+    # 2 + 2 seconds of native role audio, one requested 0.25 second speaker
+    # gap quantized down to six 25FPS frames (0.24 seconds), and one second
+    # muxing tolerance. No speech is dropped or time-stretched.
+    assert updated["settings"]["max_duration_seconds"] == pytest.approx(5.24)
 
 
 def test_avatar_source_package_allows_custom_default_treatment(projects_root):
@@ -895,6 +980,53 @@ def test_longform_master_uses_approved_cuts_and_blurred_canvas_fit(projects_root
     assert all("part_path" in item for item in json.loads((project / complete["assembly"]["timeline_path"]).read_text(encoding="utf-8"))["turns"])
 
 
+def test_exact_clock_master_keeps_low_whisper_score_as_diagnostic_warning(projects_root, monkeypatch):
+    project = make_project(projects_root, "exact-clock-master-warning")
+    package = avatar_mod.initialize_avatar_package(project, {"import_mode": "longform", "require_asr": True})
+    package["asr"] = {
+        "status": "passed",
+        "issues": [],
+        "summary": {
+            "timing_manifest": {
+                "version": "avatar-turn-timing-v4",
+                "contract": {"video_fps": 25},
+            }
+        },
+    }
+    package["assembly"] = {"status": "running", "run_id": "ASM-exact-clock-warning"}
+    avatar_mod._save_package(project, package)
+    candidate = project / "renders" / "avatar" / ".candidate.mp4"
+    candidate.parent.mkdir(parents=True, exist_ok=True)
+    candidate.write_bytes(b"valid-enough-for-mocked-media")
+    timeline = [
+        {
+            "turn_id": "T001", "speaker_id": "yaya", "text": "欢迎收听今天的科技快报。",
+            "start_seconds": 0.0, "speech_end_seconds": 0.9, "end_seconds": 1.0,
+        },
+        {
+            "turn_id": "T002", "speaker_id": "mengmeng", "text": "今天我们聊聊数字人的工作。",
+            "start_seconds": 1.0, "speech_end_seconds": 1.9, "end_seconds": 2.0,
+        },
+    ]
+    monkeypatch.setattr(avatar_mod, "probe_media", lambda _path: {
+        "duration_seconds": 2.0,
+        "video": {"codec": "h264", "fps": 25.0, "frame_count": 50},
+        "audio": {"codec": "aac", "sample_rate": 48_000},
+    })
+    monkeypatch.setattr(avatar_mod, "_verify_decode", lambda _path: (True, ""))
+    monkeypatch.setattr(avatar_mod, "_load_whisper", lambda _model=None: (object(), "mock-whisper"))
+    monkeypatch.setattr(avatar_mod, "_transcribe_file", lambda _model, _path: ("英文型号识别偏差", []))
+    monkeypatch.setattr(avatar_mod, "text_metrics", lambda _expected, _actual: (0.70, 0.70))
+
+    complete = avatar_mod._complete_avatar_assembly(project, avatar_mod.read_avatar_package(project), candidate, timeline)
+
+    assert complete["assembly"]["status"] == "passed"
+    warning = complete["assembly"]["issues"][0]
+    assert warning["code"] == "exact_clock_master_asr_diagnostic_warning"
+    assert warning["severity"] == "warning"
+    assert Path(project / complete["assembly"]["output_path"]).name == "avatar-dialogue-master.mp4"
+
+
 def test_longform_assembly_reuses_normalized_turns_after_restart(projects_root):
     ffmpeg = avatar_mod._find_binary("ffmpeg")
     if not ffmpeg:
@@ -995,6 +1127,9 @@ def test_avatar_master_applies_immutable_native_audio_timeline_and_composite_rev
     initial_board = workbench_mod.bootstrap_workbench(project)
     initial_board["scenes"][0]["order"] = 2
     initial_board["scenes"][1]["order"] = 1
+    initial_board["automation"]["preview_render"] = {
+        "status": "completed", "output_path": "renders/previews/old-preview.mp4",
+    }
     write_json(project / "artifacts" / "workbench.json", initial_board)
     applied = workbench_mod.apply_avatar_package_to_timeline(project, {"default_treatment": "fullscreen"})
     timeline = json.loads((project / package["assembly"]["timeline_path"]).read_text(encoding="utf-8"))
@@ -1002,6 +1137,7 @@ def test_avatar_master_applies_immutable_native_audio_timeline_and_composite_rev
     scenes = sorted(applied["scenes"], key=lambda scene: scene["order"])
 
     assert applied["automation"]["audio_mode"] == "native_avatar_audio"
+    assert applied["automation"]["preview_render"]["status"] == "needs_refresh"
     assert applied["automation"]["narration_generation"]["audio_path"].startswith("assets/video/avatar/masters/")
     scenes_by_script = {scene["script_section_id"]: scene for scene in scenes}
     assert round(scenes_by_script["s1"]["end_seconds"] - scenes_by_script["s1"]["start_seconds"], 3) == expected_durations[0]

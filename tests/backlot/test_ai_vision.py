@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from PIL import Image
+import pytest
 
 from backlot import ai_vision
 
@@ -95,3 +96,61 @@ def test_vision_runtime_identity_invalidates_cache_when_prompt_or_image_contract
         "image_detail": "auto",
         "image_longest_edge": "768",
     }
+
+
+def test_contact_sheet_overview_sends_only_sheets_and_maps_ranges_from_cells(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(ai_vision, "_vision_runtime", lambda provider="default": ("secret", "https://example.invalid/v1", "luna-test"))
+    sheet = tmp_path / "sheet.jpg"
+    Image.new("RGB", (160, 90), "green").save(sheet)
+    observed = {}
+
+    def fake_post(url, **kwargs):
+        observed.update(kwargs["json"])
+        return _chat_response({"chapters": [{
+            "chapter_id": "CHAPTER-01",
+            "summary": "绿色测试画面",
+            "subjects": [{"name": "测试主体", "confidence": .9, "evidence_cell_ids": ["SHEET-0001:R1C1"]}],
+            "actions": [{"name": "展示", "subject": "测试主体", "confidence": .8, "evidence_cell_ids": ["SHEET-0001:R1C1"]}],
+            "quality": {"blur": "low", "notes": ""},
+            "usable_ranges": [{"label": "可用画面", "confidence": .8, "evidence_cell_ids": ["SHEET-0001:R1C1", "SHEET-0001:R1C2"]}],
+            "detail_candidates": [{"cell_id": "SHEET-0001:R1C2", "reason": "small_subject"}],
+            "unknowns": [],
+        }]})
+
+    rows, metadata = ai_vision.describe_contact_sheets(
+        [{"sheet_id": "SHEET-0001", "chapter_id": "CHAPTER-01", "path": str(sheet), "cell_ids": ["SHEET-0001:R1C1", "SHEET-0001:R1C2"]}],
+        [{"chapter_id": "CHAPTER-01", "start_seconds": 0, "end_seconds": 10}],
+        [
+            {"cell_id": "SHEET-0001:R1C1", "actual_pts_seconds": 1.25},
+            {"cell_id": "SHEET-0001:R1C2", "actual_pts_seconds": 4.5},
+        ],
+        post=fake_post,
+    )
+
+    content = observed["messages"][1]["content"]
+    assert sum(item["type"] == "image_url" for item in content) == 1
+    assert str(sheet) not in json.dumps(observed)
+    assert rows[0]["usable_ranges"][0]["start_seconds"] == 1.25
+    assert rows[0]["usable_ranges"][0]["end_seconds"] == 4.5
+    assert rows[0]["detail_candidates"][0]["cell_id"] == "SHEET-0001:R1C2"
+    assert metadata["image_count"] == 1
+
+
+def test_contact_sheet_overview_rejects_unknown_cell(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(ai_vision, "_vision_runtime", lambda provider="default": ("secret", "https://example.invalid/v1", "luna-test"))
+    sheet = tmp_path / "sheet.jpg"
+    Image.new("RGB", (80, 60), "red").save(sheet)
+
+    def fake_post(url, **kwargs):
+        return _chat_response({"chapters": [{
+            "chapter_id": "CHAPTER-01", "summary": "测试", "subjects": [], "actions": [], "quality": {},
+            "usable_ranges": [], "detail_candidates": [{"cell_id": "UNKNOWN", "reason": "text"}], "unknowns": [],
+        }]})
+
+    with pytest.raises(ai_vision.VisionAIError, match="未输入"):
+        ai_vision.describe_contact_sheets(
+            [{"sheet_id": "SHEET-0001", "chapter_id": "CHAPTER-01", "path": str(sheet), "cell_ids": ["SHEET-0001:R1C1"]}],
+            [{"chapter_id": "CHAPTER-01", "start_seconds": 0, "end_seconds": 10}],
+            [{"cell_id": "SHEET-0001:R1C1", "actual_pts_seconds": 1}],
+            post=fake_post,
+        )

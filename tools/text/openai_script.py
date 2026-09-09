@@ -22,7 +22,7 @@ from tools.base_tool import (
 
 class OpenAIScript(BaseTool):
     name = "openai_script"
-    version = "0.1.0"
+    version = "0.2.0"
     tier = ToolTier.GENERATE
     capability = "script_generation"
     provider = "openai"
@@ -53,13 +53,14 @@ class OpenAIScript(BaseTool):
             "script_text": {"type": "string"},
             "style_direction": {"type": "string"},
             "style_reference": {"type": "string"},
+            "video_type_preset": {"type": "string", "enum": ["ordinary", "news"]},
             "avatar_turn_contract": {"type": "array"},
             "model": {"type": "string"},
         },
     }
     resource_profile = ResourceProfile(cpu_cores=1, ram_mb=256, vram_mb=0, disk_mb=1, network_required=True)
     retry_policy = RetryPolicy(max_retries=1, retryable_errors=["rate_limit", "timeout"])
-    idempotency_key_fields = ["mode", "organize_strength", "title", "duration_seconds", "brief", "idea", "script_text"]
+    idempotency_key_fields = ["mode", "organize_strength", "video_type_preset", "title", "duration_seconds", "brief", "idea", "script_text"]
     side_effects = ["calls OpenAI-compatible text API"]
     user_visible_verification = ["人工审核脚本结构、时长、表达和画面意图"]
 
@@ -99,7 +100,11 @@ class OpenAIScript(BaseTool):
         return parsed
 
     @staticmethod
-    def _system_prompt(mode: str, organize_strength: str = "faithful") -> str:
+    def _system_prompt(
+        mode: str,
+        organize_strength: str = "faithful",
+        video_type_preset: str = "ordinary",
+    ) -> str:
         common = """你是中文短视频编导。请根据输入制作一份可人工审核的脚本草案。
 只输出 JSON，不要 Markdown，不要解释。JSON 必须包含：
 {
@@ -108,7 +113,7 @@ class OpenAIScript(BaseTool):
   \"total_duration_seconds\": number,
   \"voice_performance\": {\"performance_intent\": string, \"pacing_profile\": \"conversational\" },
   \"sections\": [
-    {\"id\": string, \"turn_id\": string|null, \"speaker_id\": string|null, \"speaker_name\": string|null, \"label\": string, \"text\": string, \"start_seconds\": number, \"end_seconds\": number, \"speaker_directions\": string, \"enhancement_cues\": [{\"type\": \"overlay\"|\"broll\"|\"diagram\"|\"stat_card\"|\"code_snippet\"|\"animation\", \"description\": string, \"timestamp_seconds\": number}]}
+    {\"id\": string, \"turn_id\": string|null, \"speaker_id\": string|null, \"speaker_name\": string|null, \"label\": string, \"text\": string, \"start_seconds\": number, \"end_seconds\": number, \"speaker_directions\": string, \"enhancement_cues\": [{\"type\": \"overlay\"|\"broll\"|\"diagram\"|\"stat_card\"|\"code_snippet\"|\"animation\", \"description\": string, \"timestamp_seconds\": number}], \"story_id\": string|null, \"news_headline\": string|null, \"news_section_kind\": \"story\"|\"closing\"|null}
   ]
 }
 共同要求：使用简体中文；有目标时长时按目标时长合理分段，没有目标时长时按内容完整度自然控制篇幅；每段文字适合口播；每段都说明画面意图；不要编造具体事实、数据或书籍内容；不要机械套用“开场/展开/重点/收束”的四段标签，应按内容语义自然命名和分段。"""
@@ -121,7 +126,17 @@ class OpenAIScript(BaseTool):
             strategy = """当前 mode 是 expand_idea：允许从一个想法扩展为完整口播稿，可以选择解释、故事、观点、清单或问答结构；补充内容必须是稳妥的通用表达，对不确定事实保持克制，不得伪造数据、人物或出处。"""
         else:
             strategy = """当前 mode 是 from_scratch：根据标题独立创作一份完整口播稿，并结合用户的可选方向；可以自由选择最适合主题的叙事结构，但不得伪造数据、人物、新闻进展或出处。"""
-        return f"{common}\n本次专用策略：{strategy}"
+        news_instruction = ""
+        if video_type_preset == "news":
+            news_instruction = """
+本次是新闻类视频：新闻正文 section 必须提供 story_id、news_headline，并标记 news_section_kind=story。先按新闻事件分组，
+同一件新闻的连续 section 必须复用同一个 story_id 和完全相同的 news_headline；只有切换到另一件新闻时，
+story_id 才按 S01、S02、S03 递增。story_id 表示新闻主题，不是 turn_id，也不能每句机械递增。
+news_headline 是 8—30 字的播出小标题，只能概括该 story 已有的对象和变化，不能补充正文没有的事实、
+数字、结论或夸张词；不得使用主持人姓名、Txxx 轮次、“第几段”“开场”“总结”作为小标题。
+如果最后一段只是互动提问、欢迎评论或账号收尾，不属于任何一条新闻正文，则标记 news_section_kind=closing，
+并将 story_id 和 news_headline 都设为 null；结尾互动段绝不能继承前面新闻的小标题。"""
+        return f"{common}\n本次专用策略：{strategy}\n{news_instruction}"
 
     @staticmethod
     def _temperature(mode: str, organize_strength: str = "faithful") -> float:
@@ -146,18 +161,22 @@ class OpenAIScript(BaseTool):
                 for key in (
                     "mode", "title", "duration_seconds", "audience", "content_goal",
                     "brief", "idea", "script_text", "style_direction", "style_reference",
-                    "avatar_turn_contract",
+                    "video_type_preset", "avatar_turn_contract",
                 )
             }
             mode = str(inputs.get("mode") or "from_scratch")
             organize_strength = str(inputs.get("organize_strength") or "faithful")
+            video_type_preset = str(inputs.get("video_type_preset") or "ordinary")
+            if video_type_preset not in {"ordinary", "news"}:
+                video_type_preset = "ordinary"
             context["organize_strength"] = organize_strength
+            context["video_type_preset"] = video_type_preset
             avatar_contract = context.get("avatar_turn_contract") or []
             request = {
                 "model": model,
                 "temperature": self._temperature(mode, organize_strength),
                 "messages": [
-                    {"role": "system", "content": self._system_prompt(mode, organize_strength)},
+                    {"role": "system", "content": self._system_prompt(mode, organize_strength, video_type_preset)},
                     *([{"role": "system", "content": "这是数字人口播脚本，可能包含一位或两位主持人。sections 必须与 avatar_turn_contract 一一对应，数量、顺序、turn_id、speaker_id、speaker_name 均不得改变、合并、删除或新增；每个 section 只包含一个轮次。"}] if avatar_contract else []),
                     {"role": "user", "content": json.dumps(context, ensure_ascii=False)},
                 ],

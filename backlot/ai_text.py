@@ -447,6 +447,7 @@ def _chat_json(
     timeout_seconds: int = DEFAULT_JSON_REQUEST_TIMEOUT_SECONDS,
     temperature: float = 0.2,
     provider: str = "default",
+    allow_compatibility_retry: bool = True,
 ) -> tuple[dict[str, Any], str]:
     api_key, base_url, model = _resolved_credentials(provider)
     try:
@@ -476,12 +477,12 @@ def _chat_json(
         }
         timeout = max(15, int(timeout_seconds))
         response = requests.post(endpoint, headers=headers, json=request, timeout=timeout, stream=True)
-        if response.status_code >= 400 and "thinking" in response.text.lower():
+        if allow_compatibility_retry and response.status_code >= 400 and "thinking" in response.text.lower():
             # Keep compatibility with older Ark-compatible deployments while
             # preferring disabled thinking on models that support it.
             request.pop("thinking", None)
             response = requests.post(endpoint, headers=headers, json=request, timeout=timeout, stream=True)
-        if response.status_code >= 400 and (
+        if allow_compatibility_retry and response.status_code >= 400 and (
             "response_format" in response.text.lower() or "json_object" in response.text.lower()
         ):
             request.pop("response_format", None)
@@ -548,6 +549,38 @@ def test_text_ai_connection(provider: str = "default") -> dict[str, Any]:
 
 def test_doubao_text_ai_connection() -> dict[str, Any]:
     return test_text_ai_connection("doubao")
+
+
+def plan_interaction_story(context: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Group one selected interaction into auditable, chronological story units.
+
+    Source timestamps are intentionally absent from the requested output.  The
+    caller resolves every supplied utterance ID back to frozen local evidence.
+    """
+    system = """你是短视频互动素材的剪辑策划，只处理用户已选择的同一组互动。
+把所有 supplied utterances 按原顺序分成连续的语义组，每条分句必须且只能出现一次。
+每组只能引用给定 utterance id，不得输出或猜测时间戳，不得添加台词。
+visual_evidence 是此前画面理解留下的只读摘要、帧ID和停顿证据；可以辅助判断动作、反应和开场，但不能把摘要当作新台词。
+组内 evidence_ids 只能引用 visual_evidence.frames 或 pause_windows 中确实提供的 id；没有直接证据可以留空，不得编造。
+正文不能重排。判断完整的问答、追问、铺垫、笑点、反应、动作和结果；删除必须以完整语义组为单位。
+depends_on 用于声明保留本组时必须保留的前提组。对问答、动作结果和依赖上下文要保守。
+greeting/farewell/repetition 可以建议 drop，但有叙事价值时保留。
+同一件事的多轮重复尝试（例如连续拍照、反复确认、重复解释）要标成 repetition 并只保留信息或反应最完整的一轮；
+不要因为每句话单独都有意义就把所有轮次都保留。若后一处笑点依赖前一处铺垫，用 depends_on 明确依赖。
+参考输入 options 中的 target_min_seconds、target_max_seconds 和 speed，尽量让“已保留正文/倍速 + 一次精彩前置/倍速”进入目标区间；
+但语义完整、问答依赖和动作结果优先于凑时长。无法安全达标时保留必要内容，不得拆半句话。
+hook_candidates 最多3个，只能引用连续且已建议保留的组；候选必须能独立理解，优先3至5秒，但你不知道精确时长，系统会校验。
+默认精彩前置会把所选组移动到片头而不是复制，正文必须在去掉该组后仍然逻辑通顺。
+只返回 JSON 对象：
+{"summary":"...","groups":[{"id":"G001","type":"greeting|question_answer|follow_up|setup|punchline|reaction|action|result|farewell|repetition|other","utterance_ids":["U00001"],"evidence_ids":["F000012000"],"decision":"keep|drop","reason":"...","depends_on":[],"hook_eligible":false,"hook_score":0.0}],"hook_candidates":[{"id":"H001","group_ids":["G002"],"reason":"..."}]}"""
+    # The UI freezes a one-submit budget before this paid step.  Unlike older
+    # generic callers, do not issue compatibility fallback POSTs here: a 4xx
+    # is surfaced for configuration repair instead of risking a second submit.
+    return _chat_json(
+        system, context, temperature=0.0,
+        timeout_seconds=DEFAULT_JSON_REQUEST_TIMEOUT_SECONDS,
+        allow_compatibility_retry=False,
+    )
 
 
 def visual_copy_fingerprint(context: dict[str, Any], model: str) -> str:

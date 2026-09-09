@@ -86,7 +86,7 @@ function renderPreflight() {
     ["写稿黄金样板", `${Number(golden.loaded_count || 0)} 份用户批准样板已加载`, Number(golden.loaded_count || 0) < 1],
     ["抖音热度信号", douyinDetail, douyin.state !== "ok"],
     ["双主持语音", "海客视频本地同名音色 · 两条长音频后切割", false],
-    ["数字人算力", "精确帧工作流 2094449979141218305 · Standard 24GB · Plus禁用", false],
+    ["数字人算力", "精确帧工作流 2094449979141218305 · Plus 48GB · 双角色云端并行", false],
     ["画面合同", `${config.aspect === "portrait" ? "1080×1920" : config.aspect} · 4:5 源 · ${config.avatar?.shape === "circle" ? "圆形" : "可调外框"}`, false],
     ["成片默认项", `${config.background_music?.enabled ? "新闻背景音乐" : "无背景音乐"} · 默认字幕 · 不自动发布`, !scheduler.healthy && config.enabled],
   ];

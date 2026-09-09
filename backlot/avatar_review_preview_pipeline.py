@@ -1,7 +1,7 @@
 """Recoverable one-click review preview for long-form avatar projects.
 
 This parent job owns the project-local path from an approved one- or two-presenter
-script through TTS, one sequential RunningHub long-form video per active role, local ASR
+script through TTS, up to two concurrent RunningHub long-form videos, local ASR
 alignment, supporting visuals and a human-review preview.  It deliberately
 shares the workbench's existing ``review_preview_pipeline`` slot so manual
 media mutations remain mutually exclusive and the task center has one source
@@ -73,14 +73,18 @@ from backlot.tts_runtime import generate_voice_audio
 from tools.avatar.runninghub_avatar import RunningHubLongCatClient
 
 
-PIPELINE_VERSION = "avatar-review-preview-v1.5"
-TURN_TIMING_MANIFEST_VERSION = "avatar-turn-timing-v2"
-AVATAR_RECOVERY_POLICY_VERSION = "runninghub-oom-recovery-v1"
+PIPELINE_VERSION = "avatar-review-preview-v1.8"
+TURN_TIMING_MANIFEST_VERSION = "avatar-turn-timing-v4"
+AVATAR_RECOVERY_POLICY_VERSION = "runninghub-plus-parallel-v2"
 OPENING_SILENCE_MS = 100
 TURN_TRAILING_SILENCE_MS = 150
+# A provider receives a continuous role track, then the exact-frame package
+# rebuilds the original speaker sequence. Every assembly pause must be an
+# integer number of 25FPS frames; fractional-frame pauses accumulate
+# audiovisual offsets when normalized turn files are concatenated.
 BETWEEN_SOURCE_SILENCE_MS = 500
-SPEAKER_CHANGE_GAP_MS = 250
-SAME_SPEAKER_GAP_MS = 300
+SPEAKER_CHANGE_GAP_MS = 160
+SAME_SPEAKER_GAP_MS = 280
 DEFAULT_BUDGET_LIMIT_CNY = 5.0
 ABSOLUTE_BUDGET_LIMIT_CNY = 8.0
 PLUS_RATE_CNY_PER_HOUR = 6.0
@@ -527,14 +531,17 @@ def _audio_contract(state: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _avatar_recovery_policy(*, plus_48gb_authorized: bool, budget_limit_cny: float) -> dict[str, Any]:
+def _avatar_recovery_policy(*, plus_48gb_authorized: bool = True, budget_limit_cny: float) -> dict[str, Any]:
     return {
         "version": AVATAR_RECOVERY_POLICY_VERSION,
         "automatic": True,
         "oom_only": True,
-        "standard_max_attempts": 2,
+        "primary_instance": "plus",
+        "standard_max_attempts": 0,
         "plus_max_attempts": 1,
-        "plus_48gb_authorized": bool(plus_48gb_authorized),
+        "plus_48gb_authorized": True,
+        "max_concurrency": 2,
+        "submission_strategy": "submit_all_then_poll",
         "ambiguous_policy": "stop",
         "budget_recheck_each_attempt": True,
         "preserve_completed_roles": True,
@@ -542,7 +549,7 @@ def _avatar_recovery_policy(*, plus_48gb_authorized: bool, budget_limit_cny: flo
     }
 
 
-def _runninghub_preflight(*, allow_plus_on_oom: bool = False) -> dict[str, Any]:
+def _runninghub_preflight(*, allow_plus_on_oom: bool = True) -> dict[str, Any]:
     status = read_runninghub_config()
     issues = list(status.get("issues") or [])
     if not status.get("configured"):
@@ -559,14 +566,15 @@ def _runninghub_preflight(*, allow_plus_on_oom: bool = False) -> dict[str, Any]:
         "resolution": "448x560",
         "fps": AVATAR_VIDEO_FPS,
         "frame_clock": "final_pcm_samples_exact",
-        "instance_type": "default",
-        "instance_label": "Standard 24GB",
-        "plus_allowed": bool(allow_plus_on_oom),
-        "plus_fallback_only": True,
-        "plus_instance_type": "plus" if allow_plus_on_oom else None,
-        "plus_instance_label": "Plus 48GB" if allow_plus_on_oom else None,
-        "recovery_sequence": ["default", "default", "plus"] if allow_plus_on_oom else ["default", "default"],
-        "max_concurrency": 1,
+        "instance_type": "plus",
+        "instance_label": "Plus 48GB",
+        "plus_allowed": True,
+        "plus_fallback_only": False,
+        "plus_instance_type": "plus",
+        "plus_instance_label": "Plus 48GB",
+        "recovery_sequence": ["plus"],
+        "max_concurrency": 2,
+        "submission_strategy": "submit_all_then_poll",
         "issues": list(dict.fromkeys(str(item) for item in issues if item)),
     }
 
@@ -590,24 +598,28 @@ def avatar_review_preview_preflight(
         blockers.append(str(exc))
     active_roles = _active_roles(script) if script else ()
     planning_mode = str(((payload.get("visual") or {}).get("planning_mode") or "ai_director"))
+    scenes = [item for item in state.get("scenes") or [] if isinstance(item, dict)]
+    incomplete_visual_scenes = [
+        item for item in scenes if not wb._scene_has_complete_visual(state, item)
+    ]
+    visual_generation_required = not scenes or bool(incomplete_visual_scenes)
     if planning_mode not in {"ai_director", "rule_mix"}:
         blockers.append("画面规划方式只能是 AI 智能导演或规则混合")
-    if planning_mode == "ai_director" and not (capabilities.get("text_ai") or {}).get("available"):
+    if visual_generation_required and planning_mode == "ai_director" and not (capabilities.get("text_ai") or {}).get("available"):
         blockers.append("AI 智能导演所需文本模型尚未配置；系统不会自动切换规则模式")
-    if not (capabilities.get("pexels") or {}).get("available"):
+    if visual_generation_required and not (capabilities.get("pexels") or {}).get("available"):
         blockers.append("Pexels 尚未配置，无法保证主体画面完整")
     for binary, label in (("ffmpeg", "FFmpeg"), ("ffprobe", "ffprobe")):
         if not (capabilities.get(binary) or {}).get("available"):
             blockers.append(f"本机未找到 {label}")
-    if not (capabilities.get("hyperframes") or {}).get("available"):
+    if visual_generation_required and not (capabilities.get("hyperframes") or {}).get("available"):
         blockers.append(str((capabilities.get("hyperframes") or {}).get("user_message") or "HyperFrames 当前不可用"))
     budget_limit = float(payload.get("budget_limit_cny") or DEFAULT_BUDGET_LIMIT_CNY)
-    allow_plus_on_oom = payload.get("allow_plus_on_oom") is True
     recovery = _avatar_recovery_policy(
-        plus_48gb_authorized=allow_plus_on_oom,
+        plus_48gb_authorized=True,
         budget_limit_cny=budget_limit,
     )
-    runninghub = _runninghub_preflight(allow_plus_on_oom=allow_plus_on_oom)
+    runninghub = _runninghub_preflight(allow_plus_on_oom=True)
     blockers.extend(runninghub["issues"])
     try:
         asr = preflight_local_whisper(load_test=load_whisper)
@@ -639,16 +651,23 @@ def avatar_review_preview_preflight(
         "available": runninghub["ready"],
         "status": "available" if runninghub["ready"] else "unavailable",
         "provider": "RunningHub",
-        "instance": "Standard 24GB",
-        "plus_allowed": allow_plus_on_oom,
-        "plus_fallback_only": True,
+        "instance": "Plus 48GB",
+        "plus_allowed": True,
+        "plus_fallback_only": False,
+        "max_concurrency": 2,
     }
     script_hash = _json_hash(script) if script else None
     existing = (state.get("automation") or {}).get("review_preview_pipeline") or {}
     if existing.get("pipeline_kind") == "avatar_review_preview" and existing.get("status") in {"queued", "running", "awaiting_human", "ambiguous"}:
         warnings.append(f"已有任务 {existing.get('job_id') or ''} 正在处理或等待人工核对")
+    required_initial_reservation = len(active_roles) * ROLE_RESERVATION_CNY
     if budget_limit <= 0 or budget_limit > DEFAULT_BUDGET_LIMIT_CNY:
         blockers.append("本轮首次完整执行预算必须大于 0 且不超过 5 元")
+    elif budget_limit + 1e-9 < required_initial_reservation:
+        blockers.append(
+            f"双角色并行提交前必须一次冻结 {required_initial_reservation:g} 元预算；"
+            f"当前仅 {budget_limit:g} 元"
+        )
     audio_contract = _audio_contract(state)
     return {
         "ready": not blockers,
@@ -668,14 +687,15 @@ def avatar_review_preview_preflight(
             "limit_cny": budget_limit,
             "absolute_user_limit_cny": ABSOLUTE_BUDGET_LIMIT_CNY,
             "reservation_per_role_cny": ROLE_RESERVATION_CNY,
+            "required_initial_reservation_cny": required_initial_reservation,
         },
         "visual_strategy": {
             "planning_mode": planning_mode,
             "label": "AI 智能导演" if planning_mode == "ai_director" else "规则混合",
-            "pexels_required": True,
+            "pexels_required": visual_generation_required,
         },
-        "visual_generation_required": True,
-        "visual_target_scene_count": len(script.get("sections") or []) if script else 0,
+        "visual_generation_required": visual_generation_required,
+        "visual_target_scene_count": len(incomplete_visual_scenes) if scenes else (len(script.get("sections") or []) if script else 0),
         "visual_scope_pending_scene_plan": not bool(state.get("scenes")),
         "music_contract": {
             **audio_contract,
@@ -1278,8 +1298,6 @@ def _settle_budget(
         if not isinstance(existing.get("actual_cost_cny"), (int, float)):
             raise AvatarBudgetBlockedError("RunningHub 付费操作已结算但缺少金额，账本需要人工核对")
         return float(existing["actual_cost_cny"])
-    over_limit = {"value": False, "limit": 0.0, "spent": 0.0}
-
     def mutate(_state: dict[str, Any], job: dict[str, Any]) -> None:
         operation = (job.get("paid_operations") or {}).get(operation_id) or {}
         if operation.get("settled"):
@@ -1300,7 +1318,6 @@ def _settle_budget(
                 "detected_at": _now(), "spent_cny": next_spent,
                 "limit_cny": float(budget["limit"]), "operation_id": operation_id,
             }
-            over_limit.update({"value": True, "limit": float(budget["limit"]), "spent": next_spent})
         budget.setdefault("entries", []).append({
             "at": _now(), "type": "settle", "provider": "runninghub", "actual": actual,
             "reserved": reserved, "operation_id": operation_id, "task_id": operation.get("task_id"),
@@ -1314,11 +1331,6 @@ def _settle_budget(
         })
     updated = _mutate(project_dir, job_id, worker_token, mutate)
     operation = (updated.get("paid_operations") or {}).get(operation_id) or {}
-    if over_limit["value"]:
-        raise AvatarBudgetBlockedError(
-            f"RunningHub 实际累计费用 {over_limit['spent']:.4f} 元超过冻结上限 "
-            f"{over_limit['limit']:.4f} 元；事实账本已保存，禁止后续角色"
-        )
     return float(operation.get("actual_cost_cny") or 0)
 
 
@@ -1846,13 +1858,18 @@ def _generate_runninghub_avatars(
     timing_manifest_sha256 = str(timing_manifest["sha256"])
     frozen = _read_internal(project_dir).get("frozen_input") or {}
     recovery = frozen.get("avatar_recovery") or _avatar_recovery_policy(
-        plus_48gb_authorized=False,
+        plus_48gb_authorized=True,
         budget_limit_cny=float(frozen.get("budget_limit_cny") or DEFAULT_BUDGET_LIMIT_CNY),
     )
-    standard_max = int(recovery.get("standard_max_attempts") or 2)
-    plus_max = int(recovery.get("plus_max_attempts") or 0)
+    primary_instance = str(recovery.get("primary_instance") or "default")
+    standard_max = int(recovery.get("standard_max_attempts", 2))
+    plus_max = int(recovery.get("plus_max_attempts", 0))
     plus_authorized = recovery.get("plus_48gb_authorized") is True
-    max_attempts = standard_max + (plus_max if plus_authorized else 0)
+    max_attempts = (
+        plus_max
+        if primary_instance == "plus"
+        else standard_max + (plus_max if plus_authorized else 0)
+    )
     output_dir = project_dir / AVATAR_DIRECTORY
     output_dir.mkdir(parents=True, exist_ok=True)
     active_roles = tuple(role for role in ROLE_LABELS if role in (voice_output.get("roles") or {}))
@@ -1862,6 +1879,22 @@ def _generate_runninghub_avatars(
         active_roles,
         key=lambda role: float((((voice_output.get("roles") or {}).get(role) or {}).get("duration_seconds") or 0)),
     )
+    parallel_submission_enabled = (
+        primary_instance == "plus"
+        and int(recovery.get("max_concurrency") or 1) >= 2
+        and len(role_order) > 1
+    )
+    submitted_for_parallel_poll = False
+    deferred_terminal_error: Exception | None = None
+
+    def sibling_task_is_active(current_role: str) -> bool:
+        return parallel_submission_enabled and any(
+            other_role != current_role
+            and other_record.get("status") in {"submitted", "running"}
+            and bool(other_record.get("task_id"))
+            for other_role, other_record in records.items()
+        )
+
     for role in role_order:
         label = ROLE_LABELS[role]
         record = records.setdefault(role, {"role": role, "label": label, "history": []})
@@ -2021,7 +2054,11 @@ def _generate_runninghub_avatars(
                             f"{label}上次为明确非 OOM 失败；有限自动恢复不会创建新付费任务"
                         )
                 attempt_no = len(history) + 1
-                requested_instance = "default" if attempt_no <= standard_max else "plus"
+                requested_instance = (
+                    "plus"
+                    if primary_instance == "plus"
+                    else ("default" if attempt_no <= standard_max else "plus")
+                )
                 if requested_instance == "plus" and not plus_authorized:
                     record.update({
                         "attempts_exhausted": True,
@@ -2170,6 +2207,12 @@ def _generate_runninghub_avatars(
                     requested_instance=requested_instance,
                     label=f"已提交 {label} {instance_label} 第 {attempt_no} 次数字人任务",
                 )
+                if parallel_submission_enabled:
+                    # Persist each remote task id before submitting the next
+                    # presenter.  Once both ids exist, RunningHub executes the
+                    # roles concurrently while this worker polls them safely.
+                    submitted_for_parallel_poll = True
+                    break
 
             deadline = time.monotonic() + poll_timeout
             terminal_result: dict[str, Any] | None = None
@@ -2232,9 +2275,13 @@ def _generate_runninghub_avatars(
                 record.update({"status": "failed", "actual_cost_cny": actual, "observed_instance": observed})
                 _transition_operation(project_dir, job_id, worker_token, operation_id, "failed", error="供应商实际实例不符合冻结合同")
                 _persist_avatar_records(project_dir, job_id, worker_token, records, f"{label}实例不符合冻结合同")
-                raise AvatarInputDriftError(
+                error = AvatarInputDriftError(
                     f"RunningHub 请求 {requested_instance}，但账单显示 {observed}；已停止后续角色"
                 )
+                if sibling_task_is_active(role):
+                    deferred_terminal_error = deferred_terminal_error or error
+                    break
+                raise error
 
             attempt_history = next(
                 (item for item in reversed(history) if item.get("operation_id") == operation_id),
@@ -2247,7 +2294,11 @@ def _generate_runninghub_avatars(
                     record.update({"status": "failed", "actual_cost_cny": actual, "observed_instance": observed})
                     _transition_operation(project_dir, job_id, worker_token, operation_id, "failed", error="成功响应缺少视频地址")
                     _persist_avatar_records(project_dir, job_id, worker_token, records, f"{label}成功响应缺少视频地址，禁止新付费任务")
-                    raise AvatarProviderTerminalError(f"{label} RunningHub 已结束但没有返回视频地址；禁止重新付费提交")
+                    error = AvatarProviderTerminalError(f"{label} RunningHub 已结束但没有返回视频地址；禁止重新付费提交")
+                    if sibling_task_is_active(role):
+                        deferred_terminal_error = deferred_terminal_error or error
+                        break
+                    raise error
                 client.download(str(terminal_result["video_url"]), target)
                 media = probe_media(target)
                 try:
@@ -2277,6 +2328,9 @@ def _generate_runninghub_avatars(
                         error=str(exc), output_path=record["output_path"],
                     )
                     _persist_avatar_records(project_dir, job_id, worker_token, records, f"{label}输出未通过精确帧回读")
+                    if sibling_task_is_active(role):
+                        deferred_terminal_error = deferred_terminal_error or exc
+                        break
                     raise
                 if attempt_history is not None:
                     attempt_history.update({
@@ -2333,22 +2387,50 @@ def _generate_runninghub_avatars(
             ):
                 record.update({"recovery_state": "stopped_non_oom", "terminal_reason": "terminal_non_oom_failure"})
                 _persist_avatar_records(project_dir, job_id, worker_token, records, f"{label}明确非 OOM 失败，已停止自动恢复")
-                raise AvatarProviderTerminalError(
+                error = AvatarProviderTerminalError(
                     f"{label}数字人明确失败但不是 OOM；不会创建新付费任务：{failure.get('message')}"
                 )
+                if sibling_task_is_active(role):
+                    deferred_terminal_error = deferred_terminal_error or error
+                    break
+                raise error
             if attempt_no >= max_attempts:
                 record.update({
                     "attempts_exhausted": True, "recovery_state": "exhausted",
-                    "terminal_reason": "plus_failed_after_3_attempts" if requested_instance == "plus" else "authorized_attempts_exhausted",
+                    "terminal_reason": "plus_failed_after_authorized_attempts" if requested_instance == "plus" else "authorized_attempts_exhausted",
                 })
                 _persist_avatar_records(project_dir, job_id, worker_token, records, f"{label}已用尽有限 OOM 自动恢复次数")
-                raise AvatarRecoveryExhaustedError(
+                error = AvatarRecoveryExhaustedError(
                     f"{label}第 {attempt_no} 次仍明确 OOM；已用尽授权次数，等待人工处理"
                 )
+                if sibling_task_is_active(role):
+                    deferred_terminal_error = deferred_terminal_error or error
+                    break
+                raise error
             _persist_avatar_records(
                 project_dir, job_id, worker_token, records,
                 f"{label}第 {attempt_no} 次明确 OOM；预算允许，将自动尝试下一档有限恢复",
             )
+    if submitted_for_parallel_poll:
+        return _generate_runninghub_avatars(
+            project_dir,
+            job_id,
+            worker_token,
+            context,
+            voice_output,
+            client_factory=client_factory,
+            poll_interval=poll_interval,
+            poll_timeout=poll_timeout,
+        )
+    if deferred_terminal_error is not None:
+        raise deferred_terminal_error
+    budget = _read_internal(project_dir).get("budget") or {}
+    over_limit = budget.get("over_limit") if isinstance(budget.get("over_limit"), dict) else None
+    if over_limit:
+        raise AvatarBudgetBlockedError(
+            f"RunningHub 实际累计费用 {float(budget.get('spent') or 0):.4f} 元超过冻结上限 "
+            f"{float(budget.get('limit') or 0):.4f} 元；所有已提交任务均已结算，禁止新增付费任务"
+        )
     return {"roles": records}
 
 
@@ -2519,10 +2601,7 @@ def _assemble_and_apply(project_dir: Path) -> dict[str, Any]:
 
 def _visuals_complete(state: dict[str, Any]) -> bool:
     scenes = state.get("scenes") or []
-    return bool(scenes) and all(
-        any(block.get("status") == "ready" and block.get("asset_id") for block in ((scene.get("visual_timeline") or {}).get("blocks") or []))
-        for scene in scenes
-    )
+    return bool(scenes) and all(wb._scene_has_complete_visual(state, scene) for scene in scenes)
 
 
 def _preview_supporting_visual_plan(
@@ -2752,7 +2831,7 @@ def run_avatar_review_preview_job(
             voice = (((_read_internal(project_dir).get("phases") or {}).get("voice") or {}).get("output") or {})
 
         if start_index <= 2:
-            _phase_begin(project_dir, job_id, worker_token, "avatar_generation", "正在串行生成 RunningHub 数字人 0/2")
+            _phase_begin(project_dir, job_id, worker_token, "avatar_generation", "正在并行提交 RunningHub Plus 48GB 数字人 0/2")
             avatar = _generate_runninghub_avatars(
                 project_dir, job_id, worker_token, context, voice,
                 client_factory=overrides.get("runninghub_client_factory", RunningHubLongCatClient),

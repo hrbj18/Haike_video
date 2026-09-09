@@ -13,7 +13,7 @@ from typing import Any
 
 
 RUNNING = {"queued", "generating", "running", "rendering", "uploading", "submitted", "downloading"}
-WAITING = {"awaiting_human"}
+WAITING = {"awaiting_human", "ambiguous"}
 TERMINAL = {"completed", "completed_with_warnings", "completed_with_failures", "failed", "cancelled"}
 
 REVIEW_PREVIEW_STAGE_LABELS = {
@@ -28,6 +28,15 @@ REVIEW_PREVIEW_STAGE_LABELS = {
     "audio_sample": "等待声音样板确认",
     "full_preview": "合成全片审核预览",
     "review_ready": "等待人工观看",
+}
+
+INTERACTION_SECOND_PASS_STAGE_LABELS = {
+    "queued": "等待共享媒体资源",
+    "semantic_analysis": "分析对话与精彩开场",
+    "rendering": "生成二次剪辑预览",
+    "completed": "等待人工观看",
+    "ambiguous": "等待核对模型受理状态",
+    "failed": "保留现场等待处理",
 }
 
 
@@ -91,6 +100,8 @@ def _task(
     raw_stage = str(job.get("stage") or stage or "处理中")
     if kind == "review_preview_pipeline":
         raw_stage = REVIEW_PREVIEW_STAGE_LABELS.get(raw_stage, raw_stage)
+    elif kind == "interaction_second_pass":
+        raw_stage = INTERACTION_SECOND_PASS_STAGE_LABELS.get(raw_stage, raw_stage)
     error = job.get("error")
     error_contract = error if isinstance(error, dict) else {}
     gate = job.get("gate") if isinstance(job.get("gate"), dict) else None
@@ -135,6 +146,8 @@ def collect_tasks(state: dict[str, Any]) -> dict[str, Any]:
         ("narration_generation", "project_narration", "生成项目配音", "项目总览"),
         ("preview_render", "full_preview", "合成全片预览", "成片与版本"),
         ("render", "formal_render", "合成正式成片", "成片与版本"),
+        ("interaction_candidate", "interaction_candidate", "生成完整互动候选", "素材库"),
+        ("interaction_second_pass", "interaction_second_pass", "生成户外互动二次剪辑", "素材库"),
     )
     for key, kind, title, stage in mappings:
         job = automation.get(key)
@@ -145,7 +158,7 @@ def collect_tasks(state: dict[str, Any]) -> dict[str, Any]:
                 title=title,
                 job=job,
                 stage=stage,
-                target_view="quality" if key in {"preview_render", "render"} else "review",
+                target_view="quality" if key in {"preview_render", "render"} else "library" if key in {"interaction_candidate", "interaction_second_pass"} else "review",
             )
             if task:
                 tasks.append(task)

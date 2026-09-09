@@ -21,6 +21,16 @@ const doubaoConfigStatus = document.getElementById("doubaoConfigStatus");
 const doubaoConfigTest = document.getElementById("doubaoConfigTest");
 const THEME_KEY = "backlot.theme";
 let currentTheme = document.documentElement.dataset.theme === "light" ? "light" : "dark";
+let uiRevisionStale = false;
+
+function assertCurrentUIRevision(response) {
+  const serverRevision = response.headers.get("X-Backlot-UI-Revision");
+  const loadedRevision = window.__BACKLOT_UI_REVISION__;
+  if (serverRevision && loadedRevision && serverRevision !== loadedRevision) {
+    uiRevisionStale = true;
+    throw new Error("工作台页面已有新版本，请刷新页面后继续操作");
+  }
+}
 
 function applyTheme(theme) {
   currentTheme = theme === "light" ? "light" : "dark";
@@ -109,11 +119,23 @@ let assetLibrarySearch = "";
 let assetLibrarySelection = new Set();
 let mediaIndexRecommendations = null;
 let mediaVisionDetails = null;
+let materialOverviewDetails = null;
+let materialInteractionDetails = null;
+let materialInteractionPanel = null;
+let materialInteractionMergeSelection = new Set();
+let materialInteractionPendingEdits = new Map();
+let materialInteractionSecondPassDrafts = new Map();
+let materialInteractionCandidateFilter = "all";
+const materialAnalysisChoices = new Map();
 // New-project local material preparation stays independent from the script
 // form.  File handles live only in the browser until the user explicitly
 // clicks upload; they are never persisted as paths or silently analysed.
 let localMaterialPreparationFiles = [];
 let localMaterialPreparationUploading = false;
+let localMaterialAnalysisScene = "generic";
+let localMaterialAnalysisProfile = "efficient";
+let localMaterialRecognizeAudio = false;
+let localMaterialGenerateCandidates = true;
 // This small client-side list is deliberately only a request draft. The
 // server validates every confirmation against the persisted V2 index and
 // records it in the auditable orchestration plan; clicking a checkbox never
@@ -145,7 +167,7 @@ let reviewPreviewPlanningMode = "ai_director";
 // REVIEW_PREVIEW_END
 // The task centre is intentionally a small polling island. It must never
 // force a full review-screen redraw while a user is playing or editing media.
-let taskCenter = { active_count: 0, waiting_count: 0, failure_count: 0, completed_count: 0, tasks: [] };
+let taskCenter = { active_count: 0, queued_count: 0, paused_count: 0, waiting_count: 0, failure_count: 0, completed_count: 0, tasks: [] };
 let taskCenterOpen = false;
 let taskCenterTimer = null;
 let taskCenterPollInFlight = false;
@@ -220,6 +242,11 @@ const reviewCaptionControllers = new Map();
 // observers separate from playback controllers so they can be released on a
 // normal workbench refresh.
 const captionSizeObservers = new Map();
+const textOverlaySizeObservers = new Map();
+let textOverlayDraft = null;
+let textOverlayDraftDirty = false;
+let textOverlayPreviewRefreshing = false;
+let selectedTextOverlayLayerId = null;
 let stateFingerprint = "";
 let voiceCatalogFingerprint = "";
 let musicCatalogFingerprint = "";
@@ -271,6 +298,7 @@ Object.assign(statusLabels, {
   missing: "缺少文件", uploaded: "已上传", media_valid: "媒体有效", media_invalid: "媒体无效",
   asr_passed: "台词通过", asr_failed: "台词不符", assembled: "已进入母版",
   cut_pending_review: "切点待审核", cut_approved: "切点已通过",
+  paused: "已暂停", cancelled: "已取消", ambiguous: "等待人工核对", awaiting_human: "等待人工确认",
   audio_ready: "驱动音频已就绪", cloud_queued: "云端任务已排队", cloud_generating: "云端生成中",
   cloud_failed: "云端生成失败", cloud_generated: "云端视频已就绪",
   uploading: "正在上传", detecting: "正在检查出镜图", submitted: "已提交", downloading: "正在下载",
@@ -481,7 +509,7 @@ function reviewPreviewApiRoot(projectState = state) {
 function reviewPreviewPreflightPath(value = reviewPreviewPlanningMode) {
   const avatarMode = typeof isAvatarProject === "function" && isAvatarProject();
   const root = avatarMode ? "/automation/avatar-review-preview" : "/automation/review-preview";
-  const budget = avatarMode ? "&budget_limit_cny=5&allow_plus_on_oom=true" : "";
+  const budget = avatarMode ? "&budget_limit_cny=5" : "";
   return `${root}/preflight?planning_mode=${encodeURIComponent(reviewPreviewNormalizePlanningMode(value))}${budget}`;
 }
 
@@ -492,7 +520,6 @@ function reviewPreviewStartPayload(value = reviewPreviewPlanningMode, preflight 
     return {
       confirmed: true,
       budget_limit_cny: Number((((preflight || {}).budget || {}).limit_cny) || 5),
-      allow_plus_on_oom: true,
       visual: { planning_mode: planningMode },
     };
   }
@@ -754,7 +781,7 @@ function renderReviewPreviewPreflight(preflight) {
     avatarContract.workflow_profile || "配置档未提供",
     avatarContract.resolution && avatarContract.fps ? `${avatarContract.resolution} · ${avatarContract.fps}FPS` : "输出规格未提供",
     avatarContract.instance_label || "实例规格未提供",
-    "两位主持串行",
+    Number(avatarContract.max_concurrency || 1) >= 2 ? "两位主持云端并行" : "主持人云端串行",
   ].filter(Boolean).join(" · ");
   const capabilityRows = [
     [avatarMode ? "双主持配音服务" : "配音服务", ["tts", "local_tts"]],
@@ -800,12 +827,12 @@ function renderReviewPreviewPreflight(preflight) {
       el("div", {}, el("dt", {}, "视觉策略"), el("dd", {}, visualStrategy)),
       el("div", {}, el("dt", {}, "声音与确认"), el("dd", {}, `${musicStrategy}${pausesForSample ? "；会暂停等待声音样板试听" : "；纳入本次确认，配音后不再暂停"}`)),
       avatarMode ? el("div", {}, el("dt", {}, "数字人合同"), el("dd", {}, avatarContractCopy)) : null,
-      avatarMode ? el("div", {}, el("dt", {}, "费用与自动恢复"), el("dd", {}, `本次最多 ¥${Number(((preflight.budget || {}).limit_cny) || 5).toFixed(2)}；每位主持最多 3 次：Standard 24GB 最多 2 次，只有前两次都明确 OOM 才使用 1 次 Plus 48GB`)) : null,
+      avatarMode ? el("div", {}, el("dt", {}, "费用与失败保护"), el("dd", {}, `本次最多 ¥${Number(((preflight.budget || {}).limit_cny) || 5).toFixed(2)}；每位主持默认 1 次 Plus 48GB，若仍明确 OOM 则停止并保留证据`)) : null,
     ),
     el("div", { class: "review-preview-capabilities" }, capabilityRows),
     avatarMode ? renderReviewPreviewAvatarBindings(preflight) : null,
     el("p", { class: "review-preview-zero-avatar" }, avatarMode
-      ? "付费边界：只允许预检中冻结的 InfiniteTalk 精确帧工作流、448×560、Standard 24GB；两位主持严格串行，结果不明绝不重提。Standard 明确 OOM 才有限自动恢复，第三次才可能使用 Plus 48GB；本地 Whisper 只记录诊断，不覆盖精确帧切点，也不会因低置信度打断流程。"
+      ? "付费边界：只允许预检中冻结的 InfiniteTalk 精确帧工作流、448×560、Plus 48GB；两位主持先分别持久化任务号，再在云端并行生成，结果不明绝不重提。Plus 仍明确 OOM 时停止，留待工作流优化；本地 Whisper 只记录诊断，不覆盖精确帧切点，也不会因低置信度打断流程。"
       : "零数字人调用：不调用 RunningHub、DashScope 数字人或其他付费数字人服务。"),
     blockers.length ? el("div", { class: "review-preview-message-list bad" }, el("strong", {}, "阻断项"), el("ul", {}, blockers.map((item) => el("li", {}, item)))) : null,
     textAiBlocked ? el("div", { class: "review-preview-message-list warn" }, el("strong", {}, "AI 智能导演需要文本模型"), el("p", {}, "当前 AI 模式保持阻断。你可以先配置文本模型，或手动改选“规则混合（不调用文本模型）”；系统不会自动切换。")) : null,
@@ -1049,7 +1076,7 @@ function renderReviewPreviewDynamicState() {
         el("p", { class: "eyebrow" }, avatarMode ? "有数字人口播 · 唯一主操作" : "无数字人口播 · 唯一主操作"),
         el("h4", {}, avatarMode ? "一键生成有数字人审核预览" : "一键生成审核预览"),
         el("p", {}, avatarMode
-          ? "从已通过双主持脚本生成已绑定的本地或云端配音、RunningHub Standard 24GB 数字人、精确帧切点、主体画面、字幕和可人工观看的全片预览。"
+          ? "从已通过双主持脚本生成已绑定的本地或云端配音、RunningHub Plus 48GB 双角色并行数字人、精确帧切点、主体画面、字幕和可人工观看的全片预览。"
           : "从已通过脚本建立逐句配音、真实时间线、主体画面、字幕和可人工观看的全片预览。"),
       ),
       button(actionLabel, "primary review-preview-primary", startReviewPreviewJob, active || externallyBlocked || reviewPreviewActionInFlight),
@@ -1138,7 +1165,7 @@ async function startReviewPreviewJob() {
       ? "任务可能调用 Pexels 和 HyperFrames"
       : "任务不会调用 Pexels、文本模型或 HyperFrames";
     const confirmed = isAvatarProject()
-      ? window.confirm(`这是本次唯一一次启动确认。预检已通过：共 ${lineCount} 轮，冻结双主持音色“${reviewPreviewAvatarVoiceCopy(preflight)}”，本地 Whisper“${(preflight.asr || {}).model_id || "已安装模型"}”，数字人合同 RunningHub 工作流 ${avatarContract.workflow_id} / ${avatarContract.workflow_profile} / ${avatarContract.resolution} / ${avatarContract.fps}FPS / ${avatarContract.instance_label}。雅雅、檬檬严格串行；每位主持最多 3 次：Standard 24GB 最多 2 次，Plus 48GB 最多 1 次，只有前两次都明确 OOM 才会升级，结果不明绝不重提。本轮费用硬上限 ¥${Number(((preflight.budget || {}).limit_cny) || 5).toFixed(2)}。声音设置“${musicStrategy}”也会一并冻结，配音完成后不会再次要求试听确认。${visualTargetNature}，视觉规划“${visualStrategy}”（${textModelNature}）。Whisper 仅作诊断，精确帧清单会自动连续切割；只有清单漂移或外部结果异常才会安全暂停。终点仅为待人工观看的审核预览。确认连续执行完整流程吗？`)
+      ? window.confirm(`这是本次唯一一次启动确认。预检已通过：共 ${lineCount} 轮，冻结双主持音色“${reviewPreviewAvatarVoiceCopy(preflight)}”，本地 Whisper“${(preflight.asr || {}).model_id || "已安装模型"}”，数字人合同 RunningHub 工作流 ${avatarContract.workflow_id} / ${avatarContract.workflow_profile} / ${avatarContract.resolution} / ${avatarContract.fps}FPS / ${avatarContract.instance_label}。雅雅、檬檬会先分别持久化任务号，再在云端并行生成；每位主持默认提交 1 次 Plus 48GB，结果不明或 Plus 仍明确 OOM 时停止，不会自动重复付费。本轮费用硬上限 ¥${Number(((preflight.budget || {}).limit_cny) || 5).toFixed(2)}。声音设置“${musicStrategy}”也会一并冻结，配音完成后不会再次要求试听确认。${visualTargetNature}，视觉规划“${visualStrategy}”（${textModelNature}）。Whisper 仅作诊断，精确帧清单会自动连续切割；只有清单漂移或外部结果异常才会安全暂停。终点仅为待人工观看的审核预览。确认连续执行完整流程吗？`)
       : window.confirm(`预检已通过：预计 ${lineCount} 句，${visualTargetNature}，冻结音色“${reviewPreviewVoiceName(preflight.frozen_voice || preflight.voice)}”，视觉规划“${visualStrategy}”（${textModelNature}），声音策略“${musicStrategy}”（${audioGateNature}）。${visualRuntimeNature}，且绝不调用任何数字人服务；终点仅为待人工观看的审核预览。确认开始吗？`);
     if (!confirmed) return;
     const payload = await api(`${reviewPreviewApiRoot()}/jobs`, { method: "POST", body: reviewPreviewStartPayload(selectedPlanningMode, preflight) });
@@ -1368,6 +1395,15 @@ function captionCssColor(color, opacity = 100) {
   const green = parseInt(value.slice(3, 5), 16);
   const blue = parseInt(value.slice(5, 7), 16);
   return `rgba(${red}, ${green}, ${blue}, ${alpha.toFixed(2)})`;
+}
+
+function liveTextRangeControl(ariaLabel, value, min, max, step = "1") {
+  return el("input", { type: "range", min: String(min), max: String(max), step: String(step), value: String(value), "aria-label": ariaLabel });
+}
+
+function liveTextColorControl(ariaLabel, value, fallback = "#000000") {
+  const color = /^#[0-9a-f]{6}$/i.test(String(value || "")) ? String(value).slice(0, 7) : fallback;
+  return el("input", { type: "color", value: color, "aria-label": ariaLabel });
 }
 
 function scaleCaptionFontToCanvas(node) {
@@ -2732,11 +2768,13 @@ function reviewTimeLabel(scene, relative) {
 }
 
 async function api(path, options = {}) {
+  if (uiRevisionStale) throw new Error("工作台页面已有新版本，请刷新页面后继续操作");
   const response = await fetch(`/api/project/${encodedProjectId}/workbench${path}`, {
     headers: Object.assign({ "Content-Type": "application/json" }, options.headers || {}),
     method: options.method,
     body: options.body && typeof options.body !== "string" ? JSON.stringify(options.body) : options.body,
   });
+  assertCurrentUIRevision(response);
   if (!response.ok) {
     let detail = "请求失败";
     try { detail = (await response.json()).detail || detail; } catch (error) { /* text fallback */ }
@@ -3767,7 +3805,7 @@ function renderAutomationStatus(compact) {
 }
 
 function taskCenterRunning() {
-  return Number(taskCenter.active_count || 0) > 0;
+  return Number(taskCenter.active_count || 0) + Number(taskCenter.queued_count || 0) > 0;
 }
 
 function taskCenterWaiting() {
@@ -3776,7 +3814,9 @@ function taskCenterWaiting() {
 
 function taskCenterSummary() {
   const parts = [];
-  if (taskCenterRunning()) parts.push(`正在运行 ${Number(taskCenter.active_count || 0)} 项`);
+  if (Number(taskCenter.active_count || 0) > 0) parts.push(`正在运行 ${Number(taskCenter.active_count || 0)} 项`);
+  if (Number(taskCenter.queued_count || 0) > 0) parts.push(`排队 ${Number(taskCenter.queued_count || 0)} 项`);
+  if (Number(taskCenter.paused_count || 0) > 0) parts.push(`暂停 ${Number(taskCenter.paused_count || 0)} 项`);
   if (taskCenterWaiting()) parts.push(`${Number(taskCenter.waiting_count || 0)} 项等待人工确认`);
   if (Number(taskCenter.failure_count || 0) > 0) parts.push(`有 ${Number(taskCenter.failure_count || 0)} 项需处理`);
   return parts.length ? parts.join(" · ") : "当前没有运行中或等待人工确认的任务";
@@ -3784,7 +3824,8 @@ function taskCenterSummary() {
 
 function taskCenterButtonLabel() {
   const parts = [];
-  if (taskCenterRunning()) parts.push(`${Number(taskCenter.active_count || 0)} 项运行`);
+  if (Number(taskCenter.active_count || 0) > 0) parts.push(`${Number(taskCenter.active_count || 0)} 项运行`);
+  if (Number(taskCenter.queued_count || 0) > 0) parts.push(`${Number(taskCenter.queued_count || 0)} 项排队`);
   if (taskCenterWaiting()) parts.push(`${Number(taskCenter.waiting_count || 0)} 项等待人工确认`);
   return parts.length ? `任务中心 · ${parts.join(" · ")}` : "任务中心";
 }
@@ -3795,6 +3836,27 @@ function taskProgressLabel(task) {
   return task.status === "completed" ? "已完成" : "等待状态更新";
 }
 
+function taskErrorLabel(error) {
+  if (!error) return "";
+  if (typeof error === "string") return error;
+  if (typeof error === "object" && !Object.keys(error).length) return "";
+  return error.message || error.detail || error.reason || "任务失败，请查看详情";
+}
+
+async function runProductionQueueAction(task, action, body = {}) {
+  const response = await fetch(`/api/production-queue/jobs/${encodeURIComponent(task.job_id)}/${action}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!response.ok) {
+    let message = "任务操作失败";
+    try { message = (await response.json()).detail || message; } catch (_) { /* 保留通用错误。 */ }
+    throw new Error(message);
+  }
+  await pollTaskCenter();
+}
+
 function renderTaskCenterIsland() {
   const tasks = Array.isArray(taskCenter.tasks) ? taskCenter.tasks : [];
   const summary = taskCenterSummary();
@@ -3803,6 +3865,10 @@ function renderTaskCenterIsland() {
   for (const task of tasks.slice(0, 12)) {
     const actions = el("div", { class: "task-center-item-actions" });
     if (task.scene_id || task.target_view) actions.append(button("查看", "quiet small", () => {
+      if (task.project_id && task.project_id !== projectId) {
+        location.href = `/p/${encodeURIComponent(task.project_id)}`;
+        return;
+      }
       if (task.scene_id) selectedSceneId = task.scene_id;
       activeView = task.target_view || "review";
       taskCenterOpen = false;
@@ -3814,13 +3880,43 @@ function renderTaskCenterIsland() {
         ensureSelection(); render(); trackTaskCenter(); showToast("已重新提交 PPT 信息卡任务");
       } catch (error) { showToast(error.message || "重试失败", true); }
     }));
+    if (task.status === "queued") {
+      actions.append(button(task.priority === "priority" ? "恢复普通" : "设为优先", "quiet small", async () => {
+        try {
+          await runProductionQueueAction(task, "priority", { priority: task.priority === "priority" ? "normal" : "priority" });
+          showToast("任务优先级已更新");
+        } catch (error) { showToast(error.message || "优先级调整失败", true); }
+      }));
+      actions.append(button("暂停", "quiet small", async () => {
+        try { await runProductionQueueAction(task, "pause"); showToast("任务已暂停"); }
+        catch (error) { showToast(error.message || "暂停失败", true); }
+      }));
+    }
+    if (task.status === "paused") actions.append(button("恢复排队", "primary small", async () => {
+      try { await runProductionQueueAction(task, "resume"); showToast("任务已恢复排队"); }
+      catch (error) { showToast(error.message || "恢复失败", true); }
+    }));
+    if (["queued", "paused", "running"].includes(task.status)) actions.append(button(task.status === "running" ? "完成本任务后停止" : "取消", "quiet small", async () => {
+      try { await runProductionQueueAction(task, "cancel"); showToast(task.status === "running" ? "已登记安全边界停止请求" : "任务已取消"); }
+      catch (error) { showToast(error.message || "取消失败", true); }
+    }));
+    if (task.status === "failed" && task.retryable) actions.append(button("从安全点重试", "primary small", async () => {
+      try { await runProductionQueueAction(task, "retry"); showToast("任务已从安全点重新排队"); }
+      catch (error) { showToast(error.message || "重试失败", true); }
+    }));
+    const source = { workbench: "项目界面", codex: "Codex", scheduler: "定时任务", recovery: "服务恢复" }[task.source] || task.source || "未知来源";
+    const priority = { priority: "优先", normal: "普通", background: "后台" }[task.priority] || task.priority || "普通";
+    const queuePosition = task.queue_position ? ` · 队列第 ${task.queue_position} 位` : "";
+    const executor = task.executor ? ` · ${task.executor}` : "";
     list.append(el("article", { class: `task-center-item task-${task.status}` },
       el("div", { class: "task-center-item-main" },
-        el("strong", {}, task.title || "未命名任务"),
+        el("strong", {}, `${task.project_title || task.project_id || "未知项目"} · ${task.title || "未命名任务"}`),
+        el("small", {}, `${source} · ${priority}${queuePosition}${executor}`),
         el("span", { class: "minor" }, task.stage || "处理中"),
         el("div", { class: "task-center-progress" }, el("span", { style: `width:${Math.round(Number((task.progress || {}).ratio || 0) * 100)}%` })),
         el("small", {}, `${statusLabels[task.status] || task.status} · ${taskProgressLabel(task)}`),
-        task.error ? el("p", { class: "inline-error compact" }, task.error) : null,
+        task.wait_reason ? el("p", { class: "form-note" }, task.wait_reason) : null,
+        taskErrorLabel(task.error) ? el("p", { class: "inline-error compact" }, taskErrorLabel(task.error)) : null,
       ),
       actions,
     ));
@@ -3849,7 +3945,7 @@ async function pollTaskCenter() {
   if (taskCenterPollInFlight) return;
   taskCenterPollInFlight = true;
   try {
-    const response = await fetch(`/api/project/${encodedProjectId}/workbench/tasks`);
+    const response = await fetch("/api/production-queue");
     if (!response.ok) throw new Error("任务中心状态读取失败");
     const next = await response.json();
     const wasRunning = taskCenterRunning();
@@ -3885,6 +3981,7 @@ async function refresh({ force = false } = {}) {
       fetch(`/api/project/${encodedProjectId}/workbench/voices`).catch(() => null),
       fetch(`/api/project/${encodedProjectId}/workbench/music`).catch(() => null),
     ]);
+    assertCurrentUIRevision(response);
     if (!response.ok) throw new Error("无法读取工作台数据");
     const nextState = await response.json();
     const nextVoiceCatalog = voicesResponse && voicesResponse.ok ? await voicesResponse.json() : voiceCatalog;
@@ -4075,6 +4172,62 @@ function scriptModeFromIntake(intake) {
   return "from_scratch";
 }
 
+function videoTypePresetMeta(value) {
+  return value === "news"
+    ? { label: "新闻类视频", summary: "后续场景默认右上圆形数字人、左上新闻小标题，并使用《新闻传播序曲》。" }
+    : { label: "普通视频", summary: "不自动加入新闻小标题或新闻背景音乐；已有人工设置不会被删除。" };
+}
+
+function videoTypePresetLocked() {
+  if ((state.scenes || []).length) return "分镜已建立，为保护已有版式、标题和声音设置，本项目不能再切换预设。";
+  const parent = ((state.automation || {}).review_preview_pipeline || {});
+  if (parent.job_id || !["idle", "failed", ""].includes(String(parent.status || "idle"))) {
+    return "一键审核任务已创建，为保护冻结输入，本项目不能再切换预设。";
+  }
+  return "";
+}
+
+function renderVideoTypePresetPanel() {
+  const intake = state.project.intake || {};
+  const current = intake.video_type_preset === "news" ? "news" : "ordinary";
+  const lockedReason = videoTypePresetLocked();
+  const select = el("select", { "aria-label": "视频类型预设", disabled: lockedReason ? "" : null },
+    el("option", { value: "ordinary" }, "普通视频"),
+    el("option", { value: "news" }, "新闻类视频"),
+  );
+  select.value = current;
+  const note = el("p", { class: "form-note", "aria-live": "polite" }, lockedReason || videoTypePresetMeta(current).summary);
+  select.addEventListener("change", async () => {
+    const previous = ((state.project || {}).intake || {}).video_type_preset === "news" ? "news" : "ordinary";
+    const requested = select.value;
+    select.disabled = true;
+    note.textContent = "正在保存视频类型预设…";
+    try {
+      state = await api("/video-type-preset", { method: "PUT", body: { preset: requested } });
+      const active = ((state.project || {}).intake || {}).video_type_preset === "news" ? "news" : "ordinary";
+      select.value = active;
+      note.textContent = videoTypePresetMeta(active).summary;
+      showToast(`已选择${videoTypePresetMeta(active).label}`);
+    } catch (error) {
+      select.value = previous;
+      note.textContent = error.message || "视频类型预设保存失败";
+      showToast(note.textContent, true);
+    } finally {
+      select.disabled = Boolean(videoTypePresetLocked());
+    }
+  });
+  return el("section", { class: "panel video-type-preset-panel" },
+    el("div", { class: "panel-head" }, el("div", {},
+      el("h4", {}, "视频类型预设"),
+      el("p", {}, "在脚本整理前确定后续的默认音画规则；不会自动启动生成。"),
+    )),
+    el("div", { class: "panel-body" },
+      el("label", { class: "field" }, el("span", {}, "视频类型预设"), select),
+      note,
+    ),
+  );
+}
+
 function scriptModeCopy(mode) {
   if (mode === "organize_script") return {
     hint: "保留原意和事实，把你粘贴的内容整理成可审核的分段脚本。",
@@ -4113,17 +4266,36 @@ function splitScriptSentences(text) {
   return sentences.length ? sentences : [""];
 }
 
+function scriptDraftLooksLikeNewsClosing(section, sectionIndex, totalSections) {
+  if (Object.prototype.hasOwnProperty.call(section || {}, "is_closing")) return section.is_closing === true;
+  const kind = String((section || {}).news_section_kind || (section || {}).kind || "").trim().toLowerCase();
+  if (kind === "closing" || kind === "outro") return true;
+  if (sectionIndex !== totalSections - 1) return false;
+  const text = String((section || {}).text || "").replace(/\s+/g, "");
+  return /欢迎.{0,10}(评论区|留言|讨论)|(你|大家|你们).{0,14}(怎么看|怎么选|会选|觉得).{0,6}[吗呢？?]|下期见|评论区见|关注.{0,8}(我们|账号)/.test(text);
+}
+
 function scriptDraftEditableSections(script) {
-  return (script.sections || []).map((section) => ({
-    id: section.id || "",
-    label: section.label || section.id || "正文",
-    sentences: splitScriptSentences(section.text),
-  }));
+  const sourceSections = script.sections || [];
+  const isNewsDraft = state.project?.intake?.video_type_preset === "news" || Boolean(script.news_story_contract);
+  return sourceSections.map((section, sectionIndex) => {
+    const overlay = section.headline_overlay || {};
+    const overlayHeadline = [overlay.line_1, overlay.line_2].filter(Boolean).join(" ");
+    return {
+      id: section.id || "",
+      label: section.label || section.id || "正文",
+      sentences: splitScriptSentences(section.text),
+      story_id: isNewsDraft ? String(section.story_id || "") : "",
+      news_headline: isNewsDraft ? String(section.news_headline || overlayHeadline || "") : "",
+      is_closing: isNewsDraft && scriptDraftLooksLikeNewsClosing(section, sectionIndex, sourceSections.length),
+    };
+  });
 }
 
 function renderScriptDraftEditor(draft) {
   const script = draft.script || {};
   const original = draft.original_script || null;
+  const isNewsDraft = state.project?.intake?.video_type_preset === "news" || Boolean(script.news_story_contract);
   let sections = scriptDraftEditableSections(script);
   let dirty = false;
   const titleInput = el("input", {
@@ -4138,6 +4310,11 @@ function renderScriptDraftEditor(draft) {
       id: section.id || undefined,
       label: String(section.label || "").trim(),
       sentences: section.sentences.map((sentence) => String(sentence || "").trim()),
+      ...(isNewsDraft ? {
+        story_id: String(section.story_id || "").trim().toUpperCase(),
+        news_headline: String(section.news_headline || "").trim(),
+        is_closing: section.is_closing === true,
+      } : {}),
     }));
     if (!title) {
       titleInput.focus();
@@ -4147,6 +4324,36 @@ function renderScriptDraftEditor(draft) {
     if (payloadSections.some((section) => !section.sentences.length || section.sentences.some((sentence) => !sentence))) {
       showToast("请先补全空白句子，或删除不需要的句子", true);
       return;
+    }
+    if (isNewsDraft) {
+      const storySections = payloadSections.filter((section) => !section.is_closing);
+      const invalidStory = storySections.find((section) => !/^S0*[1-9]\d{0,3}$/i.test(section.story_id));
+      if (invalidStory) {
+        showToast("新闻正文请填写 S01 这类 story_id", true);
+        return;
+      }
+      const invalidHeadline = storySections.find((section) => {
+        const length = Array.from(section.news_headline || "").length;
+        return length < 8 || length > 30;
+      });
+      if (invalidHeadline) {
+        showToast("新闻小标题必须为 8—30 字", true);
+        return;
+      }
+      const headlineByStory = new Map();
+      for (const section of storySections) {
+        const storyId = section.story_id.toUpperCase();
+        if (headlineByStory.has(storyId) && headlineByStory.get(storyId) !== section.news_headline) {
+          showToast(`${storyId} 的连续段落必须使用完全相同的小标题`, true);
+          return;
+        }
+        headlineByStory.set(storyId, section.news_headline);
+      }
+      const firstClosing = payloadSections.findIndex((section) => section.is_closing);
+      if (firstClosing >= 0 && payloadSections.slice(firstClosing).some((section) => !section.is_closing)) {
+        showToast("结尾互动段必须放在全部新闻正文之后", true);
+        return;
+      }
     }
     await mutate("/script-draft/content", {
       method: "PATCH",
@@ -4202,6 +4409,62 @@ function renderScriptDraftEditor(draft) {
           ),
         ));
       });
+      let newsFields = null;
+      if (isNewsDraft) {
+        const storyIdInput = el("input", {
+          value: section.story_id || "",
+          maxlength: "8",
+          placeholder: "例如 S01",
+          disabled: section.is_closing ? "" : null,
+          "aria-label": `第 ${sectionIndex + 1} 段 story_id`,
+          oninput: () => { section.story_id = storyIdInput.value; markDirty(); },
+        });
+        const headlineInput = el("input", {
+          value: section.news_headline || "",
+          maxlength: "30",
+          placeholder: "8—30 字新闻小标题",
+          disabled: section.is_closing ? "" : null,
+          "aria-label": `第 ${sectionIndex + 1} 段新闻小标题`,
+          oninput: () => { section.news_headline = headlineInput.value; markDirty(); },
+          onchange: () => {
+            const storyId = String(section.story_id || "").trim().toUpperCase();
+            if (!storyId || section.is_closing) return;
+            sections.forEach((candidate) => {
+              if (!candidate.is_closing && String(candidate.story_id || "").trim().toUpperCase() === storyId) {
+                candidate.news_headline = headlineInput.value;
+              }
+            });
+            renderRows();
+          },
+        });
+        const closingInput = el("input", {
+          type: "checkbox",
+          checked: section.is_closing ? "" : null,
+          "aria-label": `第 ${sectionIndex + 1} 段为结尾互动段`,
+          onchange: () => {
+            section.is_closing = closingInput.checked;
+            if (section.is_closing) {
+              section.previous_story_id = section.story_id;
+              section.previous_news_headline = section.news_headline;
+              section.story_id = "";
+              section.news_headline = "";
+            } else {
+              section.story_id = section.previous_story_id || "";
+              section.news_headline = section.previous_news_headline || "";
+            }
+            markDirty();
+            renderRows();
+          },
+        });
+        newsFields = el("div", { class: `script-news-fields ${section.is_closing ? "is-closing" : ""}`.trim() },
+          el("label", {}, el("span", {}, "新闻 story_id"), storyIdInput),
+          el("label", {}, el("span", {}, "新闻小标题"), headlineInput),
+          el("label", { class: "script-news-closing" }, closingInput, el("span", {}, "结尾互动段（不显示小标题）")),
+          el("small", {}, section.is_closing
+            ? "结尾段不会进入标题图层，也不会继承上一条新闻标题。"
+            : "同一条新闻的连续段落请复用相同 story_id；修改小标题后会同步到同组段落。"),
+        );
+      }
       rows.append(el("article", { class: "script-edit-section" },
         el("div", { class: "script-edit-section-head" },
           el("label", {}, el("span", {}, `第 ${sectionIndex + 1} 段`), labelInput),
@@ -4221,6 +4484,7 @@ function renderScriptDraftEditor(draft) {
             }, sections.length <= 1),
           ),
         ),
+        newsFields,
         sentenceList,
         button("添加一句", "quiet compact", () => {
           section.sentences.push("");
@@ -4239,7 +4503,10 @@ function renderScriptDraftEditor(draft) {
     renderRows();
   }) : null;
   const addSection = button("添加段落", "quiet", () => {
-    sections.push({ id: "", label: `新段落 ${sections.length + 1}`, sentences: [""] });
+    sections.push({
+      id: "", label: `新段落 ${sections.length + 1}`, sentences: [""],
+      story_id: "", news_headline: "", is_closing: false,
+    });
     markDirty();
     renderRows();
   });
@@ -4449,7 +4716,8 @@ function renderScriptStudio(intake) {
 
 function isLocalMaterialVideo(asset) {
   return String((asset || {}).type || "").toLowerCase() === "video"
-    && ["human_provided", "local_generated", "project_library"].includes(String((asset || {}).source_type || ""));
+    && ["human_provided", "local_generated", "project_library"].includes(String((asset || {}).source_type || ""))
+    && !(asset?.generation || {}).analysis_excluded;
 }
 
 function localMaterialBatchState() {
@@ -4468,22 +4736,28 @@ function localMaterialBatchActive(batch = localMaterialBatchState()) {
 }
 
 async function uploadLocalMaterialPreparationFiles() {
-  if (localMaterialPreparationUploading || !localMaterialPreparationFiles.length) return;
+  if (localMaterialPreparationUploading || !localMaterialPreparationFiles.length) return false;
   localMaterialPreparationUploading = true;
   render();
   try {
     const files = [...localMaterialPreparationFiles];
+    const uploadedIds = [];
     for (let index = 0; index < files.length; index += 1) {
+      const before = new Set((state.assets || []).map((asset) => asset.id));
       state = await uploadProjectAssetFile(files[index], {
         name: "",
         license: "用户上传；发布前请确认使用权",
       }, index, files.length);
+      const created = (state.assets || []).find((asset) => !before.has(asset.id));
+      if (created?.id) uploadedIds.push(created.id);
     }
     localMaterialPreparationFiles = [];
     ensureSelection();
     showToast(`已导入并登记 ${files.length} 个本地素材；现在可以一键理解全部视频`);
+    return uploadedIds;
   } catch (error) {
     showToast(error.message || "本地素材导入失败", true);
+    return false;
   } finally {
     localMaterialPreparationUploading = false;
     render();
@@ -4509,13 +4783,115 @@ async function startLocalMaterialVisionBatch(assetIds) {
   }
 }
 
+async function startLocalMaterialOverviewBatch(assetIds, profile = "efficient", recognizeAudio = false) {
+  if (!assetIds.length || localMaterialBatchActive()) return;
+  const detailed = profile === "detailed";
+  const workflowLabel = detailed ? "批量精细化内容处理" : "批量高效率内容处理";
+  const confirmed = window.confirm(
+    `将按顺序完成 ${assetIds.length} 个本地视频的${workflowLabel}。每个视频会先在本机抽帧、去重并生成联系表，再把联系表发送给当前 AI 视觉服务生成画面概览${detailed ? "；仅对模型标记位置追加最多 12 张原帧复核" : ""}。\n\n不会上传整条视频；${recognizeAudio ? "会提取音轨并发送给豆包取得分句时间线" : "音频识别关闭，不会上传音轨"}；可能产生模型费用。已完成且选项相同的视频不会重复提交。确认开始吗？`,
+  );
+  if (!confirmed) return;
+  try {
+    state = await api("/assets/media-index/overview-batch", {
+      method: "POST",
+      body: { asset_ids: assetIds, profile, recognize_audio: Boolean(recognizeAudio), remote_vision_confirmed: true, remote_asr_confirmed: Boolean(recognizeAudio) },
+    });
+    ensureSelection();
+    render();
+    showToast(`已开始批量${detailed ? "精细化" : "高效率"}内容处理：先在本地生成联系表，再自动完成画面概览`);
+  } catch (error) {
+    showToast(error.message || "批量快速概览启动失败", true);
+  }
+}
+
+function pendingLocalMaterialAnalysisAssets(scene, profile, recognizeAudio = false) {
+  return (state.assets || []).filter((asset) => {
+    if (!isLocalMaterialVideo(asset)) return false;
+    const index = asset.media_index || {};
+    if (scene === "outdoor_interaction") return !index.interaction_index_path
+      || Boolean(index.interaction_recognize_audio) !== Boolean(recognizeAudio);
+    return !index.overview_index_path
+      || index.overview_status !== "completed"
+      || (profile === "detailed" && index.overview_detail_status !== "completed")
+      || Boolean(index.overview_recognize_audio) !== Boolean(recognizeAudio);
+  });
+}
+
+async function startLocalMaterialInteractionBatch(assetIds, profile, recognizeAudio, generateCandidates = true) {
+  if (!assetIds.length || localMaterialBatchActive()) return;
+  try {
+    const preflight = await api("/assets/media-index/interaction-preflight-batch", {
+      method: "POST",
+      body: { asset_ids: assetIds, profile, recognize_audio: Boolean(recognizeAudio) },
+    });
+    const budget = preflight.budget || {};
+    const models = [...new Set((preflight.items || []).map((item) => item.identity?.model).filter(Boolean))].join("、") || "当前视觉模型";
+    const asr = [...new Set((preflight.items || []).map((item) => item.asr_identity).filter((item) => item && !["disabled", "no_audio"].includes(item)))].join("、") || "豆包语音识别";
+    const audioNotice = recognizeAudio
+      ? `只发送提取后的音轨给 ${asr}；最多 ${Math.ceil(budget.audio_seconds_max || 0)} 秒语音识别。`
+      : "音频识别已关闭：不会校验豆包配置，也不会上传音轨；候选保留原声，但不压缩内部停顿。";
+    const confirmed = window.confirm(
+      `将分析 ${preflight.asset_count || assetIds.length} 个户外直播视频。只发送联系表和边界原帧给 ${models}。${audioNotice}\n\n最多 ${budget.model_calls_max || 0} 次视觉请求、${budget.detail_frames_max || 0} 张边界原帧。${generateCandidates ? "每个素材最多生成 3 条本地待审候选预览。" : "仅生成互动目录。"}任务严格串行，可能消耗额度；不会自动批准、采用或发布。一次确认后自动完成，确认开始吗？`,
+    );
+    if (!confirmed) return;
+    state = await api("/assets/media-index/interaction-batch", {
+      method: "POST",
+      body: {
+        asset_ids: assetIds,
+        profile,
+        recognize_audio: Boolean(recognizeAudio),
+        generate_candidates: Boolean(generateCandidates),
+        transcript_provider: recognizeAudio ? "doubao" : "none",
+        remote_vision_confirmed: true,
+        remote_asr_confirmed: Boolean(recognizeAudio && Number(budget.audio_seconds_max || 0) > 0),
+        preflight_signature: preflight.signature,
+      },
+    });
+    ensureSelection();
+    render();
+    showToast("户外直播互动分析已进入共享队列；完成后可在素材库审核可用时间段");
+  } catch (error) {
+    showToast(error.message || "户外互动批量分析启动失败", true);
+  }
+}
+
+async function importAndStartLocalMaterialAnalysis() {
+  if (localMaterialPreparationUploading || localMaterialBatchActive()) return;
+  let uploadedIds = [];
+  const selectedFileCount = localMaterialPreparationFiles.length;
+  if (selectedFileCount) {
+    uploadedIds = await uploadLocalMaterialPreparationFiles();
+    if (!uploadedIds) return;
+    if (uploadedIds.length !== selectedFileCount) {
+      showToast("本次上传素材未能逐一确认登记结果，已停止自动分析；请刷新素材库后逐个启动，避免误分析旧素材", true);
+      return;
+    }
+  }
+  const pendingAssets = pendingLocalMaterialAnalysisAssets(localMaterialAnalysisScene, localMaterialAnalysisProfile, localMaterialRecognizeAudio);
+  const assets = uploadedIds.length ? pendingAssets.filter((asset) => uploadedIds.includes(asset.id)) : pendingAssets;
+  if (!assets.length) {
+    showToast("当前没有需要使用所选方式分析的本地视频", true);
+    return;
+  }
+  const ids = assets.map((asset) => asset.id);
+  if (localMaterialAnalysisScene === "outdoor_interaction") {
+    await startLocalMaterialInteractionBatch(ids, localMaterialAnalysisProfile, localMaterialRecognizeAudio, localMaterialGenerateCandidates);
+  } else {
+    await startLocalMaterialOverviewBatch(ids, localMaterialAnalysisProfile, localMaterialRecognizeAudio);
+  }
+}
+
 function renderLocalMaterialPreparationCard() {
   const localVideos = (state.assets || []).filter(isLocalMaterialVideo);
   const batch = localMaterialBatchState();
   const active = localMaterialBatchActive(batch);
-  const pending = localVideos.filter((asset) => !(asset.media_index || {}).vision_index_path);
-  const completed = localVideos.filter((asset) => Boolean((asset.media_index || {}).vision_index_path));
+  const hasOverview = (asset) => (asset.media_index || {}).overview_status === "completed";
+  const overviewPending = localVideos.filter((asset) => !(asset.media_index || {}).overview_index_path);
+  const visionPending = localVideos.filter((asset) => !(asset.media_index || {}).vision_index_path);
+  const pending = localVideos.filter((asset) => !(asset.media_index || {}).vision_index_path && !hasOverview(asset));
+  const completed = localVideos.filter((asset) => Boolean((asset.media_index || {}).vision_index_path) || hasOverview(asset));
   const failed = (batch.failed_assets || []).filter((item) => item && item.asset_id);
+  const ambiguousCount = failed.filter((item) => item.status === "ambiguous").length;
   const fileInput = el("input", { type: "file", accept: "video/*", multiple: "", "aria-label": "选择本地视频素材" });
   fileInput.addEventListener("change", () => {
     localMaterialPreparationFiles = Array.from(fileInput.files || []);
@@ -4527,31 +4903,72 @@ function renderLocalMaterialPreparationCard() {
     : selectedCount ? `导入 ${selectedCount} 个本地视频` : "选择本地视频";
   const progress = active
     ? `${Number((batch.progress || {}).completed || (batch.completed_asset_ids || []).length)}/${(batch.asset_ids || []).length} 已完成${batch.current_asset_id ? ` · 正在理解 ${batch.current_asset_id}` : ""}`
-    : completed.length ? `${completed.length}/${localVideos.length} 个已完成视觉理解` : localVideos.length ? `${localVideos.length} 个待理解` : "尚未导入视频";
+    : completed.length ? `${completed.length}/${localVideos.length} 个已完成可用画面索引` : localVideos.length ? `${localVideos.length} 个待分析` : "尚未导入视频";
+  const sceneSelect = el("select", { "aria-label": "本地素材分析场景" },
+    el("option", { value: "generic", selected: localMaterialAnalysisScene === "generic" ? "" : null }, "通用画面概览"),
+    el("option", { value: "outdoor_interaction", selected: localMaterialAnalysisScene === "outdoor_interaction" ? "" : null }, "户外直播互动"));
+  const profileSelect = el("select", { "aria-label": "本地素材处理深度" },
+    el("option", { value: "efficient", selected: localMaterialAnalysisProfile === "efficient" ? "" : null }, "高效率处理"),
+    el("option", { value: "detailed", selected: localMaterialAnalysisProfile === "detailed" ? "" : null }, "精细核验"));
+  sceneSelect.addEventListener("change", () => { localMaterialAnalysisScene = sceneSelect.value; render(); });
+  profileSelect.addEventListener("change", () => { localMaterialAnalysisProfile = profileSelect.value; render(); });
+  const analysisPending = pendingLocalMaterialAnalysisAssets(localMaterialAnalysisScene, localMaterialAnalysisProfile, localMaterialRecognizeAudio);
+  const primaryLabel = localMaterialPreparationUploading
+    ? "正在导入…"
+    : selectedCount
+      ? `导入并开始智能分析（${selectedCount}）`
+      : `开始智能分析（${analysisPending.length}）`;
 
   return el("section", { class: "panel local-material-preparation-card" },
     el("div", { class: "panel-head" }, el("div", {},
       el("h4", {}, "本地素材准备"),
-      el("p", {}, "先导入并理解你已有的视频；这一步可与脚本整理同时进行，后续编排只使用有证据的镜头。"),
+      el("p", {}, "先导入已有视频；确认一次高效率内容处理后，系统会先建立联系表，再完成画面概览。"),
     ), el("span", { class: `fact ${active ? "is-running" : ""}` }, progress)),
     el("div", { class: "panel-body local-material-preparation-body" },
       el("div", { class: "local-material-upload-row" },
         fileInput,
-        button(uploadLabel, "quiet", uploadLocalMaterialPreparationFiles, localMaterialPreparationUploading || !selectedCount),
+        sceneSelect,
+        profileSelect,
+      ),
+      el("div", { class: "local-material-analysis-options" },
+        el("label", { class: "local-material-option" },
+          (() => {
+            const input = el("input", { type: "checkbox", checked: localMaterialRecognizeAudio ? "" : null, "aria-label": "识别音频（豆包语音转文字）" });
+            input.addEventListener("change", () => { localMaterialRecognizeAudio = input.checked; render(); });
+            return input;
+          })(),
+          el("span", {}, "识别音频（豆包语音转文字）"),
+          el("small", {}, "适用于对白、访谈、解说；关闭时不上传音轨，候选仍保留原声。"),
+        ),
+        localMaterialAnalysisScene === "outdoor_interaction" ? el("label", { class: "local-material-option" },
+          (() => {
+            const input = el("input", { type: "checkbox", checked: localMaterialGenerateCandidates ? "" : null, "aria-label": "生成待审互动片段" });
+            input.addEventListener("change", () => { localMaterialGenerateCandidates = input.checked; render(); });
+            return input;
+          })(),
+          el("span", {}, "生成待审互动片段"),
+          el("small", {}, "每条素材最多 3 个本地预览；必须人工确认后才登记为可用素材。"),
+        ) : null,
       ),
       selectedCount ? el("p", { class: "minor" }, `已选择：${localMaterialPreparationFiles.map((file) => file.name).join("、")}`) : null,
       el("div", { class: "local-material-preparation-metrics" },
         factBlock("本地视频", `${localVideos.length}`, "已登记到当前项目"),
-        factBlock("待理解", `${pending.length}`, "没有可复用的视觉索引"),
-        factBlock("已理解", `${completed.length}`, "后续可参与脚本和画面编排"),
+        factBlock("待分析", `${pending.length}`, "没有可复用的概览或镜头索引"),
+        factBlock("已分析", `${completed.length}`, "概览候选仍须先预览原视频"),
       ),
       el("div", { class: "inline-actions" },
-        button(active ? "批量理解进行中…" : `一键理解全部本地视频${pending.length ? `（${pending.length}）` : ""}`, "primary", () => startLocalMaterialVisionBatch(pending.map((asset) => asset.id)), active || !pending.length || localMaterialPreparationUploading),
+        button(active ? "批量分析进行中…" : primaryLabel, "primary", importAndStartLocalMaterialAnalysis, active || localMaterialPreparationUploading || (!selectedCount && !analysisPending.length)),
+        selectedCount ? button(uploadLabel, "quiet", uploadLocalMaterialPreparationFiles, localMaterialPreparationUploading) : null,
+        button(`批量理解画面（确认）${visionPending.length ? `（${visionPending.length}）` : ""}`, "quiet", () => startLocalMaterialVisionBatch(visionPending.map((asset) => asset.id)), active || !visionPending.length || localMaterialPreparationUploading),
         button("到素材库查看细节", "quiet", () => { activeView = "assets"; render(); }),
       ),
       active ? el("p", { class: "form-note" }, `${(batch.progress || {}).message || "正在按顺序建立镜头级视觉证据"}。单个失败不会中止其余视频；完成后可在素材库查看或重试失败项。`) : null,
-      failed.length ? el("p", { class: "minor warning" }, `有 ${failed.length} 个视频未完成理解，可在素材库查看原因并单独重试。`) : null,
-      el("p", { class: "form-note" }, "不会自动把素材放进成片，也不会覆盖已锁定片段；脚本通过后，系统才会基于这些镜头证据生成可审核的编排草案。"),
+      failed.length ? el("p", { class: "minor warning" }, ambiguousCount
+        ? `有 ${failed.length} 个视频未完成，其中 ${ambiguousCount} 个请求受理状态待核对；系统没有自动重投，请到素材库处理。`
+        : `有 ${failed.length} 个视频明确失败，可在素材库查看原因并单独重试。`) : null,
+      el("p", { class: "form-note" }, localMaterialAnalysisScene === "outdoor_interaction"
+        ? `户外直播互动会在一次确认中冻结视觉模型${localMaterialRecognizeAudio ? "、豆包音频服务" : "（音频识别关闭）"}和总预算；${localMaterialGenerateCandidates ? "完成后生成可播放、可恢复删减的待审片段" : "仅生成可调整的互动时间目录"}，不会自动采用或发布。`
+        : "通用画面概览只需一次费用确认：本地联系表与模型概览在同一任务中完成；默认不会转写原声音频，勾选后才会在同一次任务中调用豆包，也不会自动采用到成片。"),
     ),
   );
 }
@@ -4564,7 +4981,7 @@ function renderProjectLaunchpad() {
   return el("section", { class: "page script-launchpad" },
     pageHeader("脚本工作台", "从一句想法，到可审核脚本", "输入标题和内容，再选择内置大模型的处理方式。", action),
     el("div", { class: "script-launchpad-column script-launchpad-flow" },
-      el("div", { class: "script-launchpad-primary" }, renderScriptStudio(intake)),
+      el("div", { class: "script-launchpad-primary" }, renderVideoTypePresetPanel(), renderScriptStudio(intake)),
       supportsLocalMaterialPreparation() ? el("aside", { class: "script-launchpad-materials" }, renderLocalMaterialPreparationCard()) : null,
     ),
   );
@@ -4676,6 +5093,7 @@ function renderLocalMaterialOrchestrationPanel() {
     const capabilityCards = (draft.material_capability_map || []).map((capability) => {
       const key = `${capability.asset_id}:${capability.shot_id}`;
       const confirmed = localMaterialContinuityConfirmations.some((item) => `${item.asset_id}:${item.shot_id}` === key);
+      const isOverviewEvidence = capability.evidence_level === "overview" || capability.requires_source_preview;
       const markAtomic = button(confirmed ? "已确认完整动作" : "确认完整动作", "quiet small", () => {
         if (!confirmed) localMaterialContinuityConfirmations.push({
           asset_id: capability.asset_id,
@@ -4686,19 +5104,19 @@ function renderLocalMaterialOrchestrationPanel() {
           continuity_group_id: `CG-${capability.asset_id}-${capability.shot_id}`,
         });
         generateLocalMaterialOrchestration({ inputMode: modeSelect.value, direction: direction.value.trim() });
-      }, capability.cut_policy === "atomic" || !capability.actions || !capability.actions.length);
+      }, isOverviewEvidence || capability.cut_policy === "atomic" || !capability.actions || !capability.actions.length);
       return el("article", { class: "local-material-capability" },
-        el("div", {}, el("strong", {}, `${capability.asset_name} · ${capability.shot_id}`), el("span", { class: "minor" }, `${Number(capability.source_in_seconds).toFixed(2)}–${Number(capability.source_out_seconds).toFixed(2)} 秒 · ${capability.cut_policy === "atomic" ? "完整动作已确认" : "仅安全切点"}`)),
+        el("div", {}, el("strong", {}, `${capability.asset_name} · ${capability.shot_id}`), el("span", { class: "minor" }, `${Number(capability.source_in_seconds).toFixed(2)}–${Number(capability.source_out_seconds).toFixed(2)} 秒 · ${isOverviewEvidence ? "概览候选，需原视频复核" : capability.cut_policy === "atomic" ? "完整动作已确认" : "仅安全切点"}`)),
         el("p", {}, capability.summary || "已有视觉理解证据"),
         capability.entities && capability.entities.length ? el("span", { class: "minor" }, `主体：${capability.entities.join("、")}`) : null,
         capability.actions && capability.actions.length ? el("span", { class: "minor" }, `动作：${capability.actions.join("、")}`) : null,
         capability.unknowns && capability.unknowns.length ? el("span", { class: "minor warning" }, `不确定：${capability.unknowns.join("、")}`) : null,
-        el("div", { class: "inline-actions" }, markAtomic),
+        el("div", { class: "inline-actions" }, isOverviewEvidence ? button("打开原视频复核", "quiet small", () => openLocalMaterialSourcePreview(capability)) : markAtomic),
       );
     });
     body.append(el("section", { class: "local-material-section" },
       el("h5", {}, `素材能力地图 · ${(draft.material_capability_map || []).length} 段`),
-      capabilityCards.length ? el("div", { class: "local-material-capability-list" }, ...capabilityCards) : el("div", { class: "empty" }, "还没有可核验的本地视频镜头。请先在素材库完成视觉理解 2.0。"),
+      capabilityCards.length ? el("div", { class: "local-material-capability-list" }, ...capabilityCards) : el("div", { class: "empty" }, "还没有可核验的本地视频证据。请先在素材库完成快速概览或视觉理解 2.0。"),
     ));
     const sceneCards = (draft.scene_plans || []).map((scenePlan) => {
       const scene = (state.scenes || []).find((item) => item.id === scenePlan.scene_id);
@@ -4710,8 +5128,10 @@ function renderLocalMaterialOrchestrationPanel() {
         ),
         el("span", {}, `建议角色：${localMaterialRoleLabel(scenePlan.visual_role || (scenePlan.background_requirement || {}).role || "stock_full_bleed")}`),
         scenePlan.matched_terms && scenePlan.matched_terms.length ? el("span", { class: "minor" }, `台词命中：${scenePlan.matched_terms.join("、")}`) : null,
+        scenePlan.source_preview ? el("span", { class: "minor" }, `概览定位：${Number(scenePlan.source_preview.source_in_seconds).toFixed(2)}–${Number(scenePlan.source_preview.source_out_seconds).toFixed(2)} 秒；必须先预览原视频`) : null,
         scenePlan.background_requirement ? el("span", { class: "minor" }, `背景：${scenePlan.background_requirement.purpose || localMaterialRoleLabel(scenePlan.background_requirement.role)}`) : null,
         ...(scenePlan.warnings || []).map((warning) => el("span", { class: "minor warning" }, warning)),
+        scenePlan.source_preview ? el("div", { class: "inline-actions" }, button("打开原视频复核", "quiet small", () => openLocalMaterialSourcePreview(scenePlan.source_preview))) : null,
         ready ? el("div", { class: "inline-actions" }, button("采用当前片段草案", "primary small", () => adoptLocalMaterialOrchestration(scene, scenePlan))) : null,
       );
     });
@@ -4758,6 +5178,7 @@ function renderOverview() {
   return el("section", { class: "page" },
     pageHeader("导演总览", "从脚本意图到可交付成片", "这里管理判断与交接，不提供逐帧手工剪辑。", actions),
     metrics,
+    renderVideoTypePresetPanel(),
     renderLocalMaterialOrchestrationPanel(),
     renderReviewPreviewPanel(),
     renderFullPreviewPanel(),
@@ -5111,6 +5532,7 @@ function renderReview() {
 const REVIEW_EDITOR_TABS = Object.freeze([
   ["layout", "画面"],
   ["assets", "素材"],
+  ["titles", "标题图层"],
   ["subtitles", "字幕"],
   ["narration", "配音"],
   ["avatar", "数字人"],
@@ -5130,7 +5552,8 @@ function renderReviewEditor(scene) {
     }, label));
   }
   let content = null;
-  if (reviewEditorTab === "subtitles") content = renderSubtitleEditor(scene);
+  if (reviewEditorTab === "titles") content = renderTextOverlayCompositionEditor(scene);
+  else if (reviewEditorTab === "subtitles") content = renderSubtitleEditor(scene);
   else if (reviewEditorTab === "narration") content = renderNarrationReview(scene);
   else content = renderReviewControls(scene, reviewEditorTab);
   return el("aside", { class: "review-side review-editor" },
@@ -5797,6 +6220,402 @@ function storyHeadlineReuseGroups() {
   });
 }
 
+function textOverlayComposition() {
+  return (state && (state.text_overlay_editor_composition || state.text_overlay_composition)) || { version: 1, revision: 0, layers: [] };
+}
+
+function ensureTextOverlayDraft() {
+  const persisted = textOverlayComposition();
+  if (!textOverlayDraft || (!textOverlayDraftDirty && Number(textOverlayDraft.revision || 0) !== Number(persisted.revision || 0))) {
+    textOverlayDraft = structuredClone(persisted);
+  }
+  textOverlayDraft.layers = Array.isArray(textOverlayDraft.layers) ? textOverlayDraft.layers : [];
+  if (!selectedTextOverlayLayerId || !textOverlayDraft.layers.some((item) => item.id === selectedTextOverlayLayerId)) {
+    selectedTextOverlayLayerId = (textOverlayDraft.layers[0] || {}).id || null;
+  }
+  return textOverlayDraft;
+}
+
+function newTextOverlayLayer(seed = {}) {
+  const projectEnd = Math.max(3, ...(state.scenes || []).map((item) => Number(item.end_seconds || 0)));
+  const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+  return Object.assign({
+    id: `TXT-${suffix}`,
+    text: "新标题",
+    start_seconds: 0,
+    end_seconds: Math.round(projectEnd * 1000) / 1000,
+    x: .1, y: .1, width: .8, height: .1,
+    font_family: "Microsoft YaHei", font_size: 56, font_weight: 700,
+    color: "#FFFFFF", stroke_color: "#111111", stroke_width: 0,
+    shadow_color: "#00000080", shadow_blur: 0, shadow_offset_x: 0, shadow_offset_y: 0,
+    line_height: 1.15, text_align: "center",
+    background_color: "#000000", background_opacity: .65, background_radius: 36,
+    padding_x: 20, padding_y: 12,
+    enter_animation: "fade", enter_duration_seconds: .3,
+    exit_animation: "fade", exit_duration_seconds: .3,
+    z_index: ensureTextOverlayDraft().layers.length,
+    locked: false,
+  }, seed, { id: seed.id || `TXT-${suffix}` });
+}
+
+function markTextOverlayDraftChanged() {
+  textOverlayDraftDirty = true;
+}
+
+function moveTextOverlayLayer(layerId, delta) {
+  const composition = ensureTextOverlayDraft();
+  const index = composition.layers.findIndex((item) => item.id === layerId);
+  const target = index + delta;
+  if (index < 0 || target < 0 || target >= composition.layers.length) return;
+  if (composition.layers[index].locked || composition.layers[target].locked) return showToast("请先解锁相关标题图层", true);
+  [composition.layers[index], composition.layers[target]] = [composition.layers[target], composition.layers[index]];
+  markTextOverlayDraftChanged();
+  render();
+}
+
+async function saveTextOverlayComposition(scene) {
+  const composition = ensureTextOverlayDraft();
+  let saved = false;
+  try {
+    const nextState = await api("/text-overlay-composition", {
+      method: "PUT",
+      body: { expected_revision: Number(composition.revision || 0), composition },
+    });
+    saved = true;
+    state = nextState;
+    textOverlayDraft = structuredClone(textOverlayComposition());
+    textOverlayDraftDirty = false;
+    stateFingerprint = JSON.stringify(nextState);
+    ensureSelection();
+    textOverlayPreviewRefreshing = true;
+    render();
+    const refreshedState = await api(`/scenes/${encodeURIComponent(scene.id)}/review-preview`, { method: "POST" });
+    state = refreshedState;
+    textOverlayDraft = structuredClone(textOverlayComposition());
+    stateFingerprint = JSON.stringify(refreshedState);
+    ensureSelection();
+    showToast("标题已保存，左侧当前片段预览已刷新");
+  } catch (error) {
+    const message = error.message || "标题图层保存失败";
+    if (saved) {
+      showToast(`标题已保存，但左侧预览刷新失败：${message}；可点击刷新审核预览重试`, true);
+    } else {
+      showToast(message.includes("版本冲突") ? `${message}；本地未保存编辑仍保留` : message, true);
+    }
+  } finally {
+    textOverlayPreviewRefreshing = false;
+    render();
+  }
+}
+
+function textOverlayCssColor(value, opacity = 1) {
+  const hex = String(value || "#000000").slice(0, 7);
+  const match = /^#([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})$/i.exec(hex);
+  if (!match) return `rgba(0,0,0,${opacity})`;
+  return `rgba(${parseInt(match[1], 16)},${parseInt(match[2], 16)},${parseInt(match[3], 16)},${opacity})`;
+}
+
+function scaleTextOverlayToCanvas(node, layer) {
+  const canvas = node && node.parentElement;
+  if (!canvas || !layer) return;
+  const landscape = (state.project.intake || {}).aspect === "landscape";
+  const designWidth = landscape ? 1920 : 1080;
+  const scale = Number(canvas.clientWidth || 0) > 0 ? Number(canvas.clientWidth) / designWidth : .2;
+  const paddingX = Math.max(0, Number(layer.padding_x || 0)) * scale;
+  const paddingY = Math.max(0, Number(layer.padding_y || 0)) * scale;
+  const stroke = Math.max(0, Number(layer.stroke_width || 0)) * scale;
+  const lines = [...node.querySelectorAll(".text-overlay-canvas-line")];
+  const isManagedNews = layer.managed === true && layer.source_kind === "news_story";
+  const autoFit = isManagedNews && String(layer.font_size_mode || "auto") === "auto";
+  const requestedSize = Math.max(1, Number(layer.font_size || 56));
+  const availableWidth = Math.max(1, Number(node.clientWidth || 0) - paddingX * 2);
+  const measure = document.createElement("canvas").getContext("2d");
+  const resolvedSizes = lines.map((line, index) => {
+    const initial = autoFit && lines.length > 1 ? (index === 0 ? 57 : 64) : requestedSize;
+    const minimum = autoFit ? (lines.length === 1 ? 38 : index === 0 ? 34 : 36) : initial;
+    if (!autoFit || !measure || !String(line.textContent || "").trim()) return initial;
+    for (let candidate = initial; candidate >= minimum; candidate -= 2) {
+      measure.font = `${Number(layer.font_weight || 700)} ${candidate * scale}px ${JSON.stringify(layer.font_family || "Microsoft YaHei")}`;
+      if (measure.measureText(String(line.textContent || "")).width + stroke * 2 <= availableWidth) return candidate;
+    }
+    return minimum;
+  });
+  node.style.padding = `${paddingY}px ${paddingX}px`;
+  node.style.borderRadius = `${Math.max(0, Number(layer.background_radius || 0)) * scale}px`;
+  node.style.webkitTextStroke = `${stroke}px ${String(layer.stroke_color || "#111111").slice(0, 7)}`;
+  node.style.textShadow = `${Number(layer.shadow_offset_x || 0) * scale}px ${Number(layer.shadow_offset_y || 0) * scale}px ${Math.max(0, Number(layer.shadow_blur || 0)) * scale}px ${String(layer.shadow_color || "#00000080")}`;
+  node.style.gap = "0";
+  const lineStep = requestedSize * Number(layer.line_height || 1.15) * scale;
+  lines.forEach((line, index) => {
+    line.style.fontSize = `${Math.max(1, resolvedSizes[index] * scale).toFixed(2)}px`;
+    line.style.lineHeight = "1";
+    line.style.marginTop = index > 0 ? `${Math.max(0, lineStep - resolvedSizes[index - 1] * scale).toFixed(2)}px` : "0";
+    line.style.color = isManagedNews && lines.length > 1 && index === 0 && String(layer.color || "").toUpperCase() === "#FFD400" ? "#FFFFFF" : String(layer.color || "#FFFFFF").slice(0, 7);
+  });
+}
+
+function observeTextOverlayCanvas(node, layer) {
+  const canvas = node && node.parentElement;
+  if (!canvas) return;
+  const known = textOverlaySizeObservers.get(node);
+  if (!known || known.canvas !== canvas) {
+    if (known) known.observer.disconnect();
+    if (typeof ResizeObserver !== "undefined") {
+      const observer = new ResizeObserver(() => scaleTextOverlayToCanvas(node, layer));
+      observer.observe(canvas);
+      textOverlaySizeObservers.set(node, { canvas, observer });
+    }
+  }
+  requestAnimationFrame(() => scaleTextOverlayToCanvas(node, layer));
+}
+
+function releaseTextOverlayCanvasObservers() {
+  for (const { observer } of textOverlaySizeObservers.values()) observer.disconnect();
+  textOverlaySizeObservers.clear();
+}
+
+function applyTextOverlayPreviewStyle(node, layer) {
+  if (!node || !layer) return;
+  node.style.left = `${Number(layer.x || 0) * 100}%`;
+  node.style.top = `${Number(layer.y || 0) * 100}%`;
+  node.style.width = `${Number(layer.width || 0) * 100}%`;
+  node.style.height = `${Number(layer.height || 0) * 100}%`;
+  node.style.zIndex = String(100 + Number(layer.z_index || 0));
+  node.style.color = String(layer.color || "#FFFFFF").slice(0, 7);
+  node.style.background = textOverlayCssColor(layer.background_color, Number(layer.background_opacity || 0));
+  node.style.fontFamily = layer.font_family || "Microsoft YaHei";
+  node.style.fontWeight = String(Number(layer.font_weight || 700));
+  node.style.textAlign = layer.text_align || "center";
+  scaleTextOverlayToCanvas(node, layer);
+}
+
+function renderTextOverlayCompositionEditor(scene) {
+  const composition = ensureTextOverlayDraft();
+  const selected = composition.layers.find((item) => item.id === selectedTextOverlayLayerId) || null;
+  let saveAction = null;
+  let revertAction = null;
+  const syncDirtyActions = () => {
+    if (saveAction) {
+      saveAction.disabled = !textOverlayDraftDirty || textOverlayPreviewRefreshing;
+      saveAction.textContent = textOverlayPreviewRefreshing
+        ? "正在保存并刷新左侧预览…"
+        : textOverlayDraftDirty ? "保存并刷新左侧预览（有未保存修改）" : "保存并刷新左侧预览";
+    }
+    if (revertAction) revertAction.disabled = !textOverlayDraftDirty;
+  };
+  const selectedWindow = selected ? [Number(selected.start_seconds || 0), Number(selected.end_seconds || 0)] : null;
+  const canvasLayers = selectedWindow
+    ? composition.layers.filter((layer) => Number(layer.start_seconds || 0) < selectedWindow[1] && Number(layer.end_seconds || 0) > selectedWindow[0])
+    : composition.layers;
+  const canvasNodes = new Map();
+  const canvasItems = canvasLayers.map((layer) => {
+    const node = el("button", {
+      type: "button",
+      class: `text-overlay-canvas-layer ${layer.id === selectedTextOverlayLayerId ? "selected" : ""} ${layer.locked ? "locked" : ""}`,
+      onclick: () => { selectedTextOverlayLayerId = layer.id; render(); },
+      title: `${layer.id} · ${Number(layer.start_seconds || 0).toFixed(2)}s–${Number(layer.end_seconds || 0).toFixed(2)}s`,
+    }, ...String(layer.text || "").split("\n").map((line, index) => el("span", { class: "text-overlay-canvas-line", key: String(index) }, line || " ")));
+    applyTextOverlayPreviewStyle(node, layer);
+    canvasNodes.set(layer.id, node);
+    return node;
+  });
+  const canvas = el("div", { class: `subtitle-layout-preview-box text-overlay-canvas ${(state.project.intake || {}).aspect === "landscape" ? "landscape" : "portrait"}` },
+    el("div", { class: "text-overlay-safe-zone", "aria-label": "5% 画面安全区" }),
+    el("div", { class: "subtitle-layout-safe-area text-overlay-bottom-obstruction" }, "平台底部交互遮挡参考区"),
+    ...canvasItems,
+  );
+  canvasItems.forEach((node, index) => observeTextOverlayCanvas(node, canvasLayers[index]));
+
+  const layerSelector = el("select", { "aria-label": "选择标题图层" },
+    ...composition.layers.map((layer, index) => el("option", { value: layer.id }, `${index + 1}. ${layer.managed ? `新闻 ${layer.source_story_id}` : layer.id} · ${String(layer.text || "未命名").replace(/\n/g, " / ").slice(0, 30)}`)),
+  );
+  layerSelector.value = selectedTextOverlayLayerId || "";
+  layerSelector.addEventListener("change", () => { selectedTextOverlayLayerId = layerSelector.value; render(); });
+
+  const addLayer = () => {
+    const layer = newTextOverlayLayer({ y: Math.min(.82, .08 + composition.layers.length * .12), z_index: composition.layers.length });
+    composition.layers.push(layer);
+    selectedTextOverlayLayerId = layer.id;
+    markTextOverlayDraftChanged();
+    render();
+  };
+  const toolbar = el("div", { class: "inline-actions text-overlay-toolbar" },
+    button("添加图层", "small", addLayer),
+    button("复制", "quiet small", () => {
+      if (!selected) return;
+      const seed = structuredClone(selected);
+      ["managed", "source_kind", "source_story_id", "source_occurrence", "scene_ids", "font_size_mode"].forEach((key) => delete seed[key]);
+      const copy = newTextOverlayLayer(Object.assign({}, seed, { id: undefined, locked: false, y: Math.min(1 - Number(selected.height || .1), Number(selected.y || 0) + .03), z_index: Number(selected.z_index || 0) + 1 }));
+      composition.layers.push(copy); selectedTextOverlayLayerId = copy.id; markTextOverlayDraftChanged(); render();
+    }, !selected),
+    button("删除", "danger small", () => {
+      if (!selected || selected.locked) return showToast("请先解锁该标题图层", true);
+      composition.layers = composition.layers.filter((item) => item.id !== selected.id);
+      selectedTextOverlayLayerId = (composition.layers[0] || {}).id || null; markTextOverlayDraftChanged(); render();
+    }, !selected || selected.locked || selected.managed),
+    button("上移", "quiet small", () => selected && moveTextOverlayLayer(selected.id, -1), !selected || selected.managed),
+    button("下移", "quiet small", () => selected && moveTextOverlayLayer(selected.id, 1), !selected || selected.managed),
+  );
+
+  let form = el("p", { class: "form-note" }, "请选择或添加一个标题图层。常用样式和位置使用滑杆实时预览，低频参数收在高级设置中。");
+  if (selected) {
+    const managed = selected.managed === true && selected.source_kind === "news_story";
+    let repaint = () => {};
+    const number = (value) => Number(value);
+    const colorValue = (value) => String(value || "#000000").slice(0, 7);
+    const field = (label, key, attributes = {}, parser = (value) => value) => {
+      const immutable = managed && ["start_seconds", "end_seconds"].includes(key);
+      const input = el("input", Object.assign({ value: String(selected[key] ?? ""), "aria-label": label, disabled: selected.locked || immutable ? "" : null }, attributes));
+      input.addEventListener("input", () => { selected[key] = parser(input.value); markTextOverlayDraftChanged(); syncDirtyActions(); repaint(); });
+      input.addEventListener("change", () => { if (["start_seconds", "end_seconds"].includes(key)) render(); });
+      return el("label", { class: "text-overlay-field" }, el("span", {}, label), input);
+    };
+    const selectControl = (ariaLabel, key, values) => {
+      const input = el("select", { "aria-label": ariaLabel, disabled: selected.locked ? "" : null }, ...values.map(([value, text]) => el("option", { value }, text)));
+      input.value = String(selected[key]);
+      input.addEventListener("input", () => { selected[key] = input.value; markTextOverlayDraftChanged(); syncDirtyActions(); repaint(); });
+      return input;
+    };
+    const bindLive = (input, update) => {
+      input.disabled = Boolean(selected.locked);
+      input.addEventListener("input", () => { update(); markTextOverlayDraftChanged(); syncDirtyActions(); repaint(); });
+      return input;
+    };
+
+    const text = el("textarea", { rows: "3", "aria-label": "标题文案及换行", disabled: selected.locked || managed ? "" : null }, selected.text || "");
+    text.addEventListener("input", () => { selected.text = text.value; markTextOverlayDraftChanged(); syncDirtyActions(); repaint(); });
+    const font = el("select", { "aria-label": "标题字体", disabled: selected.locked ? "" : null });
+    const fonts = ["Microsoft YaHei", "Source Han Sans SC", "PingFang SC", "Noto Sans CJK SC", "SimSun"];
+    if (!fonts.includes(String(selected.font_family || ""))) fonts.unshift(String(selected.font_family || "Microsoft YaHei"));
+    fonts.forEach((name) => font.append(el("option", { value: name }, name)));
+    font.value = selected.font_family || "Microsoft YaHei";
+    bindLive(font, () => { selected.font_family = font.value; });
+    const fontMode = managed ? selectControl("字号模式", "font_size_mode", [["auto", "自动适配"], ["fixed", "固定字号"]]) : null;
+    const fontSize = liveTextRangeControl("标题字号", selected.font_size || 56, 16, 240, 1);
+    const fontWeight = selectControl("标题字重", "font_weight", [["400", "常规 400"], ["600", "半粗 600"], ["700", "粗体 700"], ["900", "特粗 900"]]);
+    const textColor = liveTextColorControl("标题文字颜色", selected.color, "#FFFFFF");
+    const outlineColor = liveTextColorControl("标题描边颜色", selected.stroke_color, "#111111");
+    const outlineWidth = liveTextRangeControl("标题描边宽度", selected.stroke_width ?? 0, 0, 16, .5);
+    const backgroundEnabled = el("input", { type: "checkbox", checked: Number(selected.background_opacity || 0) > 0 ? "" : null, "aria-label": "显示标题底板" });
+    const backgroundColor = liveTextColorControl("标题底板颜色", selected.background_color, "#000000");
+    const backgroundOpacity = liveTextRangeControl("标题底板不透明度", Math.round(Number(selected.background_opacity || 0) * 100), 0, 100, 1);
+    const textAlign = selectControl("标题对齐", "text_align", [["left", "左对齐"], ["center", "居中"], ["right", "右对齐"]]);
+    const x = liveTextRangeControl("标题左右位置", selected.x ?? .1, 0, Math.max(0, 1 - Number(selected.width || .8)), .01);
+    const y = liveTextRangeControl("标题上下位置", selected.y ?? .1, 0, Math.max(0, 1 - Number(selected.height || .1)), .01);
+    const width = liveTextRangeControl("标题区域宽度", selected.width ?? .8, .12, .96, .01);
+    const height = liveTextRangeControl("标题区域高度", selected.height ?? .1, .04, .45, .005);
+    const readout = el("span", { class: "minor text-overlay-live-readout", "aria-live": "polite" });
+
+    bindLive(fontSize, () => { selected.font_size = Number(fontSize.value); if (managed) { selected.font_size_mode = "fixed"; fontMode.value = "fixed"; } });
+    bindLive(textColor, () => { selected.color = textColor.value; });
+    bindLive(outlineColor, () => { selected.stroke_color = outlineColor.value; });
+    bindLive(outlineWidth, () => { selected.stroke_width = Number(outlineWidth.value); });
+    bindLive(backgroundEnabled, () => {
+      selected.background_opacity = backgroundEnabled.checked ? Math.max(.01, Number(backgroundOpacity.value) / 100 || .65) : 0;
+      backgroundOpacity.value = String(Math.round(Number(selected.background_opacity || 0) * 100));
+    });
+    bindLive(backgroundColor, () => { selected.background_color = backgroundColor.value; });
+    bindLive(backgroundOpacity, () => { selected.background_opacity = Number(backgroundOpacity.value) / 100; backgroundEnabled.checked = Number(backgroundOpacity.value) > 0; });
+    bindLive(x, () => { selected.x = Number(x.value); });
+    bindLive(y, () => { selected.y = Number(y.value); });
+    bindLive(width, () => { selected.width = Number(width.value); });
+    bindLive(height, () => { selected.height = Number(height.value); });
+
+    repaint = () => {
+      const safeWidth = Math.max(.01, Math.min(.99, Number(selected.width || .8)));
+      const safeHeight = Math.max(.01, Math.min(.99, Number(selected.height || .1)));
+      selected.width = safeWidth;
+      selected.height = safeHeight;
+      x.max = String(Math.max(0, 1 - safeWidth));
+      y.max = String(Math.max(0, 1 - safeHeight));
+      selected.x = Math.min(Number(x.max), Math.max(0, Number(selected.x || 0)));
+      selected.y = Math.min(Number(y.max), Math.max(0, Number(selected.y || 0)));
+      x.value = String(selected.x);
+      y.value = String(selected.y);
+      width.value = String(selected.width);
+      height.value = String(selected.height);
+      const node = canvasNodes.get(selected.id);
+      if (node) {
+        node.replaceChildren(...String(selected.text || "").split("\n").map((line, index) => el("span", { class: "text-overlay-canvas-line", key: String(index) }, line || " ")));
+        applyTextOverlayPreviewStyle(node, selected);
+        observeTextOverlayCanvas(node, selected);
+      }
+      readout.textContent = `位置 ${Math.round(selected.x * 100)}% / ${Math.round(selected.y * 100)}% · 区域 ${Math.round(selected.width * 100)}% × ${Math.round(selected.height * 100)}% · 字号 ${Math.round(Number(selected.font_size || 56))}`;
+    };
+    repaint();
+
+    const lockButton = button(selected.locked ? "解锁图层" : "锁定图层", "quiet small", () => { selected.locked = !selected.locked; markTextOverlayDraftChanged(); render(); });
+    const advanced = el("details", { class: "subtitle-details text-overlay-advanced" },
+      el("summary", {}, "高级设置：精确时间、阴影、内边距与动画"),
+      el("div", { class: "text-overlay-field-grid" },
+        field("开始秒", "start_seconds", { type: "number", min: "0", step: ".01" }, number),
+        field("结束秒", "end_seconds", { type: "number", min: "0", step: ".01" }, number),
+        field("阴影颜色", "shadow_color", { type: "color", value: colorValue(selected.shadow_color) }),
+        field("阴影模糊", "shadow_blur", { type: "number", min: "0", max: "60" }, number),
+        field("阴影 X", "shadow_offset_x", { type: "number", min: "-100", max: "100" }, number),
+        field("阴影 Y", "shadow_offset_y", { type: "number", min: "-100", max: "100" }, number),
+        field("行距", "line_height", { type: "number", min: ".6", max: "3", step: ".05" }, number),
+        field("圆角", "background_radius", { type: "number", min: "0", max: "400" }, number),
+        field("横向内边距", "padding_x", { type: "number", min: "0", max: "300" }, number),
+        field("纵向内边距", "padding_y", { type: "number", min: "0", max: "300" }, number),
+        field("层级 z", "z_index", { type: "number", min: "-10000", max: "10000", step: "1" }, number),
+        el("label", { class: "text-overlay-field" }, el("span", {}, "入场动画"), selectControl("入场动画", "enter_animation", [["none", "无"], ["fade", "淡入"], ["slide_up", "上滑"], ["slide_down", "下滑"], ["slide_left", "左滑"], ["slide_right", "右滑"], ["scale", "缩放"]])),
+        field("入场时长", "enter_duration_seconds", { type: "number", min: "0", max: "3", step: ".05" }, number),
+        el("label", { class: "text-overlay-field" }, el("span", {}, "退场动画"), selectControl("退场动画", "exit_animation", [["none", "无"], ["fade", "淡出"], ["slide_up", "上滑"], ["slide_down", "下滑"], ["slide_left", "左滑"], ["slide_right", "右滑"], ["scale", "缩放"]])),
+        field("退场时长", "exit_duration_seconds", { type: "number", min: "0", max: "3", step: ".05" }, number),
+      ),
+    );
+    form = el("div", { class: "text-overlay-form subtitle-editor-body" },
+      el("div", { class: "text-overlay-form-head" }, el("strong", {}, selected.managed ? `新闻 ${selected.source_story_id}` : selected.id), lockButton),
+      managed ? el("p", { class: "form-note text-overlay-managed-note" }, `新闻预设层 · ${selected.source_story_id}。文案和时间跟随脚本；这里独立调整字体、颜色和位置。`) : null,
+      el("label", { class: "text-overlay-field wide" }, el("span", {}, "文案（保留换行）"), text),
+      el("strong", { class: "text-overlay-section-title" }, "快速样式"),
+      el("div", { class: "subtitle-style-grid text-overlay-quick-style" },
+        el("label", {}, "字体", font),
+        managed ? el("label", {}, "字号模式", fontMode) : null,
+        el("label", { class: "text-overlay-slider-wide" }, "字号", fontSize),
+        el("label", {}, "字重", fontWeight),
+        el("label", {}, "文字颜色", textColor),
+        el("label", {}, "描边颜色", outlineColor),
+        el("label", { class: "text-overlay-slider-wide" }, "描边宽度", outlineWidth),
+        el("label", { class: "check-row" }, backgroundEnabled, "标题底板"),
+        el("label", {}, "底板颜色", backgroundColor),
+        el("label", { class: "text-overlay-slider-wide" }, "底板不透明度", backgroundOpacity),
+      ),
+      el("strong", { class: "text-overlay-section-title" }, "位置与范围"),
+      el("div", { class: "subtitle-position-grid text-overlay-quick-position" },
+        el("label", {}, "对齐", textAlign),
+        el("label", { class: "text-overlay-slider-wide" }, "左右", x),
+        el("label", { class: "text-overlay-slider-wide" }, "上下", y),
+        el("label", { class: "text-overlay-slider-wide" }, "区域宽度", width),
+        el("label", { class: "text-overlay-slider-wide" }, "区域高度", height),
+      ),
+      readout,
+      advanced,
+      managed ? el("p", { class: "form-note" }, "拖动字号会自动切换为固定字号；文字过长时可增大区域，或回到脚本草案改成双行标题。") : null,
+    );
+  }
+  saveAction = button(
+    textOverlayPreviewRefreshing ? "正在保存并刷新左侧预览…" : textOverlayDraftDirty ? "保存并刷新左侧预览（有未保存修改）" : "保存并刷新左侧预览",
+    "primary",
+    () => saveTextOverlayComposition(scene),
+    !textOverlayDraftDirty || textOverlayPreviewRefreshing,
+  );
+  revertAction = button("还原未保存修改", "quiet", () => { textOverlayDraft = structuredClone(textOverlayComposition()); textOverlayDraftDirty = false; render(); }, !textOverlayDraftDirty);
+  return el("section", { class: "panel subtitle-editor text-overlay-editor", "data-text-overlay-editor": "v2" },
+    el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "标题图层"), el("p", {}, `合同 revision ${composition.revision || 0} · ${composition.layers.length} 层 · 项目绝对时间`))),
+    el("div", { class: "panel-body subtitle-editor-body" },
+      el("p", { class: "form-note" }, "操作方式与字幕一致：右侧画布立即显示当前草稿；左侧是已保存的真实片段预览，保存后会自动重做当前片段。虚线框为四边 5% 安全区。"),
+      composition.layers.length ? el("label", { class: "control-label" }, "选择标题图层", layerSelector) : null,
+      canvas, toolbar, form,
+      el("div", { class: "inline-actions text-overlay-save-actions" },
+        saveAction,
+        revertAction,
+      ),
+    ),
+  );
+}
+
 function renderStoryHeadlineText(headline, className = "") {
   const line1 = String((headline || {}).line_1 || "").trim();
   const line2 = String((headline || {}).line_2 || "").trim();
@@ -5885,14 +6704,14 @@ function renderSubtitleEditor(scene) {
   const font = el("select", { "aria-label": "字幕字体" });
   ["Microsoft YaHei", "Source Han Sans SC", "PingFang SC", "Noto Sans CJK SC", "SimSun"].forEach((name) => font.append(el("option", { value: name }, name)));
   font.value = style.font || "Microsoft YaHei";
-  const fontSize = el("input", { type: "range", min: "24", max: "80", step: "1", value: String(style.font_size || 42), "aria-label": "字幕大小" });
+  const fontSize = liveTextRangeControl("字幕大小", style.font_size || 42, 24, 80, 1);
   const bold = el("input", { type: "checkbox", checked: style.bold ? "" : null, "aria-label": "加粗字幕" });
-  const textColor = el("input", { type: "color", value: style.text_color || "#FFFFFF", "aria-label": "字幕颜色" });
-  const outlineColor = el("input", { type: "color", value: style.outline_color || "#07111F", "aria-label": "描边颜色" });
-  const outlineWidth = el("input", { type: "range", min: "0", max: "8", step: "0.5", value: String(style.outline_width ?? 3), "aria-label": "描边宽度" });
+  const textColor = liveTextColorControl("字幕颜色", style.text_color, "#FFFFFF");
+  const outlineColor = liveTextColorControl("描边颜色", style.outline_color, "#07111F");
+  const outlineWidth = liveTextRangeControl("描边宽度", style.outline_width ?? 3, 0, 8, .5);
   const backgroundEnabled = el("input", { type: "checkbox", checked: style.background_enabled ? "" : null, "aria-label": "显示字幕底板" });
-  const backgroundColor = el("input", { type: "color", value: style.background_color || "#07111F", "aria-label": "底板颜色" });
-  const backgroundOpacity = el("input", { type: "range", min: "0", max: "100", step: "1", value: String(style.background_opacity ?? 68), "aria-label": "底板透明度" });
+  const backgroundColor = liveTextColorControl("底板颜色", style.background_color, "#07111F");
+  const backgroundOpacity = liveTextRangeControl("底板透明度", style.background_opacity ?? 68, 0, 100, 1);
   const position = style.position || { x: .5, y: .89, width: .84, anchor: "bottom-center" };
   const anchor = el("select", { "aria-label": "字幕锚点" },
     el("option", { value: "bottom-center" }, "下方居中"),
@@ -5900,9 +6719,9 @@ function renderSubtitleEditor(scene) {
     el("option", { value: "top-center" }, "上方居中"),
   );
   anchor.value = position.anchor || "bottom-center";
-  const x = el("input", { type: "range", min: "0.22", max: "0.78", step: "0.01", value: String(position.x ?? .5), "aria-label": "字幕左右位置" });
-  const y = el("input", { type: "range", min: "0.07", max: "0.94", step: "0.01", value: String(position.y ?? .89), "aria-label": "字幕上下位置" });
-  const width = el("input", { type: "range", min: "0.42", max: "0.94", step: "0.01", value: String(position.width ?? .84), "aria-label": "字幕最大宽度" });
+  const x = liveTextRangeControl("字幕左右位置", position.x ?? .5, .22, .78, .01);
+  const y = liveTextRangeControl("字幕上下位置", position.y ?? .89, .07, .94, .01);
+  const width = liveTextRangeControl("字幕最大宽度", position.width ?? .84, .42, .94, .01);
   const maxLines = el("select", { "aria-label": "字幕最大行数" }, el("option", { value: "1" }, "最多 1 行"), el("option", { value: "2" }, "最多 2 行（推荐）"), el("option", { value: "3" }, "最多 3 行"));
   maxLines.value = String(style.max_lines || 2);
   const previewBox = el("div", { class: `subtitle-layout-preview-box ${reviewLayoutKind()}` });
@@ -6386,17 +7205,36 @@ async function restoreAssetFromRecycleBin(assetId) {
   render();
 }
 
-async function startAssetMediaCoarseIndex(asset, transcribe = false) {
+async function startAssetMediaCoarseIndex(asset, transcriptProvider = "none") {
+  const transcribe = transcriptProvider !== "none";
+  const isDoubao = transcriptProvider === "doubao";
   try {
     state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/jobs`, {
       method: "POST",
-      body: { stage: "coarse", transcribe },
+      body: {
+        stage: "coarse",
+        transcribe,
+        transcript_provider: transcriptProvider,
+        remote_asr_confirmed: isDoubao,
+      },
     });
-    showToast(transcribe ? "素材粗筛与本地语音识别已开始；长视频会在后台持续处理" : "素材粗筛已开始；只运行本地镜头检测与代表帧提取");
+    showToast(isDoubao
+      ? "素材粗筛与豆包极速语音识别已开始；只上传提取后的音轨，结果不明时不会自动重提"
+      : transcribe
+        ? "素材粗筛与本地语音识别已开始；长视频会在后台持续处理"
+        : "素材粗筛已开始；只运行本地镜头检测与代表帧提取");
   } catch (error) {
     showToast(error.message || "素材粗筛启动失败", true);
   }
   render();
+}
+
+async function startAssetDoubaoTranscript(asset) {
+  const confirmed = window.confirm(
+    "将从该项目视频提取 16 kHz 单声道 MP3，并以 Base64 直接发送给豆包录音文件识别 1.0 极速版（volc.bigasr.auc_turbo）。不会上传视频画面。\n\n会消耗云端音频时长额度；不会静默改用本地 Whisper。若提交连接中断，系统不会自动重复提交。确认开始吗？",
+  );
+  if (!confirmed) return;
+  await startAssetMediaCoarseIndex(asset, "doubao");
 }
 
 async function startAssetMediaFineIndex(asset) {
@@ -6408,11 +7246,29 @@ async function startAssetMediaFineIndex(asset) {
   if (endRaw === null) return;
   const end = Number(endRaw);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < .4) return showToast("精筛区间无效，结束时间至少比开始时间晚 0.4 秒", true);
-  const transcribe = window.confirm("是否同时使用本机已安装的 faster-whisper 识别这个候选区间？\n\n不会下载模型，也不会调用付费服务；选择“取消”仍会完成密集关键帧精筛。");
+  const choice = window.prompt(
+    "本次精筛是否识别人声？输入 local（本地 Whisper）、doubao（豆包 ASR）或 none（不识别）。",
+    "none",
+  );
+  if (choice === null) return;
+  const transcriptProvider = String(choice).trim().toLowerCase();
+  if (!["none", "local", "doubao"].includes(transcriptProvider)) {
+    return showToast("请输入 local、doubao 或 none", true);
+  }
+  if (transcriptProvider === "doubao" && !window.confirm(
+    "豆包 ASR 会提取候选区间的 16 kHz 单声道 MP3，并直传录音文件识别 1.0 极速版；不会上传视频画面。会消耗音频时长额度，且不会自动降级或重复提交。确认继续吗？",
+  )) return;
   try {
     state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/jobs`, {
       method: "POST",
-      body: { stage: "fine", start_seconds: start, end_seconds: end, transcribe },
+      body: {
+        stage: "fine",
+        start_seconds: start,
+        end_seconds: end,
+        transcribe: transcriptProvider !== "none",
+        transcript_provider: transcriptProvider,
+        remote_asr_confirmed: transcriptProvider === "doubao",
+      },
     });
     showToast("候选区间精筛已开始");
   } catch (error) {
@@ -6447,6 +7303,672 @@ async function loadAssetVisionDetails(asset) {
     showToast(error.message || "画面描述读取失败", true);
   }
   render();
+}
+
+function selectedOverviewChaptersForRemote(asset) {
+  const duration = Number(((asset.media_index || {}).duration_seconds) || asset.duration_seconds || 0);
+  if (duration <= 60 * 60) return [];
+  const raw = window.prompt(
+    "该素材超过 60 分钟。请选择要发送给视觉模型的章节（例如 CHAPTER-01,CHAPTER-02）。\n\n不选择不会上传任何联系表，只会保留本地章节索引。",
+    "CHAPTER-01",
+  );
+  if (raw === null) return null;
+  return [...new Set(raw.split(",").map((item) => item.trim()).filter(Boolean))];
+}
+
+function materialAnalysisControls(asset, disabled) {
+  const choice = materialAnalysisChoices.get(asset.id) || { scene: "generic", profile: "efficient", recognizeAudio: false, generateCandidates: true };
+  const scene = el("select", { "aria-label": `素材场景 ${asset.id}`, disabled: disabled ? "" : null },
+    el("option", { value: "generic", selected: choice.scene === "generic" ? "" : null }, "通用画面概览"),
+    el("option", { value: "outdoor_interaction", selected: choice.scene === "outdoor_interaction" ? "" : null }, "户外直播互动"));
+  const depth = el("select", { "aria-label": `处理深度 ${asset.id}`, disabled: disabled ? "" : null },
+    el("option", { value: "efficient", selected: choice.profile === "efficient" ? "" : null }, "高效率处理"),
+    el("option", { value: "detailed", selected: choice.profile === "detailed" ? "" : null }, "精细核验"));
+  const audio = el("input", { type: "checkbox", checked: choice.recognizeAudio ? "" : null, disabled: disabled ? "" : null, "aria-label": `识别音频 ${asset.id}` });
+  const candidates = el("input", { type: "checkbox", checked: choice.generateCandidates ? "" : null, disabled: disabled ? "" : null, "aria-label": `生成待审互动片段 ${asset.id}` });
+  const save = () => materialAnalysisChoices.set(asset.id, {
+    scene: scene.value, profile: depth.value, recognizeAudio: audio.checked, generateCandidates: candidates.checked,
+  });
+  scene.addEventListener("change", () => { save(); render(); });
+  depth.addEventListener("change", save);
+  audio.addEventListener("change", save);
+  candidates.addEventListener("change", save);
+  return el("div", { class: "material-analysis-controls" }, scene, depth,
+    el("label", { class: "material-analysis-toggle" }, audio, "识别音频"),
+    choice.scene === "outdoor_interaction" ? el("label", { class: "material-analysis-toggle" }, candidates, "生成待审片段") : null,
+    button("开始素材分析", "primary small", async () => {
+      if (scene.value === "generic") return startAssetMaterialOverview(asset, depth.value, audio.checked);
+      try {
+        const preflight = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/interaction-preflight?profile=${encodeURIComponent(depth.value)}&recognize_audio=${audio.checked ? "true" : "false"}`);
+        const budget = preflight.budget;
+        const audioCopy = audio.checked && preflight.effective_recognize_audio
+          ? `音轨使用 ${preflight.asr_identity}，最多约${Math.ceil(budget.audio_seconds_max)}秒语音识别。`
+          : audio.checked ? "原片没有音轨，本次会自动跳过豆包。" : "音频识别关闭，不会上传音轨；候选仍保留原声。";
+        if (!window.confirm(`户外直播互动分析：将联系表和最多${budget.detail_frames_max}张边界帧发送给 ${preflight.identity.model}；${audioCopy}\n最多${budget.model_calls_max}次视觉请求，可能消耗额度。${candidates.checked ? "完成后最多生成3条本地待审片段。" : "本次仅建立互动目录。"}\n一次确认后自动完成；不会自动批准、采用或发布。确认开始吗？`)) return;
+        materialInteractionDetails = null;
+        materialInteractionPanel = null;
+        state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/jobs`, { method: "POST", body: {
+          stage: "interaction", profile: depth.value,
+          recognize_audio: audio.checked, generate_candidates: candidates.checked,
+          transcript_provider: preflight.effective_recognize_audio ? "doubao" : "none",
+          remote_vision_confirmed: true, remote_asr_confirmed: Boolean(preflight.effective_recognize_audio),
+          preflight_signature: preflight.signature,
+        } });
+        showToast("户外互动分析已开始，完成后点击“查看互动目录”回看原片");
+        render();
+      } catch (error) { showToast(error.message || "互动分析启动失败", true); }
+    }, disabled));
+}
+
+async function loadAssetMaterialInteractions(asset) {
+  try {
+    materialInteractionDetails = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/interactions`);
+    if (!materialInteractionDetails.review) {
+      materialInteractionDetails = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/interactions/review/initialize`, { method: "POST", body: {} });
+    }
+    materialInteractionPanel = null;
+    materialInteractionMergeSelection = new Set();
+    materialInteractionPendingEdits = new Map();
+    materialInteractionSecondPassDrafts = new Map();
+    render();
+    document.querySelector(".material-interactions")?.scrollIntoView({ block: "start", behavior: "smooth" });
+  } catch (error) { showToast(error.message || "互动目录读取失败", true); }
+}
+
+async function resolveAmbiguousMaterialInteraction(asset) {
+  const profile = String(((asset.media_index || {}).profile) || ((state.automation || {}).media_index?.request?.profile) || "efficient");
+  const recognizeAudio = Boolean((asset.media_index || {}).interaction_recovery?.recognize_audio ?? (state.automation || {}).media_index?.request?.recognize_audio ?? true);
+  try {
+    const preflight = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/interaction-preflight?profile=${encodeURIComponent(profile)}&recognize_audio=${recognizeAudio ? "true" : "false"}`);
+    const budget = preflight.budget || {};
+    const confirmed = window.confirm(
+      `只有在你已经查看供应商或中转站记录，并确认上一次请求“没有受理、没有生成、不会计费”时才能继续。\n\n重新提交仍可能产生费用：${preflight.identity?.model || "当前视觉模型"} 最多 ${budget.model_calls_max || 0} 次视觉请求${preflight.effective_recognize_audio ? `，${preflight.asr_identity || "豆包语音识别"} 最多约 ${Math.ceil(budget.audio_seconds_max || 0)} 秒` : "；本次音频识别关闭"}。已完成的 ASR、抽帧和联系表会复用。\n\n我已核实上次请求未受理，重新确认并续跑吗？`,
+    );
+    if (!confirmed) return;
+    state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/interactions/resolve-ambiguous`, {
+      method: "POST",
+      body: { confirmed_not_accepted: true, preflight_signature: preflight.signature },
+    });
+    showToast("已保留旧审计记录并创建续跑任务；只会处理尚未完成的步骤");
+    render();
+  } catch (error) {
+    showToast(error.message || "互动分析安全恢复失败", true);
+  }
+}
+
+async function updateMaterialInteractionReview(action, payload = {}) {
+  const data = materialInteractionDetails;
+  if (!data?.review) return;
+  try {
+    materialInteractionDetails = await api(`/assets/${encodeURIComponent(data.asset_id)}/media-index/interactions/review`, {
+      method: "POST",
+      body: { action, expected_revision: data.review.revision, ...payload },
+    });
+    materialInteractionPanel = null;
+    materialInteractionMergeSelection = new Set();
+    showToast("互动人工目录已保存");
+    render();
+  } catch (error) {
+    showToast(error.message || "互动人工目录保存失败", true);
+  }
+}
+
+async function generateMaterialInteractionCandidate(event, targetGap = .3) {
+  const data = materialInteractionDetails;
+  if (!data?.review || !event?.review_event_id) return;
+  try {
+    const queued = await api(`/assets/${encodeURIComponent(data.asset_id)}/media-index/interactions/candidates`, {
+      method: "POST",
+      body: { event_id: event.review_event_id, expected_review_revision: data.review.revision, target_gap: Number(targetGap) },
+    });
+    materialInteractionPanel = null;
+    showToast("自然精剪已排队；完成后会显示对白保护范围和切口证据");
+    render();
+    materialInteractionDetails = await waitForInteractionCandidateJob(data.asset_id, queued.candidate_job?.job_id);
+    materialInteractionPanel = null;
+    showToast("待审互动片段已生成；请对比原片并检查每处删减");
+    render();
+  } catch (error) {
+    showToast(error.message || "互动候选生成失败", true);
+  }
+}
+
+async function updateMaterialInteractionCandidate(candidate, action, removalId = null, extra = {}) {
+  const data = materialInteractionDetails;
+  if (!data?.asset_id || !candidate?.plan_id) return;
+  try {
+    const response = await api(`/assets/${encodeURIComponent(data.asset_id)}/media-index/interactions/candidates/${encodeURIComponent(candidate.plan_id)}`, {
+      method: "POST",
+      body: { action, expected_revision: candidate.revision, removal_id: removalId, ...extra },
+    });
+    if (response.candidate_job?.job_id) {
+      showToast("调整已保存，正在后台更新一次预览");
+      materialInteractionDetails = await waitForInteractionCandidateJob(data.asset_id, response.candidate_job.job_id);
+    } else {
+      materialInteractionDetails = response;
+    }
+    if (action === "approve") {
+      state = await api("");
+      ensureSelection();
+    }
+    materialInteractionPanel = null;
+    materialInteractionPendingEdits.delete(candidate.plan_id);
+    showToast(action === "approve" ? "候选已确认入库，但不会自动采用到分镜" : action === "reject" ? "候选已弃用" : "删减已更新并重新生成预览");
+    render();
+  } catch (error) {
+    showToast(error.message || "互动候选更新失败", true);
+  }
+}
+
+async function waitForInteractionCandidateJob(assetId, jobId) {
+  if (!jobId) throw new Error("后台互动候选任务缺少编号");
+  let latest = null;
+  for (let attempt = 0; attempt < 1200; attempt += 1) {
+    latest = await api(`/assets/${encodeURIComponent(assetId)}/media-index/interactions`);
+    const job = latest.candidate_job || {};
+    if (job.job_id !== jobId) throw new Error("互动候选任务编号已经变化，请刷新后检查");
+    if (job.status === "completed") return latest;
+    if (job.status === "failed") throw new Error(job.error || "互动候选后台任务失败");
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  }
+  showToast("互动候选仍在后台生成，可以稍后重新打开互动目录查看");
+  return latest || materialInteractionDetails;
+}
+
+function stageMaterialInteractionRemoval(candidate, range, restored) {
+  const changes = { ...(materialInteractionPendingEdits.get(candidate.plan_id) || {}) };
+  changes[range.id] = Boolean(restored);
+  materialInteractionPendingEdits.set(candidate.plan_id, changes);
+}
+
+async function saveMaterialInteractionEdits(candidate) {
+  const changes = materialInteractionPendingEdits.get(candidate.plan_id) || {};
+  if (!Object.keys(changes).length) return showToast("当前没有需要保存的删减调整", true);
+  return updateMaterialInteractionCandidate(candidate, "save_edits", null, { removal_states: changes });
+}
+
+function sourceTimeToInteractionOutput(candidate, seconds) {
+  const value = Number(seconds);
+  for (const row of candidate.timeline_mapping || []) {
+    if (value >= Number(row.source_start) && value < Number(row.source_end)) {
+      return Number(row.output_start) + value - Number(row.source_start);
+    }
+    if (value < Number(row.source_start)) return Number(row.output_start);
+  }
+  return Number(candidate.output_duration || 0);
+}
+
+function sourceTimeToSecondPassOutputs(candidate, seconds) {
+  const value = Number(seconds);
+  return (candidate.timeline_mapping || []).filter((row) =>
+    value >= Number(row.source_start) && value <= Number(row.source_end)
+  ).map((row) => ({
+    occurrenceId: row.occurrence_id,
+    role: row.role,
+    seconds: Number(row.output_start) + (value - Number(row.source_start)) / Number(row.speed || 1),
+  }));
+}
+
+function secondPassDraft(candidate) {
+  if (!materialInteractionSecondPassDrafts.has(candidate.plan_id)) {
+    materialInteractionSecondPassDrafts.set(candidate.plan_id, {
+      groupStates: Object.fromEntries((candidate.story?.groups || []).map((group) => [group.id, Boolean(group.selected)])),
+      lockedStates: Object.fromEntries((candidate.story?.groups || []).map((group) => [group.id, Boolean(group.locked)])),
+      speed: Number(candidate.options?.speed || 1.1),
+      hookCandidateId: candidate.selected_hook_id || "__none__",
+      hookMode: candidate.options?.hook_mode || (candidate.version === "interaction-second-pass-plan-v1" ? "repeat" : "move"),
+      dirty: false,
+    });
+  }
+  return materialInteractionSecondPassDrafts.get(candidate.plan_id);
+}
+
+function stageSecondPass(candidate, mutator) {
+  const draft = secondPassDraft(candidate);
+  mutator(draft);
+  draft.dirty = true;
+  materialInteractionSecondPassDrafts.set(candidate.plan_id, draft);
+}
+
+async function waitForInteractionSecondPassJob(assetId, jobId) {
+  if (!jobId) throw new Error("后台二次剪辑任务缺少编号");
+  let latest = null;
+  for (let attempt = 0; attempt < 1200; attempt += 1) {
+    latest = await api(`/assets/${encodeURIComponent(assetId)}/media-index/interactions`);
+    const job = latest.second_pass_job || {};
+    if (job.job_id !== jobId) throw new Error("二次剪辑任务编号已经变化，请刷新后检查");
+    if (job.status === "completed") return latest;
+    if (job.status === "failed") throw new Error(job.error || "二次剪辑后台任务失败");
+    if (job.status === "ambiguous") throw new Error(job.error || "模型请求受理状态待核对，已停止自动重投");
+    await new Promise((resolve) => window.setTimeout(resolve, 1000));
+  }
+  showToast("二次剪辑仍在后台运行，可以稍后重新打开互动目录查看");
+  return latest || materialInteractionDetails;
+}
+
+async function generateMaterialInteractionSecondPass(parent, options) {
+  const data = materialInteractionDetails;
+  const preflight = data?.second_pass_preflight || {};
+  if (!data?.asset_id || !parent?.plan_id) return;
+  if (!preflight.configured) return showToast("当前文本模型未配置，暂时不能做语义精剪", true);
+  const confirmed = window.confirm(
+    `将基于第一次完整互动切片生成“精彩前置＋精简正文”。\n\n` +
+    `本次最多调用 1 次 ${preflight.provider || "default"} / ${preflight.model || "当前文本模型"} 做对话语义分组；` +
+    `已有转写直接复用，随后只在本机渲染。不会自动批准、采用或发布。\n\n确认开始户外互动精剪吗？`
+  );
+  if (!confirmed) return;
+  try {
+    const queued = await api(`/assets/${encodeURIComponent(data.asset_id)}/media-index/interactions/second-pass`, {
+      method: "POST",
+      body: {
+        parent_plan_id: parent.plan_id,
+        expected_parent_revision: parent.revision,
+        confirmed: true,
+        options,
+      },
+    });
+    materialInteractionPanel = null;
+    showToast("二次剪辑已排队：正在语义分组，随后会生成本地预览");
+    render();
+    materialInteractionDetails = await waitForInteractionSecondPassJob(data.asset_id, queued.second_pass_job?.job_id);
+    materialInteractionPanel = null;
+    showToast("二次剪辑候选已生成；请逐组核对并完整观看后再确认入库");
+    render();
+  } catch (error) {
+    showToast(error.message || "二次剪辑生成失败", true);
+  }
+}
+
+async function updateMaterialInteractionSecondPass(candidate, action) {
+  const data = materialInteractionDetails;
+  if (!data?.asset_id || !candidate?.plan_id) return;
+  const draft = secondPassDraft(candidate);
+  const body = { action, expected_revision: candidate.revision };
+  if (action === "save_edits") {
+    if (!draft.dirty) return showToast("当前没有需要保存的二次剪辑调整", true);
+    Object.assign(body, {
+      group_states: draft.groupStates,
+      locked_states: draft.lockedStates,
+      speed: Number(draft.speed),
+      hook_candidate_id: draft.hookCandidateId,
+      hook_mode: draft.hookMode,
+    });
+  }
+  try {
+    const response = await api(`/assets/${encodeURIComponent(data.asset_id)}/media-index/interactions/second-pass/${encodeURIComponent(candidate.plan_id)}`, {
+      method: "POST", body,
+    });
+    if (response.second_pass_job?.job_id) {
+      showToast("调整已保存，正在后台只更新一次本地预览");
+      materialInteractionDetails = await waitForInteractionSecondPassJob(data.asset_id, response.second_pass_job.job_id);
+    } else {
+      materialInteractionDetails = response;
+    }
+    if (action === "approve") {
+      state = await api("");
+      ensureSelection();
+    }
+    materialInteractionPanel = null;
+    materialInteractionSecondPassDrafts.delete(candidate.plan_id);
+    showToast(action === "approve" ? "二次剪辑已确认入库，但不会自动采用到分镜" : action === "reject" ? "二次剪辑已弃用" : action === "undo" ? "已撤销上一次二次剪辑操作" : "二次剪辑预览已更新");
+    render();
+  } catch (error) {
+    showToast(error.message || "二次剪辑更新失败", true);
+  }
+}
+
+function renderMaterialInteractions() {
+  if (!materialInteractionDetails) return null;
+  // Reuse media state across ordinary result renders.
+  if (materialInteractionPanel) return materialInteractionPanel;
+  const data = materialInteractionDetails;
+  const review = data.review;
+  const player = el("video", { controls: "", preload: "metadata", src: mediaURL(projectId, data.playback_video_path || data.source_video_path), "aria-label": "互动原片回看" });
+  const playbackNotice = el("p", { class: "minor warning", hidden: "" }, "浏览器审核代理和原片均无法播放；请用本地播放器回看。候选时间仍保留，勿将播放失败视为无可用素材。");
+  player.addEventListener("error", () => { playbackNotice.hidden = false; });
+  let targetTime = 0;
+  const seek = (seconds) => {
+    targetTime = Math.max(0, Math.min(Number(seconds) || 0, Number(data.duration) - .05));
+    if (player.readyState >= 1) player.currentTime = targetTime;
+  };
+  player.addEventListener("loadedmetadata", () => seek(targetTime));
+  const labels = { complete: "过程完整", start_missing: "缺开头", end_missing: "缺结尾", both_missing: "缺头缺尾", uncertain: "边界待确认" };
+  const audioLabels = { available: "已取得分句转写", no_audio: "原片无音轨", no_speech: "未识别到有效语句", skipped: "按选择未识别音频" };
+  const statusLabels = { pending: "待审核", kept: "已保留", discarded: "已弃用" };
+  const events = (review?.events || []).map((event) => {
+    const speechEvidence = (data.audio?.utterances || [])
+      .filter((utterance) => Number(utterance.end) > Number(event.start) && Number(utterance.start) < Number(event.end))
+      .map((utterance) => el("p", { class: "minor" }, `${Number(utterance.start).toFixed(1)}秒 · ${utterance.text}`));
+    const highlightActions = (event.highlights || []).map((highlight) =>
+      button(`${highlight.label} · ${Number(highlight.time).toFixed(1)}秒`, "quiet small", () => seek(highlight.time)));
+    const startInput = el("input", { type: "number", min: "0", max: String(data.duration), step: "0.01", value: Number(event.start).toFixed(2), "aria-label": `${event.review_event_id} 开始秒数` });
+    const endInput = el("input", { type: "number", min: "0.4", max: String(data.duration), step: "0.01", value: Number(event.end).toFixed(2), "aria-label": `${event.review_event_id} 结束秒数` });
+    const checkbox = el("input", { type: "checkbox", checked: materialInteractionMergeSelection.has(event.review_event_id) ? "" : null, "aria-label": `选择 ${event.review_event_id} 合并` });
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) materialInteractionMergeSelection.add(event.review_event_id);
+      else materialInteractionMergeSelection.delete(event.review_event_id);
+    });
+    const targetGap = el("select", { "aria-label": `${event.review_event_id} 目标停顿` },
+      el("option", { value: ".3" }, "普通等待保留 0.3 秒"),
+      el("option", { value: ".5" }, "自然等待保留 0.5 秒"),
+      el("option", { value: ".8" }, "保守等待保留 0.8 秒"));
+    return el("article", { class: `interaction-event review-${event.status}` },
+      el("div", { class: "interaction-event-heading" },
+        el("strong", {}, `${event.participants} · ${Number(event.start).toFixed(1)}—${Number(event.end).toFixed(1)}秒`),
+        el("span", { class: "interaction-review-status" }, `${statusLabels[event.status] || "待审核"} · ${event.review_event_id}`),
+        el("span", { class: "minor" }, `${labels[event.completeness] || "待确认"} · ${event.group_id}${event.requires_review ? " · 需人工核验" : ""}`)),
+      el("p", {}, event.summary),
+      el("p", { class: "minor" }, `推荐理由：${event.recommend_reason} · 参考评分 ${Math.round(event.score * 100)}`),
+      event.boundary_reason ? el("p", { class: "minor" }, `边界依据：${event.boundary_reason}`) : null,
+      event.unknowns?.length ? el("p", { class: "minor warning" }, `待核验：${event.unknowns.join("；")}`) : null,
+      el("div", { class: "interaction-range-editor" },
+        el("label", {}, "开始（秒）", startInput), el("label", {}, "结束（秒）", endInput),
+        button("保存边界", "quiet small", () => updateMaterialInteractionReview("set_range", { event_id: event.review_event_id, start: startInput.value, end: endInput.value }))),
+      el("div", { class: "inline-actions" },
+        el("label", { class: "interaction-merge-choice" }, checkbox, "加入合并"),
+        button("保留", event.status === "kept" ? "primary small" : "quiet small", () => updateMaterialInteractionReview("set_status", { event_id: event.review_event_id, status: "kept" })),
+        button("弃用", event.status === "discarded" ? "danger small" : "quiet small", () => updateMaterialInteractionReview("set_status", { event_id: event.review_event_id, status: "discarded" })),
+        button("恢复待审核", "quiet small", () => updateMaterialInteractionReview("set_status", { event_id: event.review_event_id, status: "pending" })),
+        button("回看开始", "quiet small", () => seek(event.start)),
+        button("回看结束", "quiet small", () => seek(Math.max(event.start, event.end - 3))),
+        button("在播放点拆分", "quiet small", () => updateMaterialInteractionReview("split", { event_id: event.review_event_id, split_seconds: player.currentTime })),
+        targetGap,
+        button("生成自然精剪", "primary small", () => generateMaterialInteractionCandidate(event, targetGap.value), event.status === "discarded"),
+        ...highlightActions),
+      el("details", {}, el("summary", {}, "查看对白证据"), ...speechEvidence));
+  });
+  const filteredCandidates = (data.candidates || []).filter((candidate) => {
+    if (materialInteractionCandidateFilter === "history") return candidate.is_active !== true;
+    if (candidate.is_active !== true) return false;
+    if (materialInteractionCandidateFilter === "all") return true;
+    if (materialInteractionCandidateFilter === "review") return candidate.status === "pending_review";
+    if (materialInteractionCandidateFilter === "partial") return candidate.refinement_status === "partial";
+    return candidate.status === materialInteractionCandidateFilter;
+  });
+  const candidateCards = filteredCandidates.map((candidate) => {
+    const terminal = ["approved", "rejected"].includes(candidate.status);
+    const previewPlayer = candidate.preview?.path
+      ? el("video", { controls: "", preload: "metadata", src: mediaURL(projectId, candidate.preview.path), "aria-label": `${candidate.plan_id} 精剪候选预览` })
+      : el("p", { class: "minor warning" }, "候选尚无可播放预览，请重新生成。");
+    const staged = materialInteractionPendingEdits.get(candidate.plan_id) || {};
+    const removed = (candidate.removed_ranges || []).map((range) => {
+      const effectiveRestored = Object.prototype.hasOwnProperty.call(staged, range.id) ? staged[range.id] : Boolean(range.restored);
+      const keep = el("input", { type: "checkbox", checked: effectiveRestored ? "" : null,
+        "aria-label": `${range.id} 保留原片内容` });
+      keep.addEventListener("change", () => stageMaterialInteractionRemoval(candidate, range, keep.checked));
+      const seekOriginal = () => { seek(Math.max(candidate.event_start, Number(range.start) - 2)); player.play().catch(() => {}); };
+      const seekCandidate = () => {
+        if (!(previewPlayer instanceof HTMLVideoElement)) return showToast("当前候选没有可播放预览", true);
+        previewPlayer.currentTime = Math.max(0, sourceTimeToInteractionOutput(candidate, Number(range.start)) - 2);
+        previewPlayer.play().catch(() => {});
+      };
+      return el("div", { class: `interaction-removal ${effectiveRestored ? "is-restored" : ""}` },
+        el("label", { class: "interaction-removal-choice" }, keep,
+          el("span", {}, `${Number(range.start).toFixed(2)}—${Number(range.end).toFixed(2)}秒 · ${range.reason || range.reason_code}`)),
+        el("div", { class: "inline-actions" },
+          button("原片切口", "quiet small", seekOriginal),
+          button("候选切口", "quiet small", seekCandidate)));
+    });
+    const hasStagedEdits = Object.keys(staged).length > 0;
+    const warnings = (candidate.warnings || []).map((warning) => el("p", { class: "minor warning" }, warning));
+    const boundary = candidate.original_range && candidate.protected_range
+      ? `目录 ${Number(candidate.original_range.start).toFixed(2)}—${Number(candidate.original_range.end).toFixed(2)} 秒；对白保护后 ${Number(candidate.protected_range.start).toFixed(2)}—${Number(candidate.protected_range.end).toFixed(2)} 秒`
+      : null;
+    const existingSecondPass = (data.second_pass_candidates || []).find((item) => item.parent?.plan_id === candidate.plan_id);
+    const trimHead = el("input", { type: "checkbox", checked: "", "aria-label": `${candidate.plan_id} 掐头` });
+    const trimTail = el("input", { type: "checkbox", checked: "", "aria-label": `${candidate.plan_id} 去尾` });
+    const extractHighlights = el("input", { type: "checkbox", checked: "", "aria-label": `${candidate.plan_id} 提取精华` });
+    const hookEnabled = el("input", { type: "checkbox", checked: "", "aria-label": `${candidate.plan_id} 精彩前置` });
+    const hookMode = el("select", { "aria-label": `${candidate.plan_id} 精彩前置方式` },
+      el("option", { value: "move", selected: "" }, "移动到片头（正文不重复）"),
+      el("option", { value: "repeat" }, "预告式重复（显式重复）"));
+    const presetSpeed = el("select", { "aria-label": `${candidate.plan_id} 二次剪辑倍速` },
+      el("option", { value: "1" }, "1.0× 原速"),
+      el("option", { value: "1.1", selected: "" }, "1.1× 自然加速"),
+      el("option", { value: "1.25" }, "1.25× 紧凑"));
+    const targetMin = el("input", { type: "number", min: "15", max: "180", step: "1", value: "45", "aria-label": `${candidate.plan_id} 目标最短秒数` });
+    const targetMax = el("input", { type: "number", min: "15", max: "180", step: "1", value: "60", "aria-label": `${candidate.plan_id} 目标最长秒数` });
+    const secondPassPreset = existingSecondPass
+      ? el("div", { class: "interaction-second-pass-entry is-ready" },
+          el("strong", {}, "户外互动精剪已建立"),
+          el("span", { class: "minor" }, `独立方案 ${existingSecondPass.plan_id} · 不影响当前完整切片`),
+          button("查看二次剪辑", "quiet small", () => {
+            const target = document.getElementById(`second-pass-${existingSecondPass.plan_id}`);
+            if (!target) return showToast("二次剪辑卡片尚未载入，请刷新后重试", true);
+            target.scrollIntoView({ block: "start", behavior: "smooth" });
+            target.classList.add("is-located");
+            window.setTimeout(() => target.classList.remove("is-located"), 1800);
+            showToast("已定位到对应的二次剪辑方案");
+          }))
+      : el("details", { class: "interaction-second-pass-entry" },
+          el("summary", {}, "二次剪辑（人工触发）"),
+          el("p", { class: "minor" }, "先保留当前完整互动，再另生成“精彩前置＋精简正文”。只按完整对话组取舍，不覆盖第一次切片。"),
+          el("div", { class: "interaction-second-pass-options" },
+            el("label", {}, trimHead, "掐头"), el("label", {}, trimTail, "去尾"),
+            el("label", {}, extractHighlights, "提取精华"), el("label", {}, hookEnabled, "精彩前置"),
+            el("label", {}, "前置方式", hookMode),
+            el("label", {}, "统一倍速", presetSpeed),
+            el("label", {}, "目标最短（秒）", targetMin), el("label", {}, "目标最长（秒）", targetMax)),
+          button("生成户外互动精剪", "primary small", () => generateMaterialInteractionSecondPass(candidate, {
+            trim_head: trimHead.checked, trim_tail: trimTail.checked,
+            extract_highlights: extractHighlights.checked, hook_enabled: hookEnabled.checked,
+            hook_mode: hookEnabled.checked ? hookMode.value : "none",
+            speed: Number(presetSpeed.value), target_min_seconds: Number(targetMin.value), target_max_seconds: Number(targetMax.value),
+          }), candidate.is_active !== true || candidate.status === "rejected" || candidate.qa?.status !== "passed" || data.audio?.status !== "available" || !data.second_pass_preflight?.configured));
+    return el("article", { class: `interaction-candidate is-${candidate.status} ${candidate.is_active ? "is-active" : "is-history"}` },
+      el("div", { class: "interaction-candidate-heading" },
+        el("strong", {}, `${candidate.event_id} · ${candidate.version || "未知版本"} · 原始 ${Number(candidate.source_duration || 0).toFixed(1)} 秒 → 候选 ${Number(candidate.output_duration || 0).toFixed(1)} 秒`),
+        el("span", { class: `interaction-review-status ${candidate.is_active ? "" : "warning"}` }, candidate.is_active ? (candidate.status === "approved" ? "当前 · 已确认入库" : candidate.status === "rejected" ? "当前 · 已弃用" : "当前 · 待人工确认") : `历史版本 · 已由 ${candidate.superseded_by || "新候选"} 替代`)),
+      previewPlayer,
+      boundary ? el("p", { class: "minor" }, boundary) : null,
+      el("p", { class: "minor" }, candidate.audio_policy === "disabled" ? "未使用转写：只保留连续互动范围，不做内部停顿压缩。" : `音频证据：${audioLabels[candidate.audio_status] || candidate.audio_status || "待核验"}`),
+      candidate.audio_policy !== "disabled" ? el("p", { class: "minor" },
+        `局部画面门：${candidate.pause_visual_status === "available" ? "已完成" : candidate.pause_visual_status === "partial" ? "部分完成，失败窗口已保留" : "不可用，已保守保留"} · ` +
+        `${candidate.pause_visual_metadata?.window_count || 0}个疑点 / ${candidate.pause_visual_metadata?.frame_count || 0}帧`) : null,
+      ...warnings,
+      removed.length ? el("div", { class: "interaction-removals" }, ...removed) : el("p", { class: "minor" }, "本候选没有安全证据支持的内部删减。"),
+      secondPassPreset,
+      el("div", { class: "inline-actions" },
+        button("回看原片", "quiet small", () => seek(candidate.event_start)),
+        button("保存调整并更新一次预览", "primary small", () => saveMaterialInteractionEdits(candidate), terminal || !hasStagedEdits),
+        button("撤销候选操作", "quiet small", () => updateMaterialInteractionCandidate(candidate, "undo"), terminal || !candidate.can_undo),
+        button("确认入库", "primary small", () => updateMaterialInteractionCandidate(candidate, "approve"), terminal || hasStagedEdits || candidate.qa?.status !== "passed"),
+        button("弃用候选", "danger small", () => updateMaterialInteractionCandidate(candidate, "reject"), terminal),
+      ));
+  });
+  const secondPassCards = (data.second_pass_candidates || []).map((candidate) => {
+    const terminal = ["approved", "rejected"].includes(candidate.status);
+    const parentCandidate = (data.candidates || []).find((item) => item.plan_id === candidate.parent?.plan_id);
+    const originalPreview = parentCandidate?.preview?.path
+      ? el("video", { controls: "", preload: "metadata", src: mediaURL(projectId, parentCandidate.preview.path), "aria-label": `${candidate.plan_id} 第一次完整切片` })
+      : el("p", { class: "minor warning" }, "第一次完整切片预览当前不可播放。原始父合同仍保留。" );
+    const finePreview = candidate.preview?.path
+      ? el("video", { controls: "", preload: "metadata", src: mediaURL(projectId, candidate.preview.path), "aria-label": `${candidate.plan_id} 二次剪辑候选` })
+      : el("p", { class: "minor warning" }, "二次剪辑预览当前不可播放或已经过期。" );
+    const draft = secondPassDraft(candidate);
+    let saveButton = null;
+    const markDirty = (mutator) => {
+      stageSecondPass(candidate, mutator);
+      if (saveButton) saveButton.disabled = false;
+    };
+    const speed = el("select", { "aria-label": `${candidate.plan_id} 调整统一倍速`, disabled: terminal ? "" : null },
+      ...[1, 1.1, 1.25].map((value) => el("option", { value: String(value), selected: Number(draft.speed) === value ? "" : null }, `${value.toFixed(value === 1 ? 1 : 2).replace(/0$/, "")}×`)));
+    speed.addEventListener("change", () => markDirty((next) => { next.speed = Number(speed.value); }));
+    const hooks = candidate.story?.hook_candidates || [];
+    const hook = el("select", { "aria-label": `${candidate.plan_id} 选择精彩开场`, disabled: terminal ? "" : null },
+      el("option", { value: "__none__", selected: draft.hookCandidateId === "__none__" ? "" : null }, "不使用精彩前置"),
+      ...hooks.map((item) => el("option", { value: item.id, selected: draft.hookCandidateId === item.id ? "" : null }, `${item.id} · ${Number(item.duration || 0).toFixed(1)}秒 · ${item.reason || "互动亮点"}`)));
+    hook.addEventListener("change", () => markDirty((next) => { next.hookCandidateId = hook.value; }));
+    const hookMode = el("select", { "aria-label": `${candidate.plan_id} 精彩前置方式`, disabled: terminal ? "" : null },
+      el("option", { value: "move", selected: draft.hookMode === "move" ? "" : null }, "移动到片头（正文不重复）"),
+      el("option", { value: "repeat", selected: draft.hookMode === "repeat" ? "" : null }, "预告式重复"));
+    hookMode.addEventListener("change", () => markDirty((next) => { next.hookMode = hookMode.value; }));
+    const groupRows = (candidate.story?.groups || []).map((group) => {
+      const selected = el("input", { type: "checkbox", checked: draft.groupStates[group.id] ? "" : null, disabled: terminal ? "" : null, "aria-label": `${group.id} 保留对话组` });
+      const locked = el("input", { type: "checkbox", checked: draft.lockedStates[group.id] ? "" : null, disabled: terminal ? "" : null, "aria-label": `${group.id} 锁定对话组` });
+      selected.addEventListener("change", () => markDirty((next) => { next.groupStates[group.id] = selected.checked; }));
+      locked.addEventListener("change", () => markDirty((next) => { next.lockedStates[group.id] = locked.checked; }));
+      const range = group.source_range || {};
+      const locateOriginal = () => {
+        seek(Math.max(0, Number(range.start || 0) - 1.5));
+        player.play().catch(() => {});
+        player.scrollIntoView({ block: "center", behavior: "smooth" });
+      };
+      const mapped = sourceTimeToSecondPassOutputs(candidate, (Number(range.start || 0) + Number(range.end || 0)) / 2);
+      const locateFine = (item) => {
+        if (finePreview.tagName !== "VIDEO") return showToast("当前二次剪辑没有可播放预览", true);
+        finePreview.currentTime = Math.max(0, item.seconds - 1.5);
+        finePreview.play().catch(() => {});
+      };
+      return el("article", { class: `interaction-story-group ${draft.groupStates[group.id] ? "is-kept" : "is-dropped"} ${draft.lockedStates[group.id] ? "is-locked" : ""}` },
+        el("div", { class: "interaction-story-group-head" },
+          el("label", {}, selected, el("strong", {}, `${group.id} · ${group.summary || group.type}`)),
+          el("label", { class: "interaction-story-lock" }, locked, "锁定"),
+          el("span", { class: "minor" }, `${Number(range.start || 0).toFixed(2)}—${Number(range.end || 0).toFixed(2)}秒 · ${group.type}`)),
+        el("p", { class: "minor" }, group.reason || "未记录取舍理由"),
+        el("div", { class: "interaction-story-lines" }, ...(group.utterances || []).map((line) =>
+          el("p", {}, el("strong", {}, `${Number(line.start || 0).toFixed(2)}s`), ` ${line.text || ""}`))),
+        group.depends_on?.length ? el("p", { class: "minor warning" }, `依赖前文：${group.depends_on.join("、")}`) : null,
+        el("div", { class: "inline-actions" },
+          button("定位原片", "quiet small", locateOriginal),
+          ...mapped.map((item) => button(item.role === "hook" ? "定位精彩前置" : "定位正文", "quiet small", () => locateFine(item))),
+          !mapped.length ? el("span", { class: "minor" }, "当前未进入候选，仅可回看原片") : null));
+    });
+    saveButton = button("保存调整并更新一次预览", "primary small", () => updateMaterialInteractionSecondPass(candidate, "save_edits"), terminal || !draft.dirty);
+    const statusCopy = candidate.status === "approved" ? "已确认入库" : candidate.status === "rejected" ? "已弃用" : "待人工确认";
+    return el("article", { class: `interaction-second-pass-card is-${candidate.status}`, id: `second-pass-${candidate.plan_id}` },
+      el("div", { class: "interaction-candidate-heading" },
+        el("div", {}, el("strong", {}, `户外互动精剪 · ${candidate.plan_id}`),
+          el("p", { class: "minor" }, `父版本 ${candidate.parent?.plan_id || "未知"} / r${candidate.parent?.revision ?? "?"} · 当前 r${candidate.revision}`)),
+        el("span", { class: `interaction-review-status ${candidate.parent_current ? "" : "warning"}` }, candidate.parent_current ? statusCopy : "父版本已变化")),
+      el("div", { class: "interaction-second-pass-comparison" },
+        el("div", {}, el("strong", {}, "第一次完整切片"), originalPreview),
+        el("div", {}, el("strong", {}, "二次剪辑候选"), finePreview)),
+      el("div", { class: "interaction-second-pass-metrics" },
+        el("span", {}, `父内容 ${Number(candidate.source_duration || 0).toFixed(1)}秒`),
+        el("span", {}, `正文保留 ${Number(candidate.body_source_duration || 0).toFixed(1)}秒`),
+        el("span", {}, `内容删减 ${Number(candidate.removed_source_seconds || 0).toFixed(1)}秒`),
+        el("span", {}, `精彩前置 ${Number(candidate.hook_source_duration || 0).toFixed(1)}秒`),
+        el("span", { class: Number(candidate.repeated_source_seconds || 0) > 0 ? "warning" : "is-good" }, `源片重复 ${Number(candidate.repeated_source_seconds || 0).toFixed(1)}秒`),
+        el("span", {}, `输出 ${Number(candidate.output_duration || 0).toFixed(1)}秒`),
+        el("span", { class: candidate.target_duration_status === "within_target" ? "is-good" : "warning" }, candidate.target_duration_status === "within_target" ? "目标时长内" : "未强行凑目标时长")),
+      el("p", {}, candidate.story?.summary || "已按完整语义组形成待审方案"),
+      el("p", { class: "minor" }, `语义模型：${candidate.story_identity?.model || "未记录"} · 本次新增调用 ${candidate.usage?.semantic_model_calls ?? "未记录"} · 分析 ${Number(candidate.usage?.analysis_elapsed_seconds || 0).toFixed(1)}秒 · 本地渲染 ${Number(candidate.usage?.render_elapsed_seconds || 0).toFixed(1)}秒${candidate.usage?.analysis_cache_hit ? " · 分析缓存命中" : ""}${candidate.usage?.render_cache_hit ? " · 渲染缓存命中" : ""}`),
+      ...(candidate.warnings || []).map((warning) => el("p", { class: "minor warning" }, warning)),
+      !candidate.parent_current ? el("p", { class: "minor warning" }, candidate.parent_stale_reason || "父版本已变化；此方案仅供回看，请从当前第一次切片重新生成。") : null,
+      candidate.content_qa?.status === "needs_adjustment" ? el("p", { class: "minor warning" }, "内容质量门未通过：请缩短到目标最长时长并消除非预期重复后再确认入库。") : null,
+      el("div", { class: "interaction-second-pass-controls" },
+        el("label", {}, "统一倍速", speed), el("label", {}, "精彩前置", hook), el("label", {}, "前置方式", hookMode),
+        el("span", { class: "minor" }, "连续修改只保存在页面草稿中；点击一次保存后才会重渲染。")),
+      el("div", { class: "interaction-story-groups" }, ...groupRows),
+      el("div", { class: "inline-actions" },
+        saveButton,
+        button("撤销上一步", "quiet small", () => updateMaterialInteractionSecondPass(candidate, "undo"), terminal || !candidate.can_undo || draft.dirty),
+        button("确认入库", "primary small", () => updateMaterialInteractionSecondPass(candidate, "approve"), terminal || draft.dirty || !candidate.parent_current || candidate.qa?.status !== "passed" || (candidate.version !== "interaction-second-pass-plan-v1" && candidate.content_qa?.status !== "passed") || candidate.preview?.stale === true),
+        button("弃用候选", "danger small", () => updateMaterialInteractionSecondPass(candidate, "reject"), terminal)));
+  });
+  const secondPassJob = data.second_pass_job || {};
+  const secondPassJobNotice = ["queued", "generating", "ambiguous", "failed"].includes(secondPassJob.status)
+    ? el("div", { class: `interaction-second-pass-job is-${secondPassJob.status}` },
+        el("strong", {}, secondPassJob.status === "queued" ? "二次剪辑已排队" : secondPassJob.status === "generating" ? "二次剪辑正在处理" : secondPassJob.status === "ambiguous" ? "模型请求受理状态待核对" : "二次剪辑未完成"),
+        el("span", {}, secondPassJob.status === "generating" ? `当前阶段：${secondPassJob.stage || "处理中"}` : secondPassJob.error || "任务会保留现场，不会自动重复收费请求。"))
+    : null;
+  materialInteractionPanel = el("section", { class: "panel material-interactions" },
+    el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "完整互动候选目录"),
+      el("p", {}, `${data.asset_name} · ${review?.events?.length || 0}条人工目录 · ${audioLabels[data.audio?.status] || "音频待核验"}`)),
+      button("收起", "quiet small", () => { player.pause(); materialInteractionDetails = null; materialInteractionPanel = null; render(); })),
+    el("div", { class: "panel-body interaction-layout" },
+      el("div", { class: "interaction-preview" }, player, playbackNotice,
+        el("p", { class: "minor" }, data.proxy?.status === "completed" ? "当前播放浏览器审核代理；原片未被修改。" : data.proxy?.status === "source_compatible" ? "原片编码已兼容浏览器，无需额外转码。" : `当前回退播放原片。${data.proxy?.error || "尚无审核代理。"}`),
+        el("p", { class: "minor" }, data.notice),
+        el("p", { class: "minor" }, `模型：${data.identity?.model || "未记录"} · 视觉请求${data.usage?.model_calls ?? 0}次 · 联系表${data.usage?.contact_sheets ?? 0}张 · 边界补证${data.usage?.detail_frames ?? 0}帧 · 初次处理${Math.round(data.usage?.elapsed_seconds || 0)}秒（不是费用账单）`),
+        ...(data.analysis_warnings || []).map((warning) => el("p", { class: "minor warning" }, `${warning.window_id || "分析窗口"}：${warning.reason}`))),
+      el("div", { class: "interaction-events" },
+        review ? el("div", { class: "interaction-review-toolbar" },
+          el("span", {}, `待审核 ${review.counts.pending} · 保留 ${review.counts.kept} · 弃用 ${review.counts.discarded} · 版本 ${review.revision}`),
+          button("合并所选同组事件", "quiet small", () => updateMaterialInteractionReview("merge", { event_ids: [...materialInteractionMergeSelection] })),
+          button("撤销上一步", "quiet small", () => updateMaterialInteractionReview("undo"), !review.can_undo),
+          el("span", { class: "minor" }, review.confirmed_catalog.notice)) : null,
+        ...(events.length ? events : [el("p", {}, "没有找到有充分证据的互动候选；可回看原片或改用通用概览。")])),
+      el("div", { class: "interaction-candidates" },
+        el("div", { class: "interaction-review-toolbar" },
+          el("strong", {}, `智能分析与候选片段 · 当前 ${data.candidate_counts?.active ?? 0} / 历史 ${data.candidate_counts?.history ?? 0}`),
+          el("select", { "aria-label": "筛选互动候选", onchange: (event) => { materialInteractionCandidateFilter = event.target.value; materialInteractionPanel = null; render(); } },
+            el("option", { value: "all", selected: materialInteractionCandidateFilter === "all" ? "" : null }, "全部候选"),
+            el("option", { value: "history", selected: materialInteractionCandidateFilter === "history" ? "" : null }, "历史版本"),
+            el("option", { value: "review", selected: materialInteractionCandidateFilter === "review" ? "" : null }, "待人工确认"),
+            el("option", { value: "partial", selected: materialInteractionCandidateFilter === "partial" ? "" : null }, "需回看"),
+            el("option", { value: "approved", selected: materialInteractionCandidateFilter === "approved" ? "" : null }, "已入库"),
+            el("option", { value: "rejected", selected: materialInteractionCandidateFilter === "rejected" ? "" : null }, "已弃用")),
+          el("span", { class: "minor" }, "预览 QA 通过不等于批准；确认后只登记到素材库。")),
+        ...(candidateCards.length ? candidateCards : [el("p", { class: "minor" }, "尚未生成精剪预览；可从上方任一互动事件生成。")]),
+      ),
+      el("div", { class: "interaction-second-pass-list" },
+        el("div", { class: "interaction-review-toolbar" },
+          el("strong", {}, `户外互动二次剪辑 · ${secondPassCards.length}`),
+          el("span", { class: "minor" }, "以完整切片为只读父版本；系统出方案和预览，人工决定是否入库。")),
+        secondPassJobNotice,
+        ...(secondPassCards.length ? secondPassCards : [el("p", { class: "minor" }, "尚未建立二次剪辑。请在上方满意的完整互动候选中展开“二次剪辑（人工触发）”。")]),
+      )));
+  return materialInteractionPanel;
+}
+
+async function startAssetMaterialOverview(asset, profile = "efficient", recognizeAudio = false) {
+  const selectedChapterIds = selectedOverviewChaptersForRemote(asset);
+  if (selectedChapterIds === null) return;
+  const action = profile === "detailed"
+    ? "复用联系表概览，并仅对模型标记的候选原帧做精细复核"
+    : "先在本机抽帧、去重并生成联系表，再发送联系表生成粗粒度画面地图";
+  const confirmed = window.confirm(
+    `${action}。\n\n不会上传整条视频；${recognizeAudio ? "会提取音轨并发送给豆包取得分句时间线" : "音频识别关闭，不会上传音轨"}；可能产生模型费用。确认后任务会自动完成上述流程，不会要求第二次确认。\n确认开始吗？`,
+  );
+  if (!confirmed) return;
+  try {
+    materialOverviewDetails = null;
+    state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/jobs`, {
+      method: "POST",
+      body: {
+        stage: "overview",
+        profile,
+        recognize_audio: Boolean(recognizeAudio),
+        transcript_provider: recognizeAudio ? "doubao" : "none",
+        remote_asr_confirmed: Boolean(recognizeAudio),
+        remote_vision_confirmed: true,
+        selected_chapter_ids: selectedChapterIds,
+      },
+    });
+    showToast(profile === "detailed"
+      ? "精细化概览已开始：复用联系表后，仅按候选读取原始帧"
+      : "高效率内容处理已开始：先生成联系表，再自动完成画面概览");
+  } catch (error) {
+    showToast(error.message || "快速概览启动失败", true);
+  }
+  render();
+}
+
+async function loadAssetMaterialOverview(asset) {
+  try {
+    materialOverviewDetails = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/overview`);
+    showToast(`已加载 ${materialOverviewDetails.sheets?.length || 0} 张联系表；点击单元格可打开原视频对应时间`);
+  } catch (error) {
+    showToast(error.message || "快速概览读取失败", true);
+  }
+  render();
+}
+
+function openOverviewCell(overview, cell) {
+  const path = overview?.source_video_path;
+  const seconds = Number(cell?.actual_pts_seconds);
+  if (!path || !Number.isFinite(seconds)) return showToast("该联系表单元格缺少可定位的原视频时间", true);
+  const url = `${mediaURL(projectId, path)}#t=${Math.max(0, seconds).toFixed(3)}`;
+  window.open(url, "_blank", "noopener");
+}
+
+function openLocalMaterialSourcePreview(candidate) {
+  const asset = (state?.assets || []).find((item) => item.id === candidate?.asset_id);
+  const seconds = Number(candidate?.source_in_seconds);
+  if (!asset?.path || !Number.isFinite(seconds)) return showToast("该素材候选缺少可预览的原视频区间", true);
+  window.open(`${mediaURL(projectId, asset.path)}#t=${Math.max(0, seconds).toFixed(3)}`, "_blank", "noopener");
 }
 
 async function requestAssetMediaRecommendations(asset) {
@@ -6535,17 +8057,32 @@ function renderAssets() {
     const currentIndexJob = ((state.automation || {}).media_index || {});
     const indexRunning = currentIndexJob.asset_id === asset.id && ["queued", "generating"].includes(currentIndexJob.status);
     const videoActions = String(asset.type || "").toLowerCase() === "video" && row.status !== "trashed" ? el("div", { class: "asset-media-index-actions" },
-      button(indexRunning ? "分析中…" : indexState.coarse_index_path ? "重建粗筛" : "粗筛素材", "quiet small", () => startAssetMediaCoarseIndex(asset, false), indexRunning),
+      materialAnalysisControls(asset, indexRunning),
+      indexState.interaction_index_path ? button("查看互动目录", "quiet small", () => loadAssetMaterialInteractions(asset), indexRunning) : null,
+      button(indexRunning ? "分析中…" : indexState.overview_status === "completed" ? "重新高效率内容处理（确认）" : "高效率内容处理（确认）", "quiet small", () => startAssetMaterialOverview(asset), indexRunning),
+      indexState.overview_index_path ? button("查看联系表", "quiet small", () => loadAssetMaterialOverview(asset), indexRunning) : null,
+      indexState.overview_status === "completed" ? button("升级精细化（确认）", "quiet small", () => startAssetMaterialOverview(asset, "detailed"), indexRunning) : null,
+      button(indexRunning ? "分析中…" : indexState.coarse_index_path ? "重建粗筛" : "粗筛素材", "quiet small", () => startAssetMediaCoarseIndex(asset), indexRunning),
       indexState.coarse_index_path && (indexState.transcript_status || {}).status !== "available"
-        ? button("补本地语音语义", "quiet small", () => startAssetMediaCoarseIndex(asset, true), indexRunning)
+        ? button("补本地语音语义", "quiet small", () => startAssetMediaCoarseIndex(asset, "local"), indexRunning)
+        : null,
+      indexState.coarse_index_path && (indexState.transcript_status || {}).status !== "available"
+        ? button("豆包语音识别（确认）", "quiet small", () => startAssetDoubaoTranscript(asset), indexRunning)
         : null,
       indexState.coarse_index_path ? button("精筛区间", "quiet small", () => startAssetMediaFineIndex(asset), indexRunning) : null,
       indexState.coarse_index_path ? button("按台词找候选", "quiet small", () => requestAssetMediaRecommendations(asset), indexRunning) : null,
       button(indexState.vision_index_path ? "重新理解画面" : "理解画面（Luna）", "quiet small", () => startAssetVisionUnderstanding(asset), indexRunning),
       indexState.vision_index_path ? button("查看画面描述", "quiet small", () => loadAssetVisionDetails(asset), indexRunning) : null,
-      indexRunning ? el("span", { class: "minor" }, `${(currentIndexJob.progress || {}).message || (currentIndexJob.stage === "fine" ? "精筛正在运行" : currentIndexJob.stage === "vision" ? "画面理解正在运行" : "粗筛正在运行")}；同一媒体运行资源不会并发。`) : null,
-      indexState.status === "completed" ? el("span", { class: "minor" }, `已完成${indexState.stage === "fine" ? "精筛" : indexState.stage === "vision" ? "画面理解" : "粗筛"}${indexState.vision_shot_count ? ` · ${indexState.vision_shot_count} 个镜头 / ${indexState.vision_frame_count || 0} 张送模帧` : indexState.segment_count ? ` · ${indexState.segment_count} 个粗筛窗口` : ""}`) : null,
-      indexState.status === "failed" ? el("span", { class: "minor warning" }, indexState.error || "素材分析失败") : null,
+      indexRunning ? el("span", { class: "minor" }, `${(currentIndexJob.progress || {}).message || (currentIndexJob.stage === "interaction" ? "户外互动正在分析" : currentIndexJob.stage === "overview" ? "快速概览正在运行" : currentIndexJob.stage === "fine" ? "精筛正在运行" : currentIndexJob.stage === "vision" ? "画面理解正在运行" : "粗筛正在运行")}；同一媒体运行资源不会并发。`) : null,
+      indexState.status === "completed" ? el("span", { class: "minor" }, `已完成${indexState.stage === "interaction" ? "户外互动分析" : indexState.stage === "overview" ? "快速概览" : indexState.stage === "fine" ? "精筛" : indexState.stage === "vision" ? "画面理解" : "粗筛"}${indexState.stage === "interaction" ? ` · ${indexState.interaction_event_count || 0} 条互动候选` : indexState.overview_sheet_count ? ` · ${indexState.overview_sheet_count} 张联系表 / ${indexState.overview_frame_count || 0} 张入选帧` : indexState.vision_shot_count ? ` · ${indexState.vision_shot_count} 个镜头 / ${indexState.vision_frame_count || 0} 张送模帧` : indexState.segment_count ? ` · ${indexState.segment_count} 个粗筛窗口` : ""}${indexState.overview_selection_notice ? ` · ${indexState.overview_selection_notice}` : ""}`) : null,
+      ["failed", "ambiguous"].includes(indexState.status) ? el("div", { class: "material-analysis-failure" },
+        el("span", { class: "minor warning" }, indexState.error || "素材分析未完成；请核对服务状态"),
+        indexState.error_detail?.safe_resume_point ? el("span", { class: "minor" }, `安全恢复点：${indexState.error_detail.safe_resume_point}`) : null,
+        indexState.error_detail?.preserved?.length ? el("span", { class: "minor" }, `已保留：${indexState.error_detail.preserved.join("、")}`) : null,
+        indexState.status === "ambiguous" && indexState.stage === "interaction"
+          ? button("核实未受理后重新确认并续跑", "danger small", () => resolveAmbiguousMaterialInteraction(asset), indexRunning || localMaterialBatchActive())
+          : null,
+      ) : null,
     ) : null;
     body.append(el("tr", { class: `asset-audit-row is-${row.status}` },
       el("td", { class: "asset-select-cell" }, checkbox),
@@ -6564,6 +8101,36 @@ function renderAssets() {
     factBlock("重复文件", `${summary.duplicate_group_count || 0} 组`, "只提示，不会自动删除"),
     factBlock("需处理", `${(summary.missing_count || 0) + (summary.record_only_count || 0)}`, `缺失 ${summary.missing_count || 0} · 仅登记 ${summary.record_only_count || 0}`),
   ) : el("div", { class: "asset-audit-empty" }, el("strong", {}, "还未扫描素材库"), el("span", {}, "扫描会识别当前引用、可回收空间、重复文件与缺失路径；不会删除或移动任何文件。"));
+  const persistentAnalysisAssets = (state.assets || []).filter((asset) => {
+    const index = asset.media_index || {};
+    return Boolean(index.interaction_index_path || index.overview_index_path || index.vision_index_path);
+  });
+  const persistentAnalysisPanel = persistentAnalysisAssets.length ? el("section", { class: "panel material-analysis-results" },
+    el("div", { class: "panel-head" }, el("div", {},
+      el("h4", {}, "智能分析与候选片段"),
+      el("p", {}, "分析结果独立于素材治理扫描；待审候选必须播放确认后才能登记入库。"),
+    )),
+    el("div", { class: "panel-body material-analysis-result-list" }, ...persistentAnalysisAssets.map((asset) => {
+      const index = asset.media_index || {};
+      const candidateCount = Array.isArray(index.interaction_candidates)
+        ? index.interaction_candidates.filter((item) => item && item.plan_id).length : 0;
+      const candidateHistoryCount = Number(index.interaction_candidate_history_count || 0);
+      return el("article", { class: "material-analysis-result" },
+        el("div", {},
+          el("strong", {}, `${asset.id} · ${asset.name || "本地视频"}`),
+          el("span", { class: "minor" }, index.interaction_index_path
+            ? `户外互动 · ${index.interaction_event_count || 0} 条目录 · 当前 ${candidateCount} 条${candidateHistoryCount ? ` / 历史 ${candidateHistoryCount} 条` : ""}`
+            : index.overview_index_path ? `快速概览 · ${index.overview_sheet_count || 0} 张联系表`
+            : `镜头理解 · ${index.vision_shot_count || 0} 个镜头`),
+        ),
+        el("div", { class: "inline-actions" },
+          index.interaction_index_path ? button("查看互动候选", "primary small", () => loadAssetMaterialInteractions(asset)) : null,
+          index.overview_index_path ? button("查看联系表", "quiet small", () => loadAssetMaterialOverview(asset)) : null,
+          index.vision_index_path ? button("查看画面描述", "quiet small", () => loadAssetVisionDetails(asset)) : null,
+        ),
+      );
+    })),
+  ) : null;
   const recommendationPanel = mediaIndexRecommendations ? el("section", { class: "panel asset-media-recommendations" },
     el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "带证据的素材候选"), el("p", {}, `${mediaIndexRecommendations.asset_id} · ${mediaIndexRecommendations.query}`)), button("收起", "quiet small", () => { mediaIndexRecommendations = null; render(); })),
     el("div", { class: "panel-body" },
@@ -6619,8 +8186,87 @@ function renderAssets() {
       })),
     ),
   ) : null;
+  const overviewPanel = materialOverviewDetails ? (() => {
+    const overview = materialOverviewDetails;
+    const overviewAudio = overview.audio || {};
+    const audioUtterances = Array.isArray(overviewAudio.utterances) ? overviewAudio.utterances : [];
+    const audioStatusLabels = {
+      skipped: "关闭",
+      no_audio: "无音轨",
+      no_speech: "未识别到语音",
+      available: `已转写 ${audioUtterances.length} 句`,
+      failed: "识别失败",
+    };
+    const cellsBySheet = new Map();
+    (overview.cells || []).forEach((cell) => {
+      const rows = cellsBySheet.get(cell.sheet_id) || [];
+      rows.push(cell);
+      cellsBySheet.set(cell.sheet_id, rows);
+    });
+    const detailById = new Map((overview.detail?.descriptions || []).map((item) => [item.detail_id, item]));
+    const chapterSummaries = overview.overview?.chapters || [];
+    return el("section", { class: "panel material-overview-details" },
+      el("div", { class: "panel-head" },
+        el("div", {},
+          el("h4", {}, "本地素材快速概览"),
+          el("p", {}, `${overview.asset_name || overview.asset_id} · ${(overview.sampling || {}).budget_max || 0} 帧预算 · ${(overview.sheets || []).length} 张联系表 · 音频识别${audioStatusLabels[overviewAudio.status] || "未请求"}`),
+        ),
+        button("收起", "quiet small", () => { materialOverviewDetails = null; render(); }),
+      ),
+      el("div", { class: "panel-body material-overview-body" },
+        el("div", { class: "material-overview-note" },
+          el("strong", {}, "稀疏采样画面地图"),
+          el("span", {}, "联系表用于定位，不代表逐帧理解；很短的孤立事件可能未被采样。点击编号会在新标签打开原视频对应 PTS，正式采用仍须人工预览。"),
+        ),
+        el("div", { class: "material-overview-statuses" },
+          el("span", {}, `概览：${overview.overview?.status || "未请求"}`),
+          el("span", {}, `精细化：${overview.detail?.status || "未请求"}`),
+          el("span", {}, `音频：${audioStatusLabels[overviewAudio.status] || "未请求"}`),
+          el("span", {}, `模型请求：${Number(overview.overview?.vision?.request_count || 0) + Number(overview.detail?.vision?.request_count || 0)}`),
+          (overview.overview?.modelled_chapter_ids || []).length ? el("span", {}, `已建模章节：${(overview.overview.modelled_chapter_ids || []).length}/${(overview.sampling || {}).chapter_count || 0}`) : null,
+          overview.sampling?.remote_whole_video_allowed === false ? el("span", { class: "warning" }, "超过 60 分钟：需选章后才能发送联系表") : null,
+        ),
+        overviewAudio.status === "failed" ? el("div", { class: "material-overview-note warning" },
+          el("strong", {}, "音频识别未完成"),
+          el("span", {}, overviewAudio.error || "画面概览已保留；可检查豆包配置后按相同选项重新分析。"),
+        ) : null,
+        audioUtterances.length ? el("details", { class: "material-overview-transcript" },
+          el("summary", {}, `查看带时间线的音频转写（${audioUtterances.length} 句）`),
+          el("div", { class: "material-overview-transcript-list" }, ...audioUtterances.slice(0, 200).map((item) =>
+            el("p", {}, el("strong", {}, `${Number(item.start || 0).toFixed(2)}–${Number(item.end || 0).toFixed(2)}s`), ` ${item.text || ""}`)
+          )),
+        ) : null,
+        chapterSummaries.length ? el("div", { class: "material-overview-chapters" }, ...chapterSummaries.map((chapter) =>
+          el("article", { class: "material-overview-chapter" },
+            el("strong", {}, `${chapter.chapter_id} · ${Number(chapter.start_seconds || 0).toFixed(2)}–${Number(chapter.end_seconds || 0).toFixed(2)} 秒`),
+            el("span", {}, chapter.summary || "模型未提供章节摘要"),
+            chapter.subjects?.length ? el("span", { class: "minor" }, `主体：${chapter.subjects.map((item) => item.name).filter(Boolean).join("、")}`) : null,
+            chapter.actions?.length ? el("span", { class: "minor" }, `动作：${chapter.actions.map((item) => item.name).filter(Boolean).join("、")}`) : null,
+            chapter.unknowns?.length ? el("span", { class: "minor warning" }, `不确定：${chapter.unknowns.join("、")}`) : null,
+          ),
+        )) : el("div", { class: "material-overview-note" }, overview.selection_notice || "本地联系表已保留，但本次画面概览尚未完成；可重新执行“高效率内容处理（确认）”。"),
+        el("div", { class: "material-overview-sheets" }, ...((overview.sheets || []).map((sheet) =>
+          el("article", { class: "material-overview-sheet" },
+            el("div", { class: "material-overview-sheet-head" }, el("strong", {}, `${sheet.sheet_id} · ${sheet.chapter_id}`), el("span", { class: "minor" }, `${sheet.rows}×${sheet.columns}`)),
+            el("img", { src: mediaURL(projectId, sheet.path), alt: `${sheet.sheet_id} 联系表`, loading: "lazy" }),
+            el("div", { class: "overview-cell-list" }, ...((cellsBySheet.get(sheet.sheet_id) || []).map((cell) =>
+              button(`${cell.cell_id.split(":").pop()} · ${Number(cell.actual_pts_seconds).toFixed(2)}s`, "quiet small", () => openOverviewCell(overview, cell))
+            ))),
+          ),
+        ))),
+        (overview.detail?.frames || []).length ? el("div", { class: "material-overview-details-list" }, ...((overview.detail.frames || []).map((frame) => {
+          const description = detailById.get(frame.detail_id) || {};
+          return el("article", { class: "material-overview-detail-frame" },
+            frame.path ? el("img", { src: mediaURL(projectId, frame.path), alt: `${frame.detail_id} 原始证据帧`, loading: "lazy" }) : null,
+            el("div", {}, el("strong", {}, `${frame.detail_id} · ${frame.cell_id}`), el("span", {}, description.summary || frame.reason || "待精细复核"), description.observations?.length ? el("span", { class: "minor" }, description.observations.join("；")) : null),
+          );
+        }))) : null,
+      ),
+    );
+  })() : null;
   return el("section", { class: "page" },
     pageHeader("素材库", "让每个素材有去向，也让每次清理可恢复", "扫描只读取项目资产；批量清理只会移动当前未引用、自动生成或下载的素材到项目回收站，绝不直接永久删除。", el("div", { class: "inline-actions" }, button("扫描素材库", "primary", scanAssetLibrary, assetLibraryAuditLoading), button("AI 生图", "", () => imageDialog.showModal()), button("登记素材", "", () => assetDialog.showModal()))),
+    persistentAnalysisPanel,
     el("section", { class: "panel asset-governance" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "素材健康与回收"), el("p", {}, audit ? `最近扫描：${new Date(audit.generated_at).toLocaleString()}` : "建议在批量生成、替换或合成全片前扫描一次。"))), el("div", { class: "panel-body" },
       metrics,
       audit ? el("div", { class: "asset-governance-actions" },
@@ -6636,6 +8282,8 @@ function renderAssets() {
     el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "可追溯素材台账"), el("p", {}, audit ? `显示 ${rows.length}/${auditRows.length} 项；回收站内素材可直接恢复。` : `${state.assets.length} 个稳定素材，${state.usages.length} 次使用记录`))), el("div", { class: "panel-body" }, audit ? (rows.length ? table : el("div", { class: "empty" }, "当前筛选没有匹配素材。")) : el("div", { class: "empty" }, "请先扫描素材库，生成可治理的引用与空间报告。"))),
     recommendationPanel,
     visionPanel,
+    overviewPanel,
+    renderMaterialInteractions(),
     el("div", { class: "grid-2" },
       el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "来源决策规则"))), el("div", { class: "panel-body policy-list" }, policy("人工提供", "保留原文件路径、提供人和授权信息。"), policy("网络下载", "需补来源链接、许可与下载时间；不能只写“网上找的”。"), policy("AI / 本地生成", "版本、模型或工具信息应记录到素材版本。"))),
       el("section", { class: "panel" }, el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "素材治理规则"))), el("div", { class: "panel-body policy-list" }, policy("当前引用", "时间线、当前配音、数字人、关键帧审核和未结束的局部任务都会锁定素材。"), policy("回收站", "清理是移动而不是删除；保留编号、使用历史和原始路径，可一键恢复。"), policy("重复文件", "按内容哈希识别，仅提示重复，不会擅自删除仍在使用的素材。"))),
@@ -7853,6 +9501,7 @@ function render() {
   if (!state) return;
   reviewCaptionControllers.clear();
   releaseCaptionCanvasObservers();
+  releaseTextOverlayCanvasObservers();
   captureReviewInteractionState();
   app.replaceChildren(renderSidebar(), el("main", { class: "workspace", id: "main-content", tabindex: "-1" }, renderTopbar(), content()));
   restoreReviewInteractionState();

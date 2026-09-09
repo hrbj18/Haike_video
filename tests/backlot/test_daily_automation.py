@@ -858,16 +858,16 @@ def test_windows_process_probe_never_uses_os_kill(monkeypatch):
     assert daily_automation._process_is_alive(456) is False
 
 
-def test_daily_decision_log_records_lite_budget_and_human_gate(tmp_path):
+def test_daily_decision_log_records_plus_default_budget_and_human_gate(tmp_path):
     value = daily_automation._ensure_daily_decision_log(tmp_path)
     decisions = {item["decision_id"]: item for item in value["decisions"]}
-    assert decisions["daily-provider-policy-v1"]["selected"] == "enterprise-lite"
-    assert decisions["daily-provider-policy-v1"]["user_approved"] is True
+    assert decisions["daily-provider-policy-v2"]["selected"] == "plus-48gb"
+    assert decisions["daily-provider-policy-v2"]["user_approved"] is True
     assert decisions["daily-budget-policy-v1"]["selected"] == "cny-5-cap"
     assert decisions["daily-human-publish-gate-v1"]["selected"] == "review-candidate"
 
 
-def test_daily_decision_log_replaces_lite_with_run_authorized_standard(tmp_path):
+def test_daily_decision_log_replaces_plus_with_run_authorized_standard(tmp_path):
     daily_automation._ensure_daily_decision_log(tmp_path)
     value = daily_automation._ensure_daily_decision_log(
         tmp_path,
@@ -876,7 +876,7 @@ def test_daily_decision_log_replaces_lite_with_run_authorized_standard(tmp_path)
             "provider_policy": {"authorized_instance": "default"},
         },
     )
-    decisions = [item for item in value["decisions"] if item["decision_id"] == "daily-provider-policy-v1"]
+    decisions = [item for item in value["decisions"] if item["decision_id"] == "daily-provider-policy-v2"]
 
     assert len(decisions) == 1
     assert decisions[0]["selected"] == "standard-24gb"

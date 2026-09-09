@@ -50,6 +50,12 @@ from backlot.ai_text import (
     test_doubao_text_ai_connection,
     test_text_ai_connection,
 )
+from backlot.doubao_asr import (
+    DoubaoASRError,
+    read_doubao_asr_config,
+    resolve_signed_project_audio,
+    test_doubao_asr_connection,
+)
 from backlot.runninghub_config import (
     RunningHubConfigError,
     read_runninghub_config,
@@ -139,6 +145,14 @@ from backlot.music_library import (
     complete_project_music_upload,
     prepare_project_music_upload,
 )
+from backlot.production_queue import (
+    PRIORITIES as PRODUCTION_PRIORITIES,
+    QUEUE_KINDS as PRODUCTION_QUEUE_KINDS,
+    ProductionQueue,
+    ProductionQueueConflict,
+    ProductionQueueError,
+)
+from backlot.production_queue_worker import ProductionQueueWorker
 from backlot.state import PROJECTS_DIR, REPO_ROOT, list_projects, load_board_state, summarize_project
 from backlot.script_templates import ScriptTemplateError, list_avatar_script_templates, preview_avatar_script_template
 from backlot.script_imports import (
@@ -183,6 +197,7 @@ from backlot.workbench import (
     freeze_segment,
     generate_asset_media_index,
     generate_asset_media_index_batch,
+    generate_asset_material_interaction_candidate,
     generate_avatar_scene_keyframes,
     generate_scene_review_preview,
     generate_scene_motion_visual,
@@ -225,6 +240,19 @@ from backlot.workbench import (
     read_workbench,
     read_asset_media_index_job,
     read_asset_media_index_batch,
+    read_asset_material_overview,
+    read_asset_material_interactions,
+    run_asset_material_interaction_candidate_job,
+    run_asset_material_interaction_second_pass_job,
+    start_asset_material_interaction_candidate_job,
+    start_asset_material_interaction_second_pass_job,
+    initialize_asset_material_interaction_review,
+    update_asset_material_interaction_review,
+    update_asset_material_interaction_candidate,
+    update_asset_material_interaction_second_pass,
+    preflight_asset_material_interactions,
+    preflight_asset_material_interactions_batch,
+    resolve_asset_material_interaction_ambiguity,
     read_asset_material_vision,
     read_music_catalog,
     read_task_center,
@@ -277,9 +305,12 @@ from backlot.workbench import (
     apply_presenter_layout_to_selected_scenes,
     update_presenter_layout_template,
     update_story_headline_layout,
+    update_text_overlay_composition,
+    editable_text_overlay_composition,
     update_subtitle_style_template,
     update_subtitle_preferences_settings,
     update_intake,
+    update_video_type_preset,
     update_script_draft_content,
     update_music_policy,
     update_music_preferences_settings,
@@ -296,6 +327,7 @@ from backlot.workbench import (
 UI_DIR = Path(__file__).resolve().parent / "ui"
 THUMB_CACHE_DIR = REPO_ROOT / ".backlot" / "thumbs"
 THUMB_WIDTHS = (320, 640, 960)
+PRODUCTION_QUEUE_DB_NAME = "production-queue.sqlite3"
 
 # Paths inside a project whose changes are pure noise for the board.
 _IGNORE_PARTS = {"node_modules", ".git", "__pycache__", ".cache"}
@@ -536,6 +568,16 @@ def _delete_project_from_library(project_id: str, payload: dict) -> dict:
     }
 
 
+def _ui_revision(assets: tuple[str, ...]) -> str:
+    digest = hashlib.sha1()
+    for asset in assets:
+        path = UI_DIR / asset
+        if path.is_file():
+            digest.update(asset.encode("utf-8"))
+            digest.update(path.read_bytes())
+    return digest.hexdigest()[:12]
+
+
 def _ui_html(name: str, assets: tuple[str, ...]) -> HTMLResponse:
     html = (UI_DIR / name).read_text(encoding="utf-8")
     for asset in assets:
@@ -546,6 +588,8 @@ def _ui_html(name: str, assets: tuple[str, ...]) -> HTMLResponse:
             # stale JavaScript after an interaction fix.
             version = hashlib.sha1(path.read_bytes()).hexdigest()[:12]
             html = html.replace(f"/ui/{asset}", f"/ui/{asset}?v={version}")
+    revision = _ui_revision(assets)
+    html = html.replace("</head>", f'<script>window.__BACKLOT_UI_REVISION__="{revision}";</script>\n</head>')
     return HTMLResponse(html)
 
 
@@ -657,6 +701,69 @@ def _track_background_task(app: FastAPI, coroutine) -> asyncio.Task:
     return task
 
 
+def _production_queue_db_path() -> Path:
+    """Keep tests isolated when PROJECTS_DIR is replaced with a temp root."""
+
+    pytest_test = os.environ.get("PYTEST_CURRENT_TEST", "")
+    if pytest_test:
+        test_key = hashlib.sha256(pytest_test.encode("utf-8")).hexdigest()[:16]
+        return Path(tempfile.gettempdir()) / "openmontage-production-queue-tests" / str(os.getpid()) / f"{test_key}.sqlite3"
+    return PROJECTS_DIR.parent / ".backlot" / PRODUCTION_QUEUE_DB_NAME
+
+
+def _ensure_production_queue(app: FastAPI) -> ProductionQueue:
+    queue = getattr(app.state, "production_queue", None)
+    if isinstance(queue, ProductionQueue):
+        return queue
+    queue = ProductionQueue(_production_queue_db_path(), PROJECTS_DIR)
+    app.state.production_queue = queue
+    return queue
+
+
+def _enqueue_production_parent(
+    app: FastAPI,
+    project_dir: Path,
+    parent_job_id: str,
+    *,
+    kind: str,
+    source: str = "workbench",
+    priority: str = "normal",
+    frozen_request: dict | None = None,
+    idempotency_key: str | None = None,
+    revive: bool = True,
+) -> dict:
+    queue = _ensure_production_queue(app)
+    queued = queue.submit(
+        project_id=project_dir.name,
+        kind=kind,
+        source=source,
+        priority=priority,
+        parent_job_id=parent_job_id,
+        frozen_request=frozen_request or {},
+        idempotency_key=idempotency_key,
+        revive=revive,
+    )
+    _invalidate_summary(project_dir.name)
+    hub.publish(project_dir.name)
+    return queued
+
+
+async def _production_queue_loop(app: FastAPI) -> None:
+    """Run the single durable production lane owned by this FastAPI process."""
+
+    worker = app.state.production_queue_worker
+    while True:
+        result = await asyncio.to_thread(worker.run_once)
+        if isinstance(result, dict):
+            project_id = str(result.get("project_id") or "")
+            if project_id:
+                _invalidate_summary(project_id)
+                hub.publish(project_id)
+            await asyncio.sleep(0.05)
+        else:
+            await asyncio.sleep(0.6)
+
+
 def _review_preview_job_id(state: dict) -> str:
     return str(state.get("job_id") or "")
 
@@ -671,8 +778,21 @@ def _record_review_preview_recovery_error(app: FastAPI, project_id: str, message
     hub.publish(project_id)
 
 
-def _launch_review_preview_worker(app: FastAPI, project_dir: Path, job_id: str) -> asyncio.Task:
-    """Dispatch exactly one lease-protected parent worker and publish its result."""
+def _launch_review_preview_worker(app: FastAPI, project_dir: Path, job_id: str):
+    """Register a parent in the unified queue.
+
+    The fallback is retained only for small legacy unit tests that construct a
+    bare FastAPI instance outside the application lifespan.
+    """
+
+    if isinstance(getattr(app.state, "production_queue", None), ProductionQueue):
+        return _enqueue_production_parent(
+            app,
+            project_dir,
+            job_id,
+            kind="review_preview",
+            frozen_request={"parent_job_id": job_id},
+        )
 
     async def run_parent() -> None:
         try:
@@ -688,8 +808,17 @@ def _launch_review_preview_worker(app: FastAPI, project_dir: Path, job_id: str) 
     return _track_background_task(app, run_parent())
 
 
-def _launch_avatar_review_preview_worker(app: FastAPI, project_dir: Path, job_id: str) -> asyncio.Task:
-    """Dispatch one lease-protected paid-avatar parent worker."""
+def _launch_avatar_review_preview_worker(app: FastAPI, project_dir: Path, job_id: str):
+    """Register one paid-avatar parent in the same global production lane."""
+
+    if isinstance(getattr(app.state, "production_queue", None), ProductionQueue):
+        return _enqueue_production_parent(
+            app,
+            project_dir,
+            job_id,
+            kind="avatar_review_preview",
+            frozen_request={"parent_job_id": job_id},
+        )
 
     async def run_parent() -> None:
         try:
@@ -715,10 +844,15 @@ def _launch_media_index_worker(app: FastAPI, project_dir: Path, job_id: str) -> 
     existing = registry.get(key)
     if isinstance(existing, asyncio.Task) and not existing.done():
         return existing
+    runtime_lock = getattr(app.state, "media_runtime_lock", None)
+    if runtime_lock is None:
+        runtime_lock = asyncio.Lock()
+        app.state.media_runtime_lock = runtime_lock
 
     async def run_index() -> None:
         try:
-            await asyncio.to_thread(generate_asset_media_index, project_dir, job_id)
+            async with runtime_lock:
+                await asyncio.to_thread(generate_asset_media_index, project_dir, job_id)
         except Exception as exc:
             try:
                 await asyncio.to_thread(mark_asset_media_index_failed, project_dir, job_id, exc)
@@ -749,10 +883,15 @@ def _launch_media_index_batch_worker(app: FastAPI, project_dir: Path, job_id: st
     existing = registry.get(key)
     if isinstance(existing, asyncio.Task) and not existing.done():
         return existing
+    runtime_lock = getattr(app.state, "media_runtime_lock", None)
+    if runtime_lock is None:
+        runtime_lock = asyncio.Lock()
+        app.state.media_runtime_lock = runtime_lock
 
     async def run_batch() -> None:
         try:
-            await asyncio.to_thread(generate_asset_media_index_batch, project_dir, job_id)
+            async with runtime_lock:
+                await asyncio.to_thread(generate_asset_media_index_batch, project_dir, job_id)
         except Exception as exc:
             try:
                 await asyncio.to_thread(mark_asset_media_index_batch_failed, project_dir, job_id, exc)
@@ -764,6 +903,64 @@ def _launch_media_index_batch_worker(app: FastAPI, project_dir: Path, job_id: st
             hub.publish(project_dir.name)
 
     task = _track_background_task(app, run_batch())
+    registry[key] = task
+    return task
+
+
+def _launch_interaction_candidate_worker(app: FastAPI, project_dir: Path, job_id: str) -> asyncio.Task:
+    """Dispatch one durable local fine-cut job on the shared media runtime."""
+    registry = getattr(app.state, "interaction_candidate_tasks", None)
+    if registry is None:
+        registry = {}
+        app.state.interaction_candidate_tasks = registry
+    key = (os.path.normcase(str(project_dir.resolve())), str(job_id))
+    existing = registry.get(key)
+    if isinstance(existing, asyncio.Task) and not existing.done():
+        return existing
+    runtime_lock = getattr(app.state, "media_runtime_lock", None)
+    if runtime_lock is None:
+        runtime_lock = asyncio.Lock()
+        app.state.media_runtime_lock = runtime_lock
+
+    async def run_candidate() -> None:
+        try:
+            async with runtime_lock:
+                await asyncio.to_thread(run_asset_material_interaction_candidate_job, project_dir, job_id)
+        finally:
+            registry.pop(key, None)
+            _invalidate_summary(project_dir.name)
+            hub.publish(project_dir.name)
+
+    task = _track_background_task(app, run_candidate())
+    registry[key] = task
+    return task
+
+
+def _launch_interaction_second_pass_worker(app: FastAPI, project_dir: Path, job_id: str) -> asyncio.Task:
+    """Dispatch semantic second-pass analysis/render on the shared media runtime."""
+    registry = getattr(app.state, "interaction_second_pass_tasks", None)
+    if registry is None:
+        registry = {}
+        app.state.interaction_second_pass_tasks = registry
+    key = (os.path.normcase(str(project_dir.resolve())), str(job_id))
+    existing = registry.get(key)
+    if isinstance(existing, asyncio.Task) and not existing.done():
+        return existing
+    runtime_lock = getattr(app.state, "media_runtime_lock", None)
+    if runtime_lock is None:
+        runtime_lock = asyncio.Lock()
+        app.state.media_runtime_lock = runtime_lock
+
+    async def run_second_pass() -> None:
+        try:
+            async with runtime_lock:
+                await asyncio.to_thread(run_asset_material_interaction_second_pass_job, project_dir, job_id)
+        finally:
+            registry.pop(key, None)
+            _invalidate_summary(project_dir.name)
+            hub.publish(project_dir.name)
+
+    task = _track_background_task(app, run_second_pass())
     registry[key] = task
     return task
 
@@ -1016,6 +1213,31 @@ async def _recover_workbench_background_jobs(app: FastAPI) -> None:
         if should_resume_media_index:
             _launch_media_index_worker(app, project_dir, media_job_id)
 
+        try:
+            workbench_state = await asyncio.to_thread(read_workbench, project_dir)
+            candidate_job = ((workbench_state.get("automation") or {}).get("interaction_candidate") or {})
+            candidate_job_id = str(candidate_job.get("job_id") or "")
+            should_resume_candidate = bool(candidate_job_id) and candidate_job.get("status") in {"queued", "generating"}
+        except Exception:
+            should_resume_candidate = False
+            candidate_job_id = ""
+        if should_resume_candidate:
+            _launch_interaction_candidate_worker(app, project_dir, candidate_job_id)
+
+        try:
+            workbench_state = await asyncio.to_thread(read_workbench, project_dir)
+            second_pass_job = ((workbench_state.get("automation") or {}).get("interaction_second_pass") or {})
+            second_pass_job_id = str(second_pass_job.get("job_id") or "")
+            should_resume_second_pass = (
+                bool(second_pass_job_id)
+                and second_pass_job.get("status") in {"queued", "generating"}
+            )
+        except Exception:
+            should_resume_second_pass = False
+            second_pass_job_id = ""
+        if should_resume_second_pass:
+            _launch_interaction_second_pass_worker(app, project_dir, second_pass_job_id)
+
 
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
@@ -1026,9 +1248,16 @@ async def _lifespan(app: FastAPI):
     app.state.recovery_tasks = set()
     app.state.media_index_tasks = {}
     app.state.media_index_batch_tasks = {}
+    app.state.interaction_candidate_tasks = {}
+    app.state.interaction_second_pass_tasks = {}
+    app.state.media_runtime_lock = asyncio.Lock()
     app.state.review_preview_recovery_errors = {}
+    queue = _ensure_production_queue(app)
+    app.state.production_queue_worker = ProductionQueueWorker(queue, PROJECTS_DIR)
     await _recover_avatar_background_jobs(app)
     await _recover_workbench_background_jobs(app)
+    queue_task = asyncio.create_task(_production_queue_loop(app))
+    app.state.production_queue_task = queue_task
     # Do not resume a daily production run merely because the web server was
     # restarted.  A browser/server restart is not user approval to continue
     # paid Voicebox or RunningHub stages.  The durable daily CLI task owns the
@@ -1037,11 +1266,14 @@ async def _lifespan(app: FastAPI):
     try:
         yield
     finally:
+        queue_task.cancel()
         task.cancel()
         for recovery_task in app.state.recovery_tasks:
             recovery_task.cancel()
         if app.state.recovery_tasks:
             await asyncio.gather(*app.state.recovery_tasks, return_exceptions=True)
+        with suppress(asyncio.CancelledError):
+            await queue_task
         with suppress(asyncio.CancelledError):
             await task
 
@@ -1054,6 +1286,169 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     async def health() -> dict:
         return {"ok": True, "app": "backlot"}
+
+    # ---- Unified cross-project production queue -----------------------
+
+    @app.get("/api/production-queue")
+    async def get_production_queue(project_id: str | None = None, limit: int = 80) -> dict:
+        if project_id is not None:
+            _safe_project_dir(project_id)
+        return await asyncio.to_thread(
+            _ensure_production_queue(app).list,
+            project_id=project_id,
+            limit=limit,
+        )
+
+    @app.get("/api/production-queue/jobs/{job_id}")
+    async def get_production_queue_job(job_id: str) -> dict:
+        queue = _ensure_production_queue(app)
+        try:
+            job = await asyncio.to_thread(queue.get, job_id)
+            job["events"] = await asyncio.to_thread(queue.events, job_id)
+            return job
+        except ProductionQueueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    @app.post("/api/production-queue/jobs")
+    async def post_production_queue_job(payload: dict = Body(...)) -> dict:
+        allowed = {"project_id", "kind", "priority", "idempotency_key", "request"}
+        extras = set(payload) - allowed
+        if extras:
+            raise HTTPException(status_code=422, detail="统一队列请求包含不受支持字段：" + "、".join(sorted(extras)))
+        aliases = {
+            "review-preview": "review_preview",
+            "avatar-review-preview": "avatar_review_preview",
+            "full-preview": "full_preview",
+        }
+        kind = aliases.get(str(payload.get("kind") or ""), str(payload.get("kind") or ""))
+        if kind not in PRODUCTION_QUEUE_KINDS:
+            raise HTTPException(status_code=422, detail="生产类型不在统一队列白名单中")
+        priority = str(payload.get("priority") or "normal")
+        if priority not in PRODUCTION_PRIORITIES:
+            raise HTTPException(status_code=422, detail="优先级只能是 priority、normal 或 background")
+        project_id = str(payload.get("project_id") or "")
+        project_dir = _safe_project_dir(project_id)
+        request_payload = payload.get("request") or {}
+        if not isinstance(request_payload, dict):
+            raise HTTPException(status_code=422, detail="request 必须是 JSON 对象")
+        explicit_idempotency_key = str(payload.get("idempotency_key") or "").strip()
+        if explicit_idempotency_key:
+            try:
+                existing = await asyncio.to_thread(
+                    _ensure_production_queue(app).find_by_idempotency_key,
+                    explicit_idempotency_key,
+                )
+            except ProductionQueueError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            if existing is not None:
+                if existing["project_id"] != project_id or existing["kind"] != kind:
+                    raise HTTPException(status_code=409, detail="幂等键已被另一条生产请求占用")
+                return {"queue_job": existing, "parent": None, "idempotent_replay": True}
+        try:
+            if kind == "review_preview":
+                _validate_review_preview_request(
+                    request_payload,
+                    allowed={"confirmed", "network_confirmed", "text_ai_confirmed", "visual"},
+                )
+                parent = await asyncio.to_thread(start_review_preview_job, project_dir, request_payload)
+                parent_job_id = _review_preview_job_id(parent)
+            elif kind == "avatar_review_preview":
+                _validate_review_preview_request(
+                    request_payload,
+                    allowed={"confirmed", "budget_limit_cny", "allow_plus_on_oom", "visual"},
+                )
+                parent = await asyncio.to_thread(start_avatar_review_preview_job, project_dir, request_payload)
+                parent_job_id = _review_preview_job_id(parent)
+            else:
+                _validate_review_preview_request(request_payload, allowed={"confirmed"})
+                parent = await asyncio.to_thread(start_full_preview_render, project_dir, request_payload)
+                preview = ((parent.get("automation") or {}).get("preview_render") or {})
+                parent_job_id = str(preview.get("job_id") or "")
+            if not parent_job_id:
+                raise ProductionQueueError("底层生产任务缺少稳定任务编号")
+            queue_job = _enqueue_production_parent(
+                app,
+                project_dir,
+                parent_job_id,
+                kind=kind,
+                source="codex",
+                priority=priority,
+                frozen_request=request_payload,
+                idempotency_key=explicit_idempotency_key or None,
+            )
+        except (ReviewPreviewConflict, StaleReviewPreviewWorker, AvatarReviewPreviewConflict, StaleAvatarReviewPreviewWorker, AmbiguousAvatarOperation, ProductionQueueConflict) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ReviewPreviewError, AvatarReviewPreviewError, WorkbenchError, ProductionQueueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _invalidate_summary(project_id)
+        hub.publish(project_id)
+        return {"queue_job": queue_job, "parent": _public_review_preview_payload(parent)}
+
+    @app.post("/api/production-queue/jobs/{job_id}/priority")
+    async def set_production_queue_priority(job_id: str, payload: dict = Body(...)) -> dict:
+        try:
+            return await asyncio.to_thread(
+                _ensure_production_queue(app).set_priority,
+                job_id,
+                str(payload.get("priority") or ""),
+            )
+        except ProductionQueueConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ProductionQueueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/production-queue/jobs/{job_id}/{action}")
+    async def act_on_production_queue_job(
+        job_id: str,
+        action: str,
+        payload: dict = Body(default={}),
+    ) -> dict:
+        if action not in {"pause", "resume", "cancel", "retry"}:
+            raise HTTPException(status_code=404, detail="未知的生产队列操作")
+        queue = _ensure_production_queue(app)
+        try:
+            if action == "retry":
+                job = await asyncio.to_thread(queue.get, job_id)
+                project_dir = _safe_project_dir(str(job["project_id"]))
+                if job["kind"] == "review_preview":
+                    await asyncio.to_thread(
+                        resume_review_preview_job,
+                        project_dir,
+                        str(job["parent_job_id"]),
+                        {},
+                    )
+                elif job["kind"] == "avatar_review_preview":
+                    await asyncio.to_thread(
+                        resume_avatar_review_preview_job,
+                        project_dir,
+                        str(job["parent_job_id"]),
+                        {},
+                    )
+                else:
+                    raise ProductionQueueConflict("全片预览失败请重新建立任务，不能复用旧任务编号")
+            operation = getattr(queue, action)
+            result = await asyncio.to_thread(operation, job_id)
+        except (ReviewPreviewConflict, StaleReviewPreviewWorker, AvatarReviewPreviewConflict, StaleAvatarReviewPreviewWorker, AmbiguousAvatarOperation, ProductionQueueConflict) as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except (ReviewPreviewError, AvatarReviewPreviewError, WorkbenchError, ProductionQueueError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        project_id = str(result.get("project_id") or "")
+        if project_id:
+            _invalidate_summary(project_id)
+            hub.publish(project_id)
+        return result
+
+    @app.get("/api/asr/doubao/config")
+    async def doubao_asr_config() -> dict:
+        return read_doubao_asr_config()
+
+    @app.post("/api/asr/doubao/test")
+    async def doubao_asr_test() -> dict:
+        """Explicit, minimal paid connectivity test using a public sample."""
+        try:
+            return await asyncio.to_thread(test_doubao_asr_connection)
+        except DoubaoASRError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     # ---- Daily technology brief automation -----------------------------
 
@@ -1109,7 +1504,7 @@ def create_app() -> FastAPI:
         task = asyncio.create_task(run_daily())
         app.state.recovery_tasks.add(task)
         task.add_done_callback(lambda completed: app.state.recovery_tasks.discard(completed))
-        return {"accepted": True, "target_date": target.isoformat(), "message": "一条龙任务已开始：检索、脚本、配音、Standard 24GB数字人、画面与全片预览将依次完成"}
+        return {"accepted": True, "target_date": target.isoformat(), "message": "一条龙任务已开始：检索、脚本、配音、Plus 48GB双角色云端并行数字人、画面与全片预览将依次完成"}
 
     @app.post("/api/daily-automation/runs/{target_date}/approve-fallback-script")
     async def approve_daily_fallback_script(target_date: str) -> dict:
@@ -2326,11 +2721,15 @@ def create_app() -> FastAPI:
         _invalidate_summary(project_id)
         hub.publish(project_id)
         job_id = _review_preview_job_id(state)
+        queue_job = None
         if state.get("launch_required") is True:
             if not job_id:
                 raise HTTPException(status_code=500, detail="一键审核预览任务已建立，但缺少任务编号")
-            _launch_review_preview_worker(app, project_dir, job_id)
-        return _public_review_preview_payload(state)
+            queue_job = _launch_review_preview_worker(app, project_dir, job_id)
+        public = _public_review_preview_payload(state)
+        if isinstance(queue_job, dict):
+            public["queue_job"] = queue_job
+        return public
 
     @app.get("/api/project/{project_id}/workbench/automation/review-preview/jobs/current")
     async def get_workbench_review_preview_job(project_id: str) -> dict:
@@ -2367,18 +2766,22 @@ def create_app() -> FastAPI:
         _invalidate_summary(project_id)
         hub.publish(project_id)
         next_job_id = _review_preview_job_id(state)
+        queue_job = None
         if state.get("launch_required") is True:
             if not next_job_id:
                 raise HTTPException(status_code=500, detail="一键审核预览任务恢复后缺少任务编号")
-            _launch_review_preview_worker(app, project_dir, next_job_id)
-        return _public_review_preview_payload(state)
+            queue_job = _launch_review_preview_worker(app, project_dir, next_job_id)
+        public = _public_review_preview_payload(state)
+        if isinstance(queue_job, dict):
+            public["queue_job"] = queue_job
+        return public
 
     @app.get("/api/project/{project_id}/workbench/automation/avatar-review-preview/preflight")
     async def get_workbench_avatar_review_preview_preflight(
         project_id: str,
         planning_mode: str = "ai_director",
         budget_limit_cny: float = 5.0,
-        allow_plus_on_oom: bool = False,
+        allow_plus_on_oom: bool = True,
     ) -> dict:
         project_dir = _safe_project_dir(project_id)
         try:
@@ -2415,11 +2818,15 @@ def create_app() -> FastAPI:
         _invalidate_summary(project_id)
         hub.publish(project_id)
         job_id = _review_preview_job_id(state)
+        queue_job = None
         if state.get("launch_required") is True:
             if not job_id:
                 raise HTTPException(status_code=500, detail="有数字人一键审核预览任务已建立，但缺少任务编号")
-            _launch_avatar_review_preview_worker(app, project_dir, job_id)
-        return _public_review_preview_payload(state)
+            queue_job = _launch_avatar_review_preview_worker(app, project_dir, job_id)
+        public = _public_review_preview_payload(state)
+        if isinstance(queue_job, dict):
+            public["queue_job"] = queue_job
+        return public
 
     @app.get("/api/project/{project_id}/workbench/automation/avatar-review-preview/jobs/current")
     async def get_workbench_avatar_review_preview_job(project_id: str) -> dict:
@@ -2453,11 +2860,15 @@ def create_app() -> FastAPI:
         _invalidate_summary(project_id)
         hub.publish(project_id)
         next_job_id = _review_preview_job_id(state)
+        queue_job = None
         if state.get("launch_required") is True:
             if not next_job_id:
                 raise HTTPException(status_code=500, detail="有数字人一键任务恢复后缺少任务编号")
-            _launch_avatar_review_preview_worker(app, project_dir, next_job_id)
-        return _public_review_preview_payload(state)
+            queue_job = _launch_avatar_review_preview_worker(app, project_dir, next_job_id)
+        public = _public_review_preview_payload(state)
+        if isinstance(queue_job, dict):
+            public["queue_job"] = queue_job
+        return public
 
     @app.post("/api/project/{project_id}/workbench/review-previews/jobs")
     async def start_workbench_review_preview_sync(project_id: str, payload: dict = Body(...)) -> dict:
@@ -2590,6 +3001,16 @@ def create_app() -> FastAPI:
     async def save_workbench_story_headline_layout(project_id: str, payload: dict = Body(...)) -> dict:
         return await workbench_call(update_story_headline_layout, project_id, payload)
 
+    @app.get("/api/project/{project_id}/workbench/text-overlay-composition")
+    async def get_workbench_text_overlay_composition(project_id: str) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        state = await asyncio.to_thread(read_workbench, project_dir)
+        return state.get("text_overlay_editor_composition") or editable_text_overlay_composition(state)
+
+    @app.put("/api/project/{project_id}/workbench/text-overlay-composition")
+    async def save_workbench_text_overlay_composition(project_id: str, payload: dict = Body(...)) -> dict:
+        return await workbench_call(update_text_overlay_composition, project_id, payload)
+
     @app.post("/api/project/{project_id}/workbench/subtitle-styles")
     async def save_workbench_subtitle_style(project_id: str, payload: dict = Body(...)) -> dict:
         return await workbench_call(update_subtitle_style_template, project_id, payload)
@@ -2672,12 +3093,87 @@ def create_app() -> FastAPI:
         _launch_media_index_worker(app, project_dir, job_id)
         return state
 
+    @app.get("/api/project/{project_id}/workbench/asr-audio")
+    async def signed_doubao_asr_audio(
+        project_id: str,
+        path: str,
+        expires_at: int,
+        signature: str,
+    ) -> FileResponse:
+        """Serve only short-lived, HMAC-bound audio artifacts to Doubao ASR."""
+        project_dir = _safe_project_dir(project_id)
+        try:
+            target = await asyncio.to_thread(
+                resolve_signed_project_audio,
+                project_id,
+                project_dir,
+                path,
+                expires_at,
+                signature,
+            )
+        except DoubaoASRError as exc:
+            raise HTTPException(status_code=403, detail=str(exc)) from exc
+        return FileResponse(target, media_type="audio/mpeg", filename=target.name)
+
     @app.post("/api/project/{project_id}/workbench/assets/media-index/vision-batch")
     async def start_workbench_asset_media_index_batch(project_id: str, payload: dict = Body(default={})) -> dict:
         """Start a confirmed, serial visual-understanding queue for local videos."""
         project_dir = _safe_project_dir(project_id)
         try:
             state = await asyncio.to_thread(start_asset_media_index_batch, project_dir, payload)
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _invalidate_summary(project_id)
+        hub.publish(project_id)
+        job_id = str((((state.get("automation") or {}).get("media_index_batch") or {}).get("job_id") or ""))
+        _launch_media_index_batch_worker(app, project_dir, job_id)
+        return state
+
+    @app.post("/api/project/{project_id}/workbench/assets/media-index/overview-batch")
+    async def start_workbench_asset_media_overview_batch(project_id: str, payload: dict = Body(default={})) -> dict:
+        """Start one confirmed local-contact-sheet plus visual-overview queue."""
+        project_dir = _safe_project_dir(project_id)
+        try:
+            state = await asyncio.to_thread(start_asset_media_index_batch, project_dir, {**payload, "stage": "overview"})
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _invalidate_summary(project_id)
+        hub.publish(project_id)
+        job_id = str((((state.get("automation") or {}).get("media_index_batch") or {}).get("job_id") or ""))
+        _launch_media_index_batch_worker(app, project_dir, job_id)
+        return state
+
+    @app.post("/api/project/{project_id}/workbench/assets/media-index/interaction-preflight-batch")
+    async def preflight_workbench_asset_media_interaction_batch(
+        project_id: str,
+        payload: dict = Body(default={}),
+    ) -> dict:
+        """Return an exact, read-only aggregate budget before one confirmation."""
+        project_dir = _safe_project_dir(project_id)
+        try:
+            return await asyncio.to_thread(
+                preflight_asset_material_interactions_batch,
+                project_dir,
+                payload.get("asset_ids") if isinstance(payload.get("asset_ids"), list) else None,
+                str(payload.get("profile") or "efficient"),
+                payload.get("recognize_audio", True),
+            )
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/project/{project_id}/workbench/assets/media-index/interaction-batch")
+    async def start_workbench_asset_media_interaction_batch(
+        project_id: str,
+        payload: dict = Body(default={}),
+    ) -> dict:
+        """Start one confirmed durable serial outdoor-interaction queue."""
+        project_dir = _safe_project_dir(project_id)
+        try:
+            state = await asyncio.to_thread(
+                start_asset_media_index_batch,
+                project_dir,
+                {**payload, "stage": "interaction"},
+            )
         except WorkbenchError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         _invalidate_summary(project_id)
@@ -2735,6 +3231,172 @@ def create_app() -> FastAPI:
         project_dir = _safe_project_dir(project_id)
         try:
             return await asyncio.to_thread(read_asset_material_vision, project_dir, asset_id, limit=limit)
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interaction-preflight")
+    async def get_workbench_asset_interaction_preflight(
+        project_id: str,
+        asset_id: str,
+        profile: str = "efficient",
+        recognize_audio: bool = True,
+    ) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        try:
+            return await asyncio.to_thread(
+                preflight_asset_material_interactions, project_dir, asset_id, profile, recognize_audio
+            )
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.get("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interactions")
+    async def get_workbench_asset_interactions(project_id: str, asset_id: str) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        try:
+            return await asyncio.to_thread(read_asset_material_interactions, project_dir, asset_id)
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interactions/resolve-ambiguous")
+    async def post_workbench_asset_interaction_resolve_ambiguous(
+        project_id: str,
+        asset_id: str,
+        payload: dict = Body(...),
+    ) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        try:
+            state = await asyncio.to_thread(
+                resolve_asset_material_interaction_ambiguity,
+                project_dir,
+                asset_id,
+                payload,
+            )
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _invalidate_summary(project_id)
+        hub.publish(project_id)
+        job_id = str((((state.get("automation") or {}).get("media_index") or {}).get("job_id") or ""))
+        _launch_media_index_worker(app, project_dir, job_id)
+        return state
+
+    @app.post("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interactions/review/initialize")
+    async def post_workbench_asset_interaction_review_initialize(project_id: str, asset_id: str) -> dict:
+        return await workbench_call(initialize_asset_material_interaction_review, project_id, asset_id)
+
+    @app.post("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interactions/review")
+    async def post_workbench_asset_interaction_review(project_id: str, asset_id: str, payload: dict = Body(...)) -> dict:
+        return await workbench_call(update_asset_material_interaction_review, project_id, asset_id, payload)
+
+    @app.post("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interactions/candidates")
+    async def post_workbench_asset_interaction_candidate(
+        project_id: str,
+        asset_id: str,
+        payload: dict = Body(...),
+    ) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        try:
+            state = await asyncio.to_thread(
+                start_asset_material_interaction_candidate_job,
+                project_dir, asset_id, {**payload, "operation": "generate"},
+            )
+        except WorkbenchConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _invalidate_summary(project_id)
+        hub.publish(project_id)
+        job_id = str((((state.get("automation") or {}).get("interaction_candidate") or {}).get("job_id") or ""))
+        _launch_interaction_candidate_worker(app, project_dir, job_id)
+        return {"candidate_job": ((state.get("automation") or {}).get("interaction_candidate") or {})}
+
+    @app.post("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interactions/candidates/{plan_id}")
+    async def post_workbench_asset_interaction_candidate_action(
+        project_id: str,
+        asset_id: str,
+        plan_id: str,
+        payload: dict = Body(...),
+    ) -> dict:
+        action = str(payload.get("action") or "")
+        if action in {"save_edits", "restore_removal", "reinstate_removal"}:
+            project_dir = _safe_project_dir(project_id)
+            try:
+                state = await asyncio.to_thread(
+                    start_asset_material_interaction_candidate_job,
+                    project_dir, asset_id,
+                    {**payload, "operation": action, "plan_id": plan_id},
+                )
+            except WorkbenchConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except WorkbenchError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            _invalidate_summary(project_id)
+            hub.publish(project_id)
+            job_id = str((((state.get("automation") or {}).get("interaction_candidate") or {}).get("job_id") or ""))
+            _launch_interaction_candidate_worker(app, project_dir, job_id)
+            return {"candidate_job": ((state.get("automation") or {}).get("interaction_candidate") or {})}
+        return await workbench_call(
+            update_asset_material_interaction_candidate, project_id, asset_id, plan_id, payload,
+        )
+
+    @app.post("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interactions/second-pass")
+    async def post_workbench_asset_interaction_second_pass(
+        project_id: str,
+        asset_id: str,
+        payload: dict = Body(...),
+    ) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        try:
+            state = await asyncio.to_thread(
+                start_asset_material_interaction_second_pass_job,
+                project_dir, asset_id, {**payload, "operation": "generate"},
+            )
+        except WorkbenchConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        _invalidate_summary(project_id)
+        hub.publish(project_id)
+        job = ((state.get("automation") or {}).get("interaction_second_pass") or {})
+        job_id = str(job.get("job_id") or "")
+        _launch_interaction_second_pass_worker(app, project_dir, job_id)
+        return {"second_pass_job": job}
+
+    @app.post("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interactions/second-pass/{plan_id}")
+    async def post_workbench_asset_interaction_second_pass_action(
+        project_id: str,
+        asset_id: str,
+        plan_id: str,
+        payload: dict = Body(...),
+    ) -> dict:
+        action = str(payload.get("action") or "")
+        if action == "save_edits":
+            project_dir = _safe_project_dir(project_id)
+            try:
+                state = await asyncio.to_thread(
+                    start_asset_material_interaction_second_pass_job,
+                    project_dir, asset_id,
+                    {**payload, "operation": action, "plan_id": plan_id},
+                )
+            except WorkbenchConflict as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+            except WorkbenchError as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from exc
+            _invalidate_summary(project_id)
+            hub.publish(project_id)
+            job = ((state.get("automation") or {}).get("interaction_second_pass") or {})
+            job_id = str(job.get("job_id") or "")
+            _launch_interaction_second_pass_worker(app, project_dir, job_id)
+            return {"second_pass_job": job}
+        return await workbench_call(
+            update_asset_material_interaction_second_pass,
+            project_id, asset_id, plan_id, payload,
+        )
+
+    @app.get("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/overview")
+    async def get_workbench_asset_material_overview(project_id: str, asset_id: str) -> dict:
+        project_dir = _safe_project_dir(project_id)
+        try:
+            return await asyncio.to_thread(read_asset_material_overview, project_dir, asset_id)
         except WorkbenchError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -2978,7 +3640,7 @@ def create_app() -> FastAPI:
 
     @app.post("/api/project/{project_id}/workbench/automation/full-preview/jobs")
     async def start_workbench_full_preview(project_id: str, payload: dict = Body(...)) -> dict:
-        """Render a review candidate without mutating scene approval state."""
+        """Queue a review candidate without mutating scene approval state."""
         project_dir = _safe_project_dir(project_id)
         try:
             state = await asyncio.to_thread(start_full_preview_render, project_dir, payload)
@@ -2986,19 +3648,22 @@ def create_app() -> FastAPI:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         _invalidate_summary(project_id)
         hub.publish(project_id)
-
-        async def run_generation() -> None:
-            try:
-                await asyncio.to_thread(generate_full_preview_render, project_dir)
-            except Exception as exc:
-                try:
-                    await asyncio.to_thread(mark_full_preview_render_failed, project_dir, exc)
-                except Exception:
-                    pass
-            _invalidate_summary(project_id)
-            hub.publish(project_id)
-
-        asyncio.create_task(run_generation())
+        preview = ((state.get("automation") or {}).get("preview_render") or {})
+        parent_job_id = str(preview.get("job_id") or "")
+        if not parent_job_id:
+            raise HTTPException(status_code=500, detail="全片预览任务已建立，但缺少任务编号")
+        try:
+            state["queue_job"] = _enqueue_production_parent(
+                app,
+                project_dir,
+                parent_job_id,
+                kind="full_preview",
+                frozen_request={"confirmed": True},
+            )
+        except ProductionQueueConflict as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        except ProductionQueueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return state
 
     @app.post("/api/project/{project_id}/workbench/review/full-preview/approve")
@@ -3008,6 +3673,10 @@ def create_app() -> FastAPI:
     @app.patch("/api/project/{project_id}/workbench/intake")
     async def patch_workbench_intake(project_id: str, payload: dict = Body(...)) -> dict:
         return await workbench_call(update_intake, project_id, payload)
+
+    @app.put("/api/project/{project_id}/workbench/video-type-preset")
+    async def put_workbench_video_type_preset(project_id: str, payload: dict = Body(...)) -> dict:
+        return await workbench_call(update_video_type_preset, project_id, payload)
 
     @app.post("/api/project/{project_id}/workbench/script-draft")
     async def post_workbench_script_draft(project_id: str, payload: dict = Body(...)) -> dict:
@@ -3238,13 +3907,13 @@ def create_app() -> FastAPI:
         # Interactive project visits are routed to the new director workbench.
         if request.query_params.get("static"):
             return _ui_html("board.html", ("board.css", "board.js"))
-        return _ui_html("workbench.html", ("workbench.css", "workbench.js"))
+        return _ui_html("workbench.html", ("workbench.css", "navigation.css", "workbench.js"))
 
     @app.get("/p/{project_path:path}")
     async def board_page_path(project_path: str, request: Request) -> HTMLResponse:
         if request.query_params.get("static"):
             return _ui_html("board.html", ("board.css", "board.js"))
-        return _ui_html("workbench.html", ("workbench.css", "workbench.js"))
+        return _ui_html("workbench.html", ("workbench.css", "navigation.css", "workbench.js"))
 
     @app.get("/")
     async def library_page() -> HTMLResponse:
@@ -3267,6 +3936,10 @@ def create_app() -> FastAPI:
         path = request.url.path
         if path == "/" or path.startswith("/ui") or path.startswith("/p/"):
             response.headers["Cache-Control"] = "no-cache"
+        if path.startswith("/api/project/") and "/workbench" in path:
+            response.headers["X-Backlot-UI-Revision"] = _ui_revision(
+                ("workbench.css", "navigation.css", "workbench.js")
+            )
         return response
 
     return app

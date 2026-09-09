@@ -60,3 +60,57 @@ def test_local_health_probe_bypasses_system_proxy(monkeypatch):
     assert cli._server_alive(4754) is True
     assert captured["proxy"] == {}
     assert captured["url"] == "http://127.0.0.1:4754/api/health"
+
+
+def test_queue_submit_uses_registered_kind_and_codex_api(monkeypatch, capsys):
+    calls: list[tuple[str, str, dict | None]] = []
+
+    def fake_request(path: str, *, method: str = "GET", payload: dict | None = None) -> dict:
+        calls.append((path, method, payload))
+        return {"queue_job": {"job_id": "PQ-one", "status": "queued"}}
+
+    monkeypatch.setattr(cli, "_queue_api_request", fake_request)
+    result = cli.main(
+        [
+            "queue",
+            "submit",
+            "news-demo",
+            "--kind",
+            "avatar-review-preview",
+            "--priority",
+            "priority",
+            "--idempotency-key",
+            "daily-news-2026-09-08",
+            "--request-json",
+            '{"confirmed":true,"budget_limit_cny":5}',
+        ]
+    )
+
+    assert result == 0
+    assert calls == [
+        (
+            "/api/production-queue/jobs",
+            "POST",
+            {
+                "project_id": "news-demo",
+                "kind": "avatar-review-preview",
+                "priority": "priority",
+                "request": {"confirmed": True, "budget_limit_cny": 5},
+                "idempotency_key": "daily-news-2026-09-08",
+            },
+        )
+    ]
+    assert "PQ-one" in capsys.readouterr().out
+
+
+def test_queue_cli_rejects_invalid_json_before_network_call(monkeypatch, capsys):
+    calls: list[str] = []
+    monkeypatch.setattr(cli, "_queue_api_request", lambda *_args, **_kwargs: calls.append("called"))
+
+    result = cli.main(
+        ["queue", "submit", "demo", "--kind", "full-preview", "--request-json", "not-json"]
+    )
+
+    assert result == 1
+    assert calls == []
+    assert "不是有效 JSON" in capsys.readouterr().err

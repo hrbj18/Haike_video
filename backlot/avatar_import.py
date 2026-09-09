@@ -40,6 +40,11 @@ SUPPORTED_MEDIA_EXTENSIONS = {".mp4", ".mov", ".mkv", ".webm", ".m4v"}
 SPEAKER_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,31}$")
 TURN_ID_RE = re.compile(r"^T[0-9]{3,}$")
 MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024
+EXACT_CLOCK_MANIFEST_VERSIONS = frozenset({
+    "avatar-turn-timing-v2",
+    "avatar-turn-timing-v3",
+    "avatar-turn-timing-v4",
+})
 _PACKAGE_WRITE_LOCKS: dict[str, RLock] = {}
 _PACKAGE_WRITE_LOCKS_GUARD = RLock()
 
@@ -1031,13 +1036,38 @@ def _strict_manifest_int(value: Any, label: str) -> int:
     """Accept only JSON integers for the exact-clock contract.
 
     ``int(30.5)`` silently becoming ``30`` would make a malformed external
-    manifest look frame-exact.  The v2 contract is deliberately stricter than
-    the legacy manifest, so reject booleans, numeric strings and fractional
-    values rather than coercing them.
+    manifest look frame-exact.  Exact-clock contracts are deliberately stricter
+    than the legacy manifest, so reject booleans, numeric strings and
+    fractional values rather than coercing them.
     """
     if isinstance(value, bool) or not isinstance(value, int):
         raise AvatarImportError(f"{label} 必须是整数")
     return value
+
+
+def _exact_clock_manifest(package: dict) -> dict:
+    manifest = (((package.get("asr") or {}).get("summary") or {}).get("timing_manifest") or {})
+    return manifest if str(manifest.get("version") or "") in EXACT_CLOCK_MANIFEST_VERSIONS else {}
+
+
+def _frame_aligned_gap_seconds(package: dict, requested_seconds: float) -> float:
+    """Keep exact-clock assembly pauses on the same integer video-frame grid.
+
+    A 25FPS video cannot represent 180 ms or 300 ms without rounding each
+    normalized segment up by half a frame.  Repeating that operation causes the
+    audio/video start points to drift across a long dialogue.  For exact-clock
+    packages, use the largest whole-frame pause that does not exceed the
+    requested pause.  Legacy/manual packages retain their configured seconds.
+    """
+    requested = max(0.0, float(requested_seconds))
+    manifest = _exact_clock_manifest(package)
+    if not manifest or requested <= 0:
+        return requested
+    fps = int(((manifest.get("contract") or {}).get("video_fps") or package.get("settings", {}).get("fps") or 0))
+    if fps <= 0:
+        raise AvatarImportError("精确帧时间清单缺少有效视频帧率")
+    frames = max(1, math.floor(requested * fps + 1e-9))
+    return frames / fps
 
 
 def apply_longform_timing_manifest(project_dir: Path, manifest: dict) -> dict:
@@ -1058,7 +1088,7 @@ def apply_longform_timing_manifest(project_dir: Path, manifest: dict) -> dict:
     if set(by_id) != {turn["turn_id"] for turn in package["turns"]}:
         raise AvatarImportError("逐轮时间清单与当前脚本轮次不一致")
     version = str(manifest.get("version") or "")
-    exact_clock = version == "avatar-turn-timing-v2"
+    exact_clock = version in EXACT_CLOCK_MANIFEST_VERSIONS
     role_clocks = manifest.get("roles") if isinstance(manifest.get("roles"), dict) else {}
     video_fps = 0
     if exact_clock:
@@ -1154,6 +1184,13 @@ def apply_longform_timing_manifest(project_dir: Path, manifest: dict) -> dict:
         for speaker_id, role_clock in role_clocks.items():
             if previous_end_frame.get(speaker_id) != int(role_clock["video_frame_count"]):
                 raise AvatarImportError(f"{speaker_id} 的最后一轮没有覆盖到角色音频末帧")
+        # Assembly must preserve the same clock that was validated before the
+        # paid avatar submission.  v3 changes the inter-speaker gap contract,
+        # not the 25FPS/sample ledger, so it remains an exact-clock manifest.
+        package["settings"]["fps"] = video_fps
+        sample_rates = {int(role_clock["sample_rate"]) for role_clock in role_clocks.values()}
+        if len(sample_rates) == 1:
+            package["settings"]["audio_sample_rate"] = sample_rates.pop()
     package.setdefault("asr", {}).setdefault("summary", {})["timing_manifest"] = {
         "version": version,
         "path": str(manifest.get("path") or ""),
@@ -1174,20 +1211,20 @@ def ensure_exact_clock_assembly_duration_limit(
     maximum_seconds: float,
     tolerance_seconds: float = 1.0,
 ) -> dict:
-    """Reserve enough local master duration for a validated v2 timing manifest.
+    """Reserve enough local master duration for a validated exact-clock manifest.
 
     The one-click RunningHub route creates one source video per presenter and
     then interleaves their frame-exact turns locally. Its default 120-second
     import limit predates that route and must not turn a valid, already-paid
     121--180 second master into a false failure. This function is deliberately
-    limited to the validated v2 contract: it never estimates, trims, stretches,
+    limited to validated v2/v3 contracts: it never estimates, trims, stretches,
     or changes legacy/ASR-derived cuts.
     """
     package = read_avatar_package(project_dir)
     if not package:
         raise AvatarImportError("数字人素材包不存在")
     manifest = (((package.get("asr") or {}).get("summary") or {}).get("timing_manifest") or {})
-    if str(manifest.get("version") or "") != "avatar-turn-timing-v2":
+    if str(manifest.get("version") or "") not in EXACT_CLOCK_MANIFEST_VERSIONS:
         return package
     if package.get("import_mode") != "longform":
         raise AvatarImportError("精确帧时长预算只能用于长视频数字人素材包")
@@ -1212,7 +1249,7 @@ def ensure_exact_clock_assembly_duration_limit(
         if previous_speaker_id is not None:
             gap_key = "same_speaker_gap_seconds" if speaker_id == previous_speaker_id else "speaker_change_gap_seconds"
             try:
-                gap = float(settings.get(gap_key) or 0)
+                gap = _frame_aligned_gap_seconds(package, float(settings.get(gap_key) or 0))
             except (TypeError, ValueError) as exc:
                 raise AvatarImportError("数字人切换静音合同无效") from exc
             if gap < 0:
@@ -1234,16 +1271,16 @@ def ensure_exact_clock_assembly_duration_limit(
 
 
 def _review_deterministic_longform_turns(package: dict, transcripts: dict[str, dict], manifest: dict) -> list[dict]:
-    """Review deterministic boundaries without letting ASR rewrite v2 cuts.
+    """Review deterministic boundaries without letting ASR rewrite exact cuts.
 
     The v1 manifest predates the sample/frame ledger and therefore still uses
-    Whisper as a human-review gate.  A validated v2 manifest already proves
+    Whisper as a human-review gate.  Validated v2/v3 manifests already prove
     every cut against one final PCM role track and the exact video frame clock;
-    Whisper is diagnostic evidence only for that route.
+    Whisper is diagnostic evidence only for those routes.
     """
     issues: list[dict] = []
     items: list[dict] = []
-    exact_clock = str(manifest.get("version") or "") == "avatar-turn-timing-v2"
+    exact_clock = str(manifest.get("version") or "") in EXACT_CLOCK_MANIFEST_VERSIONS
     by_id = {str(item["turn_id"]).upper(): item for item in manifest.get("turns") or []}
     for speaker in package["speakers"]:
         speaker_id = speaker["speaker_id"]
@@ -1345,7 +1382,7 @@ def approve_exact_clock_manifest_cuts(
     diagnostic_error: object | None = None,
     model_name: str | None = None,
 ) -> dict:
-    """Approve validated v2 frame cuts when Whisper is unavailable.
+    """Approve validated exact-clock frame cuts when Whisper is unavailable.
 
     This is intentionally unavailable to legacy manifests.  It does not infer
     any boundary: it merely materialises the already validated integer frame
@@ -1356,8 +1393,8 @@ def approve_exact_clock_manifest_cuts(
         raise AvatarImportError("当前项目没有可应用的长视频精确帧清单")
     asr_before = package.get("asr") if isinstance(package.get("asr"), dict) else {}
     manifest = copy.deepcopy((asr_before.get("summary") or {}).get("timing_manifest"))
-    if not isinstance(manifest, dict) or str(manifest.get("version") or "") != "avatar-turn-timing-v2":
-        raise AvatarImportError("只有通过校验的 v2 精确帧清单可以绕过 Whisper 切点门")
+    if not isinstance(manifest, dict) or str(manifest.get("version") or "") not in EXACT_CLOCK_MANIFEST_VERSIONS:
+        raise AvatarImportError("只有通过校验的 v2/v3 精确帧清单可以绕过 Whisper 切点门")
     empty_transcripts = {
         speaker["speaker_id"]: {"text": "", "segments": []}
         for speaker in package.get("speakers") or []
@@ -2072,13 +2109,8 @@ def _build_filter_graph(project_dir: Path, package: dict) -> tuple[list[Path], s
             inputs.append(source)
         source_index = input_index[key]
         duration = source_end - source_start
-        next_turn = turns[index + 1] if index + 1 < len(turns) else None
-        if not next_turn:
-            gap = 0.0
-        elif next_turn["speaker_id"] == turn["speaker_id"]:
-            gap = float(settings["same_speaker_gap_seconds"])
-        else:
-            gap = float(settings["speaker_change_gap_seconds"])
+        requested_gap = _requested_longform_turn_gap(package, index)
+        gap = _longform_turn_gap(package, index)
         total = duration + gap
         fit_mode = str((package.get("presentation") or {}).get("frame_fit_mode") or "contain_black")
         if fit_mode == "blur_background":
@@ -2130,6 +2162,8 @@ def _build_filter_graph(project_dir: Path, package: dict) -> tuple[list[Path], s
             "speech_end_seconds": round(cursor + duration, 4),
             "end_seconds": round(cursor + total, 4),
             "gap_after_seconds": round(gap, 4),
+            "requested_gap_after_seconds": round(requested_gap, 4),
+            "gap_frame_count": round(gap * float(settings["fps"])),
             "frame_fit_mode": fit_mode,
             "visual_contract": turn.get("visual_contract", {}),
         })
@@ -2214,7 +2248,7 @@ def _valid_normalized_part(path: Path, settings: dict, expected_duration: float)
     )
 
 
-def _longform_turn_gap(package: dict, index: int) -> float:
+def _requested_longform_turn_gap(package: dict, index: int) -> float:
     turns = package["turns"]
     next_turn = turns[index + 1] if index + 1 < len(turns) else None
     if not next_turn:
@@ -2222,6 +2256,10 @@ def _longform_turn_gap(package: dict, index: int) -> float:
     if next_turn["speaker_id"] == turns[index]["speaker_id"]:
         return float(package["settings"]["same_speaker_gap_seconds"])
     return float(package["settings"]["speaker_change_gap_seconds"])
+
+
+def _longform_turn_gap(package: dict, index: int) -> float:
+    return _frame_aligned_gap_seconds(package, _requested_longform_turn_gap(package, index))
 
 
 def _render_longform_part(project_dir: Path, package: dict, turn: dict, *, gap: float, output: Path, ffmpeg: str) -> None:
@@ -2298,17 +2336,41 @@ def _write_concat_listing(path: Path, parts: list[Path]) -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _concat_normalized_parts(parts: list[Path], candidate_output: Path, package: dict, ffmpeg: str) -> None:
+def _concat_normalized_parts(
+    parts: list[Path],
+    candidate_output: Path,
+    package: dict,
+    ffmpeg: str,
+    *,
+    expected_duration_seconds: float,
+) -> None:
     if not parts:
         raise AvatarImportError("没有可用于拼接的数字人片段")
     listing = candidate_output.with_suffix(".concat.txt")
     _write_concat_listing(listing, parts)
     settings = package["settings"]
+    fps = int(settings["fps"])
+    exact_clock = bool(_exact_clock_manifest(package))
+    exact_filters: list[str] = []
+    exact_limits: list[str] = []
+    if exact_clock:
+        expected_frames = round(float(expected_duration_seconds) * fps)
+        if expected_frames <= 0 or abs(expected_frames / fps - float(expected_duration_seconds)) > 1e-6:
+            listing.unlink(missing_ok=True)
+            raise AvatarImportError("最终数字人时间线没有落在整数视频帧上")
+        duration_text = f"{expected_frames / fps:.6f}"
+        exact_filters = [
+            "-vf", f"trim=duration={duration_text},setpts=PTS-STARTPTS",
+            "-af", f"apad=pad_dur={duration_text},atrim=duration={duration_text},asetpts=PTS-STARTPTS",
+        ]
+        exact_limits = ["-frames:v", str(expected_frames), "-t", duration_text]
     command = [
         ffmpeg, "-y", "-hide_banner", "-nostdin", "-threads", "1", "-f", "concat", "-safe", "0", "-i", str(listing), "-map", "0:v:0", "-map", "0:a:0",
+        *exact_filters,
         "-threads", "1", "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency", "-crf", "18",
         "-x264-params", "bframes=0:ref=1:rc-lookahead=0:sync-lookahead=0:lookahead-threads=1:scenecut=0", "-profile:v", "high", "-pix_fmt", "yuv420p",
-        "-r", str(settings["fps"]), "-fps_mode", "cfr", "-c:a", "aac", "-b:a", "192k", "-ar", str(settings["audio_sample_rate"]), "-ac", "2",
+        "-r", str(fps), "-fps_mode", "cfr", *exact_limits,
+        "-c:a", "aac", "-b:a", "192k", "-ar", str(settings["audio_sample_rate"]), "-ac", "2",
         "-movflags", "+faststart", str(candidate_output)]
     result = _run(command, timeout=60 * 60)
     listing.unlink(missing_ok=True)
@@ -2343,6 +2405,7 @@ def _assemble_longform_package_serially(project_dir: Path, payload: dict | None,
     reused = 0
     for index, turn in enumerate(package["turns"]):
         source, source_start, source_end = _turn_source(project_dir, package, turn)
+        requested_gap = _requested_longform_turn_gap(package, index)
         gap = _longform_turn_gap(package, index)
         duration = source_end - source_start
         total = duration + gap
@@ -2364,6 +2427,8 @@ def _assemble_longform_package_serially(project_dir: Path, payload: dict | None,
             "source_end_seconds": round(source_end, 4), "start_seconds": round(cursor, 4),
             "speech_end_seconds": round(cursor + duration, 4), "end_seconds": round(cursor + total, 4),
             "gap_after_seconds": round(gap, 4),
+            "requested_gap_after_seconds": round(requested_gap, 4),
+            "gap_frame_count": round(gap * float(package["settings"]["fps"])),
             "frame_fit_mode": str((package.get("presentation") or {}).get("frame_fit_mode") or "contain_black"),
             "visual_contract": turn.get("visual_contract", {}), "part_path": _safe_relative(project_dir, part), "part_reused": was_reused,
         })
@@ -2379,7 +2444,13 @@ def _assemble_longform_package_serially(project_dir: Path, payload: dict | None,
         "phase": "concatenating", "current_turn_id": None, "current_index": len(parts),
         "completed": len(parts), "total": len(package["turns"]), "reused": reused,
     })
-    _concat_normalized_parts(parts, candidate, package, ffmpeg)
+    _concat_normalized_parts(
+        parts,
+        candidate,
+        package,
+        ffmpeg,
+        expected_duration_seconds=float(timeline[-1]["end_seconds"]),
+    )
     current = read_avatar_package(project_dir)
     if not current or (current.get("assembly") or {}).get("run_id") != run_id or (current.get("assembly") or {}).get("status") != "running":
         candidate.unlink(missing_ok=True)
@@ -2407,6 +2478,19 @@ def _complete_avatar_assembly(project_dir: Path, package: dict, candidate_output
         issues.append(_issue("unexpected_video_codec", f"输出视频编码为 {media['video']['codec']}，预期 h264"))
     if media["audio"]["codec"] != "aac":
         issues.append(_issue("unexpected_audio_codec", f"输出音频编码为 {media['audio']['codec']}，预期 aac"))
+    exact_manifest = _exact_clock_manifest(package)
+    exact_frame_clock = True
+    expected_master_frames: int | None = None
+    if exact_manifest and timeline:
+        fps = int(((exact_manifest.get("contract") or {}).get("video_fps") or package["settings"]["fps"]))
+        expected_master_frames = round(float(timeline[-1]["end_seconds"]) * fps)
+        actual_master_frames = int((media.get("video") or {}).get("frame_count") or 0)
+        exact_frame_clock = actual_master_frames == expected_master_frames
+        if not exact_frame_clock:
+            issues.append(_issue(
+                "master_frame_clock_mismatch",
+                f"最终母版实际 {actual_master_frames} 帧，精确时间线要求 {expected_master_frames} 帧",
+            ))
     master_asr: dict[str, Any] = {"required": package["settings"]["require_asr"]}
     if package["settings"]["require_asr"]:
         model, model_name = _load_whisper(str((payload or {}).get("model")) if (payload or {}).get("model") else None)
@@ -2415,7 +2499,16 @@ def _complete_avatar_assembly(project_dir: Path, package: dict, candidate_output
         similarity, coverage = text_metrics(expected, actual)
         master_asr.update({"model": model_name, "transcript": actual, "similarity": round(similarity, 4), "coverage": round(coverage, 4)})
         if coverage < package["settings"]["minimum_turn_coverage"] or similarity < package["settings"]["minimum_average_similarity"]:
-            issues.append(_issue("master_asr_failed", f"最终母版台词覆盖率 {coverage:.3f}、相似度 {similarity:.3f}，未达到门槛"))
+            message = f"最终母版台词覆盖率 {coverage:.3f}、相似度 {similarity:.3f}，未达到门槛"
+            if exact_manifest and exact_frame_clock:
+                issues.append(_issue(
+                    "exact_clock_master_asr_diagnostic_warning",
+                    message + "；精确帧清单与最终帧数已校验，Whisper 仅记录诊断提醒",
+                    severity="warning",
+                ))
+            else:
+                issues.append(_issue("master_asr_failed", message))
+    blocking_issues = [item for item in issues if str(item.get("severity") or "error") != "warning"]
     timeline_payload = {
         "version": "1.0",
         "audio_mode": "native_avatar_audio",
@@ -2427,30 +2520,31 @@ def _complete_avatar_assembly(project_dir: Path, package: dict, candidate_output
     _write_srt(subtitle_path, timeline)
     qa_payload = {
         "version": "1.0",
-        "status": "failed" if issues else "passed",
+        "status": "failed" if blocking_issues else "passed",
         "checks": {
             "turn_count": len(timeline) == len(package["turns"]),
             "decode": decode_ok,
             "duration_within_limit": duration <= package["settings"]["max_duration_seconds"] + 0.05,
             "h264_aac": media["video"]["codec"] == "h264" and media["audio"]["codec"] == "aac",
             "native_audio_mode": True,
+            "exact_frame_clock": exact_frame_clock,
         },
         "media": media,
         "master_asr": master_asr,
         "issues": issues,
         "sha256": _file_sha256(candidate_output),
     }
-    delivered_output = output_dir / f"avatar-dialogue-master.failed-{uuid4().hex[:8]}.mp4" if issues else output
+    delivered_output = output_dir / f"avatar-dialogue-master.failed-{uuid4().hex[:8]}.mp4" if blocking_issues else output
     os.replace(candidate_output, delivered_output)
     qa_payload["output_path"] = _safe_relative(project_dir, delivered_output)
     _atomic_write(qa_path, qa_payload)
-    if not issues:
+    if not blocking_issues:
         for turn in package["turns"]:
             turn["status"] = "assembled"
     previous = package.get("assembly") if isinstance(package.get("assembly"), dict) else {}
     summary = copy.deepcopy(previous.get("summary") or {})
     summary.update({
-        "phase": "completed" if not issues else "qa_failed",
+        "phase": "completed" if not blocking_issues else "qa_failed",
         "turns": len(timeline),
         "duration_seconds": duration,
         "timing_basis": "native_avatar_audio",
@@ -2458,9 +2552,11 @@ def _complete_avatar_assembly(project_dir: Path, package: dict, candidate_output
         "audio_codec": media["audio"]["codec"],
         "fps": media["video"]["fps"],
         "audio_sample_rate": media["audio"]["sample_rate"],
+        "expected_master_frames": expected_master_frames,
+        "actual_master_frames": int((media.get("video") or {}).get("frame_count") or 0),
     })
     package["assembly"] = {
-        "status": "failed" if issues else "passed",
+        "status": "failed" if blocking_issues else "passed",
         "started_at": previous.get("started_at", _now()),
         "finished_at": _now(),
         "issues": issues,

@@ -28,7 +28,8 @@
 - HyperFrames 已在 Linux 容器内完成 CPU 基线初始化：CLI `0.8.22`、Chrome Headless Shell、`unzip`、FFmpeg 和 FFprobe 均通过关键预检；容器 `/dev/shm` 已提升到 `512 MB`，npm 与浏览器缓存均挂载到 `/opt/Haike_video/cache` 持久化。项目运行时返回 `runtime_available=true`，本轮未执行视频渲染。
 - 2026-09-02 已在广州 Linux 轻量服务器通过真实浏览器完成无数字人全流程：新建“键盘排序的秘密”项目、Luna 自动写稿、人工审核闸门确认、本地 Qwen3-TTS、Pexels/HyperFrames 配画面、字幕与 FFmpeg 全片合成，最终到达 `preview_ready`。父任务 `RPP-8b51022434c9` 为 16/16、失败 0，预览 `renders/previews/full-preview-v001.mp4`（H.264/AAC、1080×1920、30 FPS、127.5 秒）；没有自动批准或发布。
 - 服务器本地 TTS 的生产默认模型已改为可配置的官方 `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice`，通过 `HAIKE_VIDEO_TTS_CUSTOM_MODEL` 选择，并使用 `HF_ENDPOINT=https://hf-mirror.com` 完成模型缓存。1.7B 官方模型缓存仍保留，可通过配置切回；未把云 TTS 写死为唯一实现。0.6B 在该 CPU 服务器上的短句实测冷启动约 112 秒、热调用约 38 秒，完整 16 句流程约 90 分钟，因此“可运行”不等于“高并发实时”。
-- 当前生产容器为 `haike-video`；切换前容器保留为停止状态的 `haike-video-pre-hyperframes-20260901-2302`，仅用于短期回滚，确认稳定后再单独决定是否清理。
+- 2026-09-03 服务器已从旧 `main/b29f0f4` 更新至 GitHub `dev/b9a0db4`：`haike-video:b9a0db4` 继承原运行镜像重建，所有原持久化挂载（含 `.env.local`、项目、任务状态、渲染、缓存）原样复用。容器健康、`/api/health` 与首页 HTTP 200 已通过；旧 `haike-video-previous-b29f0f4` 停止保留，可回退，勿清理。
+- 2026-09-03 服务器配置加载已统一修复：容器由 Python dotenv 启动引导读取权限 `600` 的持久化 `.env.local`，不再用 Docker `--env-file` 直接解析。豆包 TTS 与中转站文本配置均可用；健康、地址解析、TCP 连通性及 `gpt-5.6-luna` 固定 JSON 连接测试均通过。该测试不生成脚本、视频或音频，但会产生极少量文本调用用量；豆包实际音色授权仍待人工短试听验证。
 - 本轮没有调用 Pexels、文本模型、RunningHub 或其他付费服务。一次性 SSH 公钥已从服务器撤销，本机临时私钥目录已删除。
 - 服务器密钥文件权限为 `600` 且被 Git 忽略；后续更新不得把 `.env.local` 或 `.env.secrets.local` 纳入提交。
 

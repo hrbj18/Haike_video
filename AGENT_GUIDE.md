@@ -42,6 +42,7 @@ Before a production run:
 3. Read the relevant installed provider/stage skill before invoking that stage.
 4. Present or persist provider, model or instance, cost guardrail, aspect ratio, music choice, and review gates.
 5. Use idempotent job identifiers and durable state so retries do not duplicate paid work.
+6. Submit supported parent production through the unified queue (`python -m backlot queue submit ...` or `/api/production-queue/jobs`). Do not call the registered review-preview or full-preview runners directly; the queue is the cross-project execution authority.
 
 Typical stages are: script/source verification, narration or source audio, avatar/video generation, media planning, material acquisition, composition, subtitles, background music, QA, then human review. Audio duration is the master clock; visuals follow audio. Do not stretch speech to fit a visual slot.
 
@@ -53,7 +54,7 @@ Preview and final render must share the same timeline, subtitle, avatar geometry
 
 - State the exact provider and model/instance before a paid or materially expensive call. Never silently substitute providers or models.
 - If several eligible providers exist, follow the project/user selection. If none is explicit, surface the supported choices instead of guessing a costly route.
-- RunningHub production defaults to paid-accepted workflow `2094449979141218305` with profile `infinitetalk_448x560_exact_clock_v2` on Standard 24GB (`instanceType=default`). The final PCM16 mono WAV is aligned once to the 25FPS frame clock and its exact frame count is submitted to node 35. Enterprise Lite is not a production target; Plus 48GB remains forbidden unless the user gives a new explicit authorization.
+- New RunningHub production defaults to paid-accepted workflow `2094449979141218305` with profile `infinitetalk_448x560_exact_clock_v2` on Plus 48GB (`instanceType=plus`). For a two-presenter parent job, persist both task IDs before polling so the two provider jobs run concurrently; the global parent-video queue remains single-lane. The final PCM16 mono WAV is aligned once to the 25FPS frame clock and its exact frame count is submitted to node 35. Frozen legacy Standard/Lite jobs keep their recorded instance and sequencing contract.
 - Enforce project and daily budgets before submission. A paid operation must be recoverable and auditable.
 - Failures must preserve completed artifacts and record: stage, provider, error class, retryability, safe resume point, and user-facing Chinese remediation.
 - All user-facing UI messages are Chinese; map raw backend errors to actionable Chinese descriptions.

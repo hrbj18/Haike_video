@@ -119,6 +119,7 @@ def material_indexes_fingerprint(indexes: dict[str, dict[str, Any]]) -> str:
             "source_fingerprint": str(((index or {}).get("source") or {}).get("fingerprint") or ""),
             "status": str((index or {}).get("status") or ""),
             "vision_status": str(((index or {}).get("vision") or {}).get("status") or ""),
+            "overview_status": str(((index or {}).get("overview") or {}).get("status") or ""),
         }
         for asset_id, index in sorted(indexes.items())
         if isinstance(index, dict)
@@ -175,12 +176,12 @@ def build_material_capability_map(
     indexes: dict[str, dict[str, Any]],
     request: dict[str, Any],
 ) -> tuple[list[dict[str, Any]], list[str]]:
-    """Create evidence-only, per-shot local-material capabilities.
+    """Create evidence-only local-material capabilities at their true level.
 
-    V2 descriptions confirm what is visible in a shot, but do not prove a
-    start-to-finish event.  Therefore all shots default to ``safe_cut``.  An
-    ``atomic`` action only appears after an explicit user confirmation with a
-    bounded source range.
+    V2 can become an adoptable, bounded shot after the existing human
+    continuity gate.  A V1 contact-sheet overview is weaker: it can help the
+    planner point a reviewer to a likely source range, but it can never create
+    a timeline sequence or claim continuous motion before source preview.
     """
     assets = {str(asset.get("id") or ""): asset for asset in state.get("assets") or [] if isinstance(asset, dict)}
     confirmations = _confirmed_continuity(request)
@@ -191,11 +192,56 @@ def build_material_capability_map(
         asset = assets.get(str(asset_id))
         if not asset or str(asset.get("type") or "").lower() != "video":
             continue
+        width, height = _asset_resolution(asset)
         vision = index.get("vision") if isinstance(index.get("vision"), dict) else {}
+        overview = index.get("overview") if isinstance(index.get("overview"), dict) else {}
+        is_v2 = isinstance(index.get("shots"), list)
+        if not is_v2:
+            if str(index.get("status") or "") not in {"overview_completed", "completed", "overview_completed_detail_failed"} or overview.get("status") != "completed":
+                warnings.append(f"素材 {asset_id} 尚未完成可用的快速概览")
+                continue
+            for chapter in overview.get("chapters") or []:
+                if not isinstance(chapter, dict):
+                    continue
+                chapter_id = str(chapter.get("chapter_id") or "")
+                summary = _compact(chapter.get("summary"), 500)
+                entities = [_compact(item.get("name"), 120) for item in chapter.get("subjects") or [] if isinstance(item, dict) and _compact(item.get("name"), 120)]
+                actions = [_compact(item.get("name"), 120) for item in chapter.get("actions") or [] if isinstance(item, dict) and _compact(item.get("name"), 120)]
+                unknowns = [_compact(item, 120) for item in chapter.get("unknowns") or [] if _compact(item, 120)]
+                if not chapter_id or not (summary or entities or actions):
+                    continue
+                for range_index, usable in enumerate(chapter.get("usable_ranges") or [], 1):
+                    if not isinstance(usable, dict):
+                        continue
+                    start, end = _seconds(usable.get("start_seconds")), _seconds(usable.get("end_seconds"))
+                    if end < start:
+                        continue
+                    evidence_cells = [str(item) for item in usable.get("evidence_cell_ids") or [] if str(item)]
+                    if not evidence_cells:
+                        continue
+                    ordinal += 1
+                    capabilities.append({
+                        "capability_id": f"LMC-{ordinal:03d}",
+                        "asset_id": asset_id,
+                        "asset_name": _compact(asset.get("name") or asset_id, 160),
+                        "shot_id": f"{chapter_id}-R{range_index:02d}",
+                        "source_in_seconds": start,
+                        "source_out_seconds": end,
+                        "duration_seconds": round(max(0.0, end - start), 3),
+                        "source_width": width, "source_height": height,
+                        "source_aspect_ratio": round(width / height, 6) if width > 0 and height > 0 else None,
+                        "summary": summary, "entities": entities, "actions": actions, "unknowns": unknowns,
+                        "cut_policy": "preview_required", "continuity_group_id": None,
+                        "evidence_level": "overview", "requires_source_preview": True,
+                        "evidence": {
+                            "source": "overview", "chapter_id": chapter_id,
+                            "index_fingerprint": str(index.get("signature") or ""), "cell_ids": evidence_cells,
+                        },
+                    })
+            continue
         if str(index.get("status") or "") != "completed" or vision.get("status") != "completed":
             warnings.append(f"素材 {asset_id} 尚未完成视觉理解 2.0，不能作为自动编排依据")
             continue
-        width, height = _asset_resolution(asset)
         for shot in index.get("shots") or []:
             if not isinstance(shot, dict):
                 continue
@@ -235,6 +281,8 @@ def build_material_capability_map(
                 "unknowns": unknowns,
                 "cut_policy": cut_policy,
                 "continuity_group_id": continuity_group_id,
+                "evidence_level": "vision_v2",
+                "requires_source_preview": False,
                 "evidence": {
                     "source": "vision_v2",
                     "shot_id": shot_id,
@@ -409,6 +457,24 @@ def build_orchestration_draft(
             })
             continue
         _, matched, capability = scored[0]
+        if capability.get("evidence_level") == "overview" or capability.get("requires_source_preview"):
+            draft["scene_plans"].append({
+                "scene_id": scene_id,
+                "status": "needs_source_preview",
+                "visual_role": fallback_role,
+                "capability_id": capability["capability_id"],
+                "matched_terms": matched,
+                "source_preview": {
+                    "asset_id": capability["asset_id"],
+                    "source_in_seconds": capability["source_in_seconds"],
+                    "source_out_seconds": capability["source_out_seconds"],
+                    "evidence_level": "overview",
+                    "evidence": deepcopy(capability["evidence"]),
+                },
+                "warnings": ["该候选来自稀疏联系表概览，只能定位原视频；请先人工预览对应时间，再改用镜头级证据或手动采用。"],
+            })
+            unused_capabilities.remove(capability)
+            continue
         source_duration = _number(capability.get("duration_seconds"))
         if capability.get("cut_policy") == "atomic" and source_duration > duration + .001:
             draft["scene_plans"].append({

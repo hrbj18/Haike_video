@@ -188,7 +188,7 @@ def test_avatar_parent_routes_keep_budget_and_worker_lease_server_side(
         {
             "visual": {"planning_mode": "rule_mix"},
             "budget_limit_cny": 5.0,
-            "allow_plus_on_oom": False,
+            "allow_plus_on_oom": True,
         },
         {
             "visual": {"planning_mode": "rule_mix"},

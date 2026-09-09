@@ -30,10 +30,11 @@
     "reliable_output": "review_only"
   },
   "runninghub": {
-    "primary_instance": "default",
+    "primary_instance": "plus",
     "standard_instance_type": "default",
-    "allow_plus": false,
-    "max_concurrency": 1
+    "plus_instance_type": "plus",
+    "allow_plus": true,
+    "max_concurrency": 2
   },
   "avatar": {
     "default_treatment": "pip_top_left",

@@ -20,6 +20,20 @@ def write_json(path: Path, value: dict) -> None:
     path.write_text(json.dumps(value, ensure_ascii=False), encoding="utf-8")
 
 
+def test_visuals_complete_accepts_uploaded_full_coverage_block_without_status() -> None:
+    state = {
+        "assets": [{"id": "S-001", "path": "assets/incoming/news.jpg"}],
+        "scenes": [{
+            "id": "scene-001", "start_seconds": 0.0, "end_seconds": 4.0,
+            "visual_timeline": {
+                "blocks": [{"asset_id": "S-001", "start_seconds": 0.0, "end_seconds": 4.0}],
+            },
+        }],
+    }
+
+    assert pipeline._visuals_complete(state) is True
+
+
 def make_project(root: Path) -> tuple[Path, dict]:
     project = root / "avatar-one-click"
     project.mkdir()
@@ -73,8 +87,8 @@ def prepared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dic
     runninghub = {
         "ready": True, "provider": "RunningHub", "workflow_id": pipeline.PRODUCTION_WORKFLOW_ID,
         "workflow_profile": pipeline.PRODUCTION_WORKFLOW_PROFILE, "resolution": "448x560",
-        "fps": 25, "frame_clock": "final_pcm_samples_exact", "instance_type": "default",
-        "instance_label": "Standard 24GB", "plus_allowed": False, "max_concurrency": 1, "issues": [],
+        "fps": 25, "frame_clock": "final_pcm_samples_exact", "instance_type": "plus",
+        "instance_label": "Plus 48GB", "plus_allowed": True, "max_concurrency": 2, "issues": [],
     }
     capabilities = {
         "tts": {"available": True, "status": "available"},
@@ -109,13 +123,14 @@ def prepared(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, dic
     monkeypatch.setattr(
         pipeline,
         "_runninghub_preflight",
-        lambda *, allow_plus_on_oom=False: {
+        lambda *, allow_plus_on_oom=True: {
             **runninghub,
-            "plus_allowed": bool(allow_plus_on_oom),
-            "plus_fallback_only": True,
-            "plus_instance_type": "plus" if allow_plus_on_oom else None,
-            "plus_instance_label": "Plus 48GB" if allow_plus_on_oom else None,
-            "recovery_sequence": ["default", "default", "plus"] if allow_plus_on_oom else ["default", "default"],
+            "plus_allowed": True,
+            "plus_fallback_only": False,
+            "plus_instance_type": "plus",
+            "plus_instance_label": "Plus 48GB",
+            "recovery_sequence": ["plus"],
+            "submission_strategy": "submit_all_then_poll",
         },
     )
     monkeypatch.setattr(pipeline, "collect_review_preview_capabilities", lambda **_kwargs: capabilities)
@@ -217,21 +232,24 @@ class FakeTTS:
 class FakeRunningHub:
     def __init__(self) -> None:
         self.submits: list[dict] = []
+        self.events: list[tuple[str, str]] = []
 
     def upload_file(self, path: Path, *, file_type: str) -> str:
         assert path.is_file()
         return f"remote-{file_type}-{path.name}"
 
     def submit(self, **payload: str) -> dict:
-        assert payload["instance_type"] == "default"
+        assert payload["instance_type"] == "plus"
         self.submits.append(payload)
+        self.events.append(("submit", f"RH-{len(self.submits)}"))
         return {"task_id": f"RH-{len(self.submits)}"}
 
     def poll(self, task_id: str) -> dict:
+        self.events.append(("poll", task_id))
         return {
             "status": "SUCCEEDED", "video_url": f"https://example.invalid/{task_id}.mp4",
             "consume_money_cny": 0.2,
-            "billing": {"observed_instance": "standard_24gb"},
+            "billing": {"observed_instance": "plus_48gb"},
         }
 
     def download(self, _url: str, target: Path) -> None:
@@ -253,9 +271,11 @@ class SequencedRunningHub(FakeRunningHub):
 
     def submit(self, **payload: object) -> dict:
         self.submits.append(dict(payload))
+        self.events.append(("submit", f"RH-{len(self.submits)}"))
         return {"task_id": f"RH-{len(self.submits)}"}
 
     def poll(self, task_id: str) -> dict:
+        self.events.append(("poll", task_id))
         submit_index = int(task_id.rsplit("-", 1)[-1]) - 1
         if submit_index < len(self.results):
             return self.results[submit_index]
@@ -327,16 +347,21 @@ def test_preflight_and_start_freeze_two_roles_without_leaking_worker(prepared: t
     preflight = pipeline.avatar_review_preview_preflight(project, {"visual": {"planning_mode": "ai_director"}})
     assert preflight["ready"] is True
     assert preflight["speaker_count"] == 2
-    assert preflight["avatar_contract"]["instance_type"] == "default"
-    assert preflight["avatar_contract"]["plus_allowed"] is False
-    assert preflight["avatar_contract"]["recovery_sequence"] == ["default", "default"]
+    assert preflight["avatar_contract"]["instance_type"] == "plus"
+    assert preflight["avatar_contract"]["plus_allowed"] is True
+    assert preflight["avatar_contract"]["recovery_sequence"] == ["plus"]
+    assert preflight["avatar_contract"]["max_concurrency"] == 2
+    assert preflight["avatar_contract"]["submission_strategy"] == "submit_all_then_poll"
     assert preflight["avatar_recovery"] == {
-        "version": "runninghub-oom-recovery-v1",
+        "version": "runninghub-plus-parallel-v2",
         "automatic": True,
         "oom_only": True,
-        "standard_max_attempts": 2,
+        "primary_instance": "plus",
+        "standard_max_attempts": 0,
         "plus_max_attempts": 1,
-        "plus_48gb_authorized": False,
+        "plus_48gb_authorized": True,
+        "max_concurrency": 2,
+        "submission_strategy": "submit_all_then_poll",
         "ambiguous_policy": "stop",
         "budget_recheck_each_attempt": True,
         "preserve_completed_roles": True,
@@ -350,6 +375,7 @@ def test_preflight_and_start_freeze_two_roles_without_leaking_worker(prepared: t
     assert preflight["budget"] == {
         "limit_cny": 5.0, "absolute_user_limit_cny": 8.0,
         "reservation_per_role_cny": pipeline.ROLE_RESERVATION_CNY,
+        "required_initial_reservation_cny": 2 * pipeline.ROLE_RESERVATION_CNY,
     }
 
     started = pipeline.start_avatar_review_preview_job(project, {
@@ -362,8 +388,8 @@ def test_preflight_and_start_freeze_two_roles_without_leaking_worker(prepared: t
     assert started["pipeline_kind"] == "avatar_review_preview"
     assert started["frozen_input"]["asr"]["local_only"] is True
     assert started["frozen_input"]["avatar_recovery"] == preflight["avatar_recovery"]
-    assert started["frozen_input"]["turn_timing"]["speaker_change_gap_ms"] == 250
-    assert started["frozen_input"]["turn_timing"]["same_speaker_gap_ms"] == 300
+    assert started["frozen_input"]["turn_timing"]["speaker_change_gap_ms"] == 160
+    assert started["frozen_input"]["turn_timing"]["same_speaker_gap_ms"] == 280
     assert "worker_token" not in started
 
 
@@ -405,7 +431,7 @@ def test_prepare_longform_package_rebuilds_legacy_gap_settings(
     }
     rebuilt = {
         **legacy,
-        "settings": {"speaker_change_gap_seconds": 0.25, "same_speaker_gap_seconds": 0.30},
+        "settings": {"speaker_change_gap_seconds": 0.16, "same_speaker_gap_seconds": 0.28},
         "speakers": [{"speaker_id": role, "name": label} for role, label in pipeline.ROLE_LABELS.items()],
     }
     captured: list[dict] = []
@@ -421,12 +447,12 @@ def test_prepare_longform_package_rebuilds_legacy_gap_settings(
 
     package = pipeline._prepare_longform_package(project, records)
 
-    assert package["settings"]["speaker_change_gap_seconds"] == pytest.approx(0.25)
-    assert package["settings"]["same_speaker_gap_seconds"] == pytest.approx(0.30)
+    assert package["settings"]["speaker_change_gap_seconds"] == pytest.approx(0.16)
+    assert package["settings"]["same_speaker_gap_seconds"] == pytest.approx(0.28)
     assert captured == [{
         "replace": True, "generation_mode": "runninghub_longform", "import_mode": "longform",
-        "require_asr": True, "speaker_change_gap_seconds": 0.25,
-        "same_speaker_gap_seconds": 0.3, "default_treatment": "custom",
+        "require_asr": True, "speaker_change_gap_seconds": 0.16,
+        "same_speaker_gap_seconds": 0.28, "default_treatment": "custom",
         "background_mode": "opaque",
     }]
 
@@ -450,12 +476,22 @@ def test_exact_clock_voice_plan_checks_five_minute_limit_before_runninghub(
 
     plan = pipeline._validate_one_click_avatar_duration(tmp_path, voice)
 
-    assert plan["planned_master_seconds"] == pytest.approx(200.5)
+    assert plan["planned_master_seconds"] == pytest.approx(200.32)
     assert plan["maximum_seconds"] == 300.0
     assert voice["avatar_duration_plan"] == plan
     monkeypatch.setattr(pipeline, "ONE_CLICK_AVATAR_MAX_DURATION_SECONDS", 200.0)
     with pytest.raises(pipeline.AvatarReviewPreviewError, match="未提交 RunningHub"):
         pipeline._validate_one_click_avatar_duration(tmp_path, {})
+
+
+def test_new_turn_timing_contract_uses_frame_aligned_assembly_gaps() -> None:
+    contract = pipeline._timing_contract()
+
+    assert contract["version"] == "avatar-turn-timing-v4"
+    assert contract["between_source_silence_ms"] == 500
+    assert contract["same_speaker_gap_ms"] == 280
+    assert contract["speaker_change_gap_ms"] == 160
+    assert contract["signature"]
 
 
 def test_frozen_final_gap_contract_rejects_worker_input_drift(
@@ -607,7 +643,9 @@ def test_mocked_full_parent_reaches_review_ready_and_settles_budget(
     assert completed["budget"]["reserved"] == 0
     assert completed["budget"]["spent"] == pytest.approx(0.4)
     assert len(client.submits) == 2
-    assert all(item["instance_type"] == "default" for item in client.submits)
+    assert all(item["instance_type"] == "plus" for item in client.submits)
+    assert [kind for kind, _task_id in client.events[:2]] == ["submit", "submit"]
+    assert client.events[2][0] == "poll"
     assert whisper_load_tests and not any(whisper_load_tests)
     records = wb.read_workbench(project)["automation"]["review_preview_pipeline"]["phases"]["avatar_generation"]["output"]["roles"]
     assert all(item["clock_validation"]["status"] == "passed" for item in records.values())
@@ -631,16 +669,14 @@ def test_mocked_full_parent_reaches_review_ready_and_settles_budget(
     assert len(client.submits) == 2
 
 
-def test_structured_oom_recovers_in_one_parent_run_as_default_default_plus(
+def test_plus_oom_stops_after_one_attempt_but_finishes_polling_submitted_sibling(
     prepared: tuple[Path, dict], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, _script = prepared
     client = SequencedRunningHub([
-        structured_oom_result(),
-        structured_oom_result(),
+        structured_oom_result(observed_instance="plus_48gb"),
         {
-            "status": "SUCCEEDED",
-            "video_url": "https://example.invalid/RH-3.mp4",
+            "status": "SUCCEEDED", "video_url": "https://example.invalid/RH-2.mp4",
             "consume_money_cny": 0.2,
             "billing": {"observed_instance": "plus_48gb"},
         },
@@ -653,31 +689,28 @@ def test_structured_oom_recovers_in_one_parent_run_as_default_default_plus(
         "visual": {"planning_mode": "rule_mix"},
     })
 
-    completed = pipeline.run_avatar_review_preview_job(
+    failed = pipeline.run_avatar_review_preview_job(
         project,
         started["job_id"],
         overrides=completed_parent_overrides(client),
     )
 
-    assert completed["status"] == "completed"
+    assert failed["status"] == "failed"
+    assert failed["error"]["type"] == "AvatarRecoveryExhaustedError"
     assert started["frozen_input"]["avatar_recovery"]["plus_48gb_authorized"] is True
-    assert [item["instance_type"] for item in client.submits] == [
-        "default", "default", "plus", "default",
-    ]
+    assert [item["instance_type"] for item in client.submits] == ["plus", "plus"]
+    assert [kind for kind, _task_id in client.events[:2]] == ["submit", "submit"]
     state = wb.read_workbench(project)
     roles = state["automation"]["review_preview_pipeline"]["phases"]["avatar_generation"]["output"]["roles"]
-    assert sorted(len(item["history"]) for item in roles.values()) == [1, 3]
-    recovered = next(item for item in roles.values() if len(item["history"]) == 3)
-    assert [item.get("requested_instance") or item.get("instance") for item in recovered["history"]] == [
-        "default", "default", "plus",
-    ]
+    assert sorted(item["status"] for item in roles.values()) == ["completed", "failed"]
+    assert all(len(item["history"]) == 1 for item in roles.values())
 
 
 def test_non_oom_terminal_failure_is_nonretryable_even_with_plus_authorized(
     prepared: tuple[Path, dict], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, _script = prepared
-    client = SequencedRunningHub([{
+    terminal_failure = {
         "status": "FAILED",
         "error": "model input validation failed",
         "failure_details": {
@@ -686,8 +719,9 @@ def test_non_oom_terminal_failure_is_nonretryable_even_with_plus_authorized(
             "node_name": "LoadImage",
         },
         "consume_money_cny": 0.1,
-        "billing": {"observed_instance": "standard_24gb"},
-    }])
+        "billing": {"observed_instance": "plus_48gb"},
+    }
+    client = SequencedRunningHub([terminal_failure, terminal_failure])
     started = pipeline.start_avatar_review_preview_job(project, {
         "confirmed": True,
         "budget_limit_cny": 5.0,
@@ -705,45 +739,36 @@ def test_non_oom_terminal_failure_is_nonretryable_even_with_plus_authorized(
     assert failed["error"]["type"] == "AvatarProviderTerminalError"
     assert failed["error"]["retryable"] is False
     assert failed["safe_resume_point"] is None
-    assert [item["instance_type"] for item in client.submits] == ["default"]
+    assert [item["instance_type"] for item in client.submits] == ["plus", "plus"]
     with pytest.raises(pipeline.AvatarReviewPreviewError):
         pipeline.resume_avatar_review_preview_job(project, started["job_id"])
-    assert len(client.submits) == 1
+    assert len(client.submits) == 2
 
 
-def test_budget_is_rechecked_before_uploading_or_submitting_an_oom_retry(
+def test_parallel_budget_is_rejected_before_any_upload_or_paid_submit(
     prepared: tuple[Path, dict], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, _script = prepared
     client = SequencedRunningHub([structured_oom_result()])
-    started = pipeline.start_avatar_review_preview_job(project, {
-        "confirmed": True,
-        "budget_limit_cny": pipeline.ROLE_RESERVATION_CNY,
-        "allow_plus_on_oom": True,
+    payload = {
+        "confirmed": True, "budget_limit_cny": pipeline.ROLE_RESERVATION_CNY,
         "visual": {"planning_mode": "rule_mix"},
-    })
-
-    failed = pipeline.run_avatar_review_preview_job(project, started["job_id"], overrides={
-        "tts_factory": FakeTTS,
-        "runninghub_client_factory": lambda: client,
-        "poll_interval": 0,
-    })
-
-    assert failed["status"] == "failed"
-    assert failed["error"]["type"] == "AvatarBudgetBlockedError"
-    assert failed["error"]["retryable"] is False
-    assert failed["safe_resume_point"] is None
-    assert [item["instance_type"] for item in client.submits] == ["default"]
-    assert len(client.uploads) == 2
+    }
+    preflight = pipeline.avatar_review_preview_preflight(project, payload)
+    assert preflight["ready"] is False
+    assert any("一次冻结" in blocker for blocker in preflight["blockers"])
+    with pytest.raises(pipeline.AvatarReviewPreviewError):
+        pipeline.start_avatar_review_preview_job(project, payload)
+    assert client.submits == []
+    assert client.uploads == []
 
 
-def test_plus_third_failure_is_exhausted_and_resume_never_submits_a_fourth_task(
+def test_plus_first_failure_is_exhausted_and_resume_never_submits_again(
     prepared: tuple[Path, dict], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, _script = prepared
     client = SequencedRunningHub([
-        structured_oom_result(),
-        structured_oom_result(),
+        structured_oom_result(observed_instance="plus_48gb"),
         structured_oom_result(observed_instance="plus_48gb"),
     ])
     started = pipeline.start_avatar_review_preview_job(project, {
@@ -763,10 +788,10 @@ def test_plus_third_failure_is_exhausted_and_resume_never_submits_a_fourth_task(
     assert failed["error"]["type"] == "AvatarRecoveryExhaustedError"
     assert failed["error"]["retryable"] is False
     assert failed["safe_resume_point"] is None
-    assert [item["instance_type"] for item in client.submits] == ["default", "default", "plus"]
+    assert [item["instance_type"] for item in client.submits] == ["plus", "plus"]
     with pytest.raises(pipeline.AvatarReviewPreviewError):
         pipeline.resume_avatar_review_preview_job(project, started["job_id"])
-    assert len(client.submits) == 3
+    assert len(client.submits) == 2
 
 
 def test_exact_clock_output_contract_rejects_frame_rate_duration_and_audio_drift() -> None:
@@ -1175,14 +1200,19 @@ def test_cuda_memory_wording_without_explicit_oom_never_authorizes_paid_recovery
 
 
 def test_actual_cost_over_budget_is_persisted_and_blocks_resume(
-    prepared: tuple[Path, dict],
+    prepared: tuple[Path, dict], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, _script = prepared
     client = SequencedRunningHub([{
         "status": "SUCCEEDED", "video_url": "https://example.invalid/over-budget.mp4",
         "consume_money_cny": 5.1,
-        "billing": {"observed_instance": "standard_24gb"},
+        "billing": {"observed_instance": "plus_48gb"},
+    }, {
+        "status": "SUCCEEDED", "video_url": "https://example.invalid/second.mp4",
+        "consume_money_cny": 0.2,
+        "billing": {"observed_instance": "plus_48gb"},
     }])
+    patch_successful_local_stages(monkeypatch)
     started = pipeline.start_avatar_review_preview_job(project, {
         "confirmed": True, "budget_limit_cny": 5.0,
         "allow_plus_on_oom": True, "visual": {"planning_mode": "rule_mix"},
@@ -1199,29 +1229,29 @@ def test_actual_cost_over_budget_is_persisted_and_blocks_resume(
     assert failed["error"]["type"] == "AvatarBudgetBlockedError"
     assert failed["error"]["retryable"] is False
     assert failed["safe_resume_point"] is None
-    assert current["budget"]["spent"] == pytest.approx(5.1)
+    assert current["budget"]["spent"] == pytest.approx(5.3)
     assert current["budget"]["reserved"] == pytest.approx(0.0)
     assert current["budget"]["over_limit"]["limit_cny"] == pytest.approx(5.0)
-    assert len(client.submits) == 1
+    assert len(client.submits) == 2
     with pytest.raises(pipeline.AvatarReviewPreviewError):
         pipeline.resume_avatar_review_preview_job(project, started["job_id"])
 
 
-def test_active_plus_third_attempt_after_restart_is_polled_not_resubmitted(
+def test_active_parallel_plus_tasks_after_restart_are_polled_not_resubmitted(
     prepared: tuple[Path, dict], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, _script = prepared
 
-    class InterruptThirdPollClient(SequencedRunningHub):
+    class InterruptFirstPollClient(SequencedRunningHub):
         interrupted = False
 
         def poll(self, task_id: str) -> dict:
-            if task_id == "RH-3" and not self.interrupted:
+            if task_id == "RH-1" and not self.interrupted:
                 self.interrupted = True
-                raise KeyboardInterrupt("synthetic restart while Plus task is active")
+                raise KeyboardInterrupt("synthetic restart while two Plus tasks are active")
             return super().poll(task_id)
 
-    client = InterruptThirdPollClient([structured_oom_result(), structured_oom_result()])
+    client = InterruptFirstPollClient([])
     patch_successful_local_stages(monkeypatch)
     started = pipeline.start_avatar_review_preview_job(project, {
         "confirmed": True, "budget_limit_cny": 5.0,
@@ -1232,12 +1262,10 @@ def test_active_plus_third_attempt_after_restart_is_polled_not_resubmitted(
             project, started["job_id"], overrides=completed_parent_overrides(client),
         )
     before = wb.read_workbench(project)["automation"]["review_preview_pipeline"]
-    active = next(
-        item for item in before["phases"]["avatar_generation"]["output"]["roles"].values()
-        if item.get("task_id") == "RH-3"
-    )
-    assert active["requested_instance"] == "plus"
-    assert len(active["history"]) == 3
+    active = before["phases"]["avatar_generation"]["output"]["roles"]
+    assert {item.get("task_id") for item in active.values()} == {"RH-1", "RH-2"}
+    assert all(item["requested_instance"] == "plus" for item in active.values())
+    assert all(len(item["history"]) == 1 for item in active.values())
 
     pipeline.recover_avatar_review_preview_job(project)
     completed = pipeline.run_avatar_review_preview_job(
@@ -1245,9 +1273,7 @@ def test_active_plus_third_attempt_after_restart_is_polled_not_resubmitted(
     )
 
     assert completed["status"] == "completed"
-    assert [item["instance_type"] for item in client.submits] == [
-        "default", "default", "plus", "default",
-    ]
+    assert [item["instance_type"] for item in client.submits] == ["plus", "plus"]
 
 
 def test_transient_runninghub_status_query_retries_same_task_without_resubmit(
@@ -1281,15 +1307,16 @@ def test_transient_runninghub_status_query_retries_same_task_without_resubmit(
     assert all("transient_poll_error_count" not in record for record in records.values())
 
 
-def test_standard_request_observed_as_plus_is_nonretryable_instance_drift(
+def test_plus_request_observed_as_standard_is_nonretryable_instance_drift(
     prepared: tuple[Path, dict],
 ) -> None:
     project, _script = prepared
-    client = SequencedRunningHub([{
+    wrong_instance = {
         "status": "SUCCEEDED", "video_url": "https://example.invalid/wrong-instance.mp4",
         "consume_money_cny": 0.2,
-        "billing": {"observed_instance": "plus_48gb"},
-    }])
+        "billing": {"observed_instance": "standard_24gb"},
+    }
+    client = SequencedRunningHub([wrong_instance, wrong_instance])
     started = pipeline.start_avatar_review_preview_job(project, {
         "confirmed": True, "budget_limit_cny": 5.0,
         "allow_plus_on_oom": True, "visual": {"planning_mode": "rule_mix"},
@@ -1305,16 +1332,17 @@ def test_standard_request_observed_as_plus_is_nonretryable_instance_drift(
     assert failed["error"]["type"] == "AvatarInputDriftError"
     assert failed["error"]["retryable"] is False
     assert failed["safe_resume_point"] is None
-    assert len(client.submits) == 1
+    assert len(client.submits) == 2
 
 
-def test_structured_torch_oom_without_plus_authorization_stops_after_two_standard_attempts(
+def test_structured_torch_oom_on_plus_stops_after_one_attempt_per_role(
     prepared: tuple[Path, dict], monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     project, _script = prepared
     first = structured_oom_result()
     first["failure_details"]["exception_type"] = "torch.OutOfMemoryError"
-    client = SequencedRunningHub([first, structured_oom_result()])
+    first["billing"] = {"observed_instance": "plus_48gb"}
+    client = SequencedRunningHub([first, structured_oom_result(observed_instance="plus_48gb")])
     started = pipeline.start_avatar_review_preview_job(project, {
         "confirmed": True, "budget_limit_cny": 5.0, "visual": {"planning_mode": "rule_mix"},
     })
@@ -1327,8 +1355,8 @@ def test_structured_torch_oom_without_plus_authorization_stops_after_two_standar
     assert failed["status"] == "failed"
     assert failed["error"]["retryable"] is False
     assert failed["safe_resume_point"] is None
-    assert started["frozen_input"]["avatar_recovery"]["plus_48gb_authorized"] is False
-    assert [item["instance_type"] for item in client.submits] == ["default", "default"]
+    assert started["frozen_input"]["avatar_recovery"]["plus_48gb_authorized"] is True
+    assert [item["instance_type"] for item in client.submits] == ["plus", "plus"]
 
 
 def test_visual_resume_requeues_only_owned_failed_slots(

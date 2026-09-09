@@ -204,6 +204,7 @@ def build_coarse_index(
     window_seconds: float = 30,
     scene_threshold: float = .32,
     transcript_provider: TranscriptProvider | None = None,
+    transcript_identity: str | None = None,
 ) -> dict[str, Any]:
     source = source.resolve()
     fingerprint = media_fingerprint(source)
@@ -215,6 +216,10 @@ def build_coarse_index(
         "window_seconds": round(max(2, window_seconds), 3),
         "scene_threshold": round(min(.9, max(.05, scene_threshold)), 3),
         "transcript_requested": transcript_provider is not None,
+        # A local Whisper transcript and a cloud ASR transcript are not
+        # interchangeable evidence.  Include the selected provider in the
+        # cache key so a later cloud pass cannot inherit a local transcript.
+        "transcript_identity": str(transcript_identity or ("custom" if transcript_provider else "none")),
     }
     signature = hashlib.sha256(json.dumps({"fingerprint": fingerprint, "config": config}, sort_keys=True).encode("utf-8")).hexdigest()
     run_dir = output_dir / signature[:16]
@@ -237,6 +242,8 @@ def build_coarse_index(
             transcript_text, transcript_segments, transcript_status = transcript_provider(source)
             transcript_status = {"status": "available", **(transcript_status or {})}
         except Exception as exc:  # ASR is optional; visual evidence remains useful.
+            if bool(getattr(exc, "required", False)):
+                raise
             transcript_status = {"status": "transcript_unavailable", "reason": str(exc)[:500]}
 
     boundaries = _coarse_boundaries(duration, scene_changes, config["window_seconds"])
@@ -283,6 +290,7 @@ def build_fine_index(
     *,
     ffmpeg: str,
     transcript_provider: TranscriptProvider | None = None,
+    transcript_identity: str | None = None,
     fps: float = 2,
 ) -> dict[str, Any]:
     source = Path(str((coarse_index.get("source") or {}).get("path") or "")).resolve()
@@ -294,7 +302,8 @@ def build_fine_index(
     index_path = Path(str(coarse_index.get("index_path") or ""))
     if not index_path.is_file():
         raise MediaIndexError("粗筛索引文件不存在，无法开始精筛")
-    window_key = hashlib.sha256(f"{coarse_index.get('signature')}|{start}|{end}|{fps}".encode("utf-8")).hexdigest()[:16]
+    transcript_key = str(transcript_identity or ("custom" if transcript_provider else "none"))
+    window_key = hashlib.sha256(f"{coarse_index.get('signature')}|{start}|{end}|{fps}|{transcript_key}".encode("utf-8")).hexdigest()[:16]
     directory = index_path.parent / "fine" / window_key
     result_path = directory / "fine-index.json"
     if result_path.is_file():
@@ -329,6 +338,8 @@ def build_fine_index(
             transcript_text, transcript_segments, transcript_status = transcript_provider(audio)
             transcript_status = {"status": "available", **(transcript_status or {})}
         except Exception as exc:
+            if bool(getattr(exc, "required", False)):
+                raise
             transcript_status = {"status": "transcript_unavailable", "reason": str(exc)[:500]}
 
     payload = {

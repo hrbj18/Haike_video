@@ -28,9 +28,14 @@ from backlot.ai_text import (
 
 VISION_PROMPT_VERSION = "material-shot-description-v2"
 VISION_SCHEMA_VERSION = 1
+OVERVIEW_PROMPT_VERSION = "material-contact-sheet-overview-v1"
+OVERVIEW_SCHEMA_VERSION = 1
+DETAIL_PROMPT_VERSION = "material-overview-detail-v1"
+DETAIL_SCHEMA_VERSION = 1
 MAX_SHOTS_PER_REQUEST = 4
 MAX_IMAGES_PER_REQUEST = 12
 MAX_SOURCE_IMAGE_BYTES = 32 * 1024 * 1024
+MAX_CONTACT_SHEETS_PER_REQUEST = 9
 
 
 class VisionAIError(RuntimeError):
@@ -58,6 +63,19 @@ def vision_runtime_identity(provider: str = "default") -> dict[str, str]:
         "schema_version": str(VISION_SCHEMA_VERSION),
         "image_detail": "auto",
         "image_longest_edge": "768",
+    }
+
+
+def overview_runtime_identity(provider: str = "default", *, detailed: bool = False) -> dict[str, str]:
+    """Cache-safe identity for contact-sheet overview or its detail upgrade."""
+    _, _, model = _vision_runtime(provider)
+    return {
+        "provider": provider,
+        "model": model,
+        "prompt_version": DETAIL_PROMPT_VERSION if detailed else OVERVIEW_PROMPT_VERSION,
+        "schema_version": str(DETAIL_SCHEMA_VERSION if detailed else OVERVIEW_SCHEMA_VERSION),
+        "image_detail": "auto",
+        "image_longest_edge": "1280" if detailed else "2048",
     }
 
 
@@ -172,6 +190,27 @@ def _normalize_evidence_items(values: Any, valid_frame_ids: set[str], label: str
     return output
 
 
+def _normalize_cell_evidence_items(values: Any, valid_cell_ids: set[str], label: str) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        raise VisionAIError(f"快速概览的{label}字段不是数组")
+    output: list[dict[str, Any]] = []
+    for value in values[:20]:
+        if not isinstance(value, dict):
+            raise VisionAIError(f"快速概览的{label}条目无效")
+        cell_ids = [str(item) for item in value.get("evidence_cell_ids") or []]
+        if not cell_ids or not set(cell_ids).issubset(valid_cell_ids):
+            raise VisionAIError(f"快速概览的{label}引用了未输入的联系表单元格")
+        item = {
+            "name": _short_text(value.get("name"), 80, required=True),
+            "confidence": _confidence(value.get("confidence")),
+            "evidence_cell_ids": list(dict.fromkeys(cell_ids)),
+        }
+        if label == "动作" and value.get("subject"):
+            item["subject"] = _short_text(value.get("subject"), 80)
+        output.append(item)
+    return output
+
+
 def _normalize_description(raw: dict[str, Any], shot: dict[str, Any]) -> dict[str, Any]:
     valid_frame_ids = {str(frame["frame_id"]) for frame in shot.get("frames") or [] if frame.get("selected_for_vision")}
     if not valid_frame_ids:
@@ -271,6 +310,146 @@ def describe_shots(
         "request_count": request_count,
         "image_count": image_count,
     }
+
+
+CONTACT_SHEET_SYSTEM_PROMPT = """你是本地视频素材的快速概览分析器。输入是按时间顺序排列的联系表；每个格子都是离散采样，并不代表连续动作。
+只描述图片直接支持的事实，不根据文件名、脚本或常识补充人物身份、产品型号、因果或用途。
+只输出 JSON：
+{"chapters":[{"chapter_id":"CHAPTER-01","summary":"可见画面摘要","subjects":[{"name":"主体","confidence":0.0,"evidence_cell_ids":["SHEET-0001:R1C1"]}],"actions":[{"name":"动作","subject":"主体","confidence":0.0,"evidence_cell_ids":["SHEET-0001:R1C1"]}],"quality":{"blur":"low|medium|high","notes":"质量说明"},"usable_ranges":[{"label":"可用画面","confidence":0.0,"evidence_cell_ids":["SHEET-0001:R1C1"]}],"detail_candidates":[{"cell_id":"SHEET-0001:R1C1","reason":"small_subject|motion_ambiguity|visible_text|low_confidence"}],"unknowns":["无法确认的信息"]}]}
+规则：必须为每个输入 chapter_id 恰好返回一项；只能引用输入 cell_id；不要输出时间戳；没有证据时写入 unknowns。"""
+
+
+def _ranges_from_cells(values: Any, valid_cell_ids: set[str], cell_pts: dict[str, float]) -> list[dict[str, Any]]:
+    if not isinstance(values, list):
+        raise VisionAIError("快速概览的可用区间字段不是数组")
+    output: list[dict[str, Any]] = []
+    for value in values[:12]:
+        if not isinstance(value, dict):
+            raise VisionAIError("快速概览的可用区间条目无效")
+        cell_ids = [str(item) for item in value.get("evidence_cell_ids") or []]
+        if not cell_ids or not set(cell_ids).issubset(valid_cell_ids):
+            raise VisionAIError("快速概览的可用区间引用了未输入的联系表单元格")
+        points = sorted(float(cell_pts[cell_id]) for cell_id in cell_ids)
+        output.append({
+            "label": _short_text(value.get("label"), 80, required=True),
+            "confidence": _confidence(value.get("confidence")),
+            "evidence_cell_ids": list(dict.fromkeys(cell_ids)),
+            "start_seconds": round(points[0], 3),
+            "end_seconds": round(points[-1], 3),
+        })
+    return output
+
+
+def _normalize_contact_sheet_chapter(raw: dict[str, Any], chapter: dict[str, Any], cell_pts: dict[str, float]) -> dict[str, Any]:
+    valid_cell_ids = {str(item) for item in chapter.get("cell_ids") or []}
+    if not valid_cell_ids:
+        raise VisionAIError(f"{chapter['chapter_id']} 没有输入联系表证据")
+    quality = raw.get("quality") if isinstance(raw.get("quality"), dict) else {}
+    unknowns = raw.get("unknowns") if isinstance(raw.get("unknowns"), list) else []
+    candidates_raw = raw.get("detail_candidates") if isinstance(raw.get("detail_candidates"), list) else []
+    candidates: list[dict[str, str]] = []
+    for value in candidates_raw[:20]:
+        if not isinstance(value, dict):
+            raise VisionAIError("快速概览的精细化候选条目无效")
+        cell_id = str(value.get("cell_id") or "")
+        if cell_id not in valid_cell_ids:
+            raise VisionAIError("快速概览的精细化候选引用了未输入的联系表单元格")
+        candidates.append({"cell_id": cell_id, "reason": _short_text(value.get("reason"), 120, required=True)})
+    return {
+        "chapter_id": str(chapter["chapter_id"]),
+        "start_seconds": float(chapter["start_seconds"]),
+        "end_seconds": float(chapter["end_seconds"]),
+        "summary": _short_text(raw.get("summary"), 300, required=True),
+        "subjects": _normalize_cell_evidence_items(raw.get("subjects"), valid_cell_ids, "主体"),
+        "actions": _normalize_cell_evidence_items(raw.get("actions"), valid_cell_ids, "动作"),
+        "quality": {"blur": _short_text(quality.get("blur"), 40), "notes": _short_text(quality.get("notes"), 180)},
+        "usable_ranges": _ranges_from_cells(raw.get("usable_ranges"), valid_cell_ids, cell_pts),
+        "detail_candidates": candidates,
+        "unknowns": [_short_text(value, 180) for value in unknowns[:12] if _short_text(value, 180)],
+    }
+
+
+def describe_contact_sheets(
+    sheets: list[dict[str, Any]],
+    chapters: list[dict[str, Any]],
+    cells: list[dict[str, Any]],
+    *,
+    provider: str = "default",
+    post: Callable[..., Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Describe only contact sheets; source frames and absolute paths stay local."""
+    if not sheets or not chapters:
+        raise VisionAIError("没有可供快速概览的联系表")
+    cell_pts = {str(cell.get("cell_id")): float(cell.get("actual_pts_seconds")) for cell in cells if isinstance(cell, dict) and cell.get("cell_id")}
+    sheets_by_chapter: dict[str, list[dict[str, Any]]] = {}
+    for sheet in sheets:
+        if isinstance(sheet, dict):
+            sheets_by_chapter.setdefault(str(sheet.get("chapter_id") or ""), []).append(sheet)
+    descriptions: list[dict[str, Any]] = []
+    model = ""
+    request_count = 0
+    image_count = 0
+    for offset in range(0, len(chapters), MAX_CONTACT_SHEETS_PER_REQUEST):
+        group = chapters[offset:offset + MAX_CONTACT_SHEETS_PER_REQUEST]
+        content: list[dict[str, Any]] = [{"type": "text", "text": "下列图片是联系表。每章的单元格编号已烘焙在图片中，只能引用这些编号。"}]
+        included: list[dict[str, Any]] = []
+        for chapter in group:
+            chapter_sheets = sheets_by_chapter.get(str(chapter.get("chapter_id") or ""), [])
+            if not chapter_sheets:
+                raise VisionAIError(f"{chapter.get('chapter_id') or '章节'} 缺少联系表")
+            content.append({"type": "text", "text": f"章节 {chapter['chapter_id']}"})
+            for sheet in chapter_sheets:
+                content.append({"type": "text", "text": f"联系表 {sheet['sheet_id']}"})
+                content.append({"type": "image_url", "image_url": {"url": _jpeg_data_url(Path(str(sheet["path"])), longest_edge=2048), "detail": "auto"}})
+                image_count += 1
+            included.append({**chapter, "cell_ids": [cell_id for sheet in chapter_sheets for cell_id in sheet.get("cell_ids") or []]})
+        raw, model = _post_vision_json(CONTACT_SHEET_SYSTEM_PROMPT, content, provider=provider, post=post)
+        rows = raw.get("chapters") if isinstance(raw.get("chapters"), list) else None
+        if rows is None:
+            raise VisionAIError("快速概览结果缺少 chapters 数组")
+        supplied = {str(row.get("chapter_id")): row for row in rows if isinstance(row, dict)}
+        expected = {str(chapter["chapter_id"]) for chapter in included}
+        if set(supplied) != expected or len(rows) != len(expected):
+            raise VisionAIError("快速概览没有为每个输入章节恰好返回一项")
+        for chapter in included:
+            descriptions.append(_normalize_contact_sheet_chapter(supplied[str(chapter["chapter_id"])], chapter, cell_pts))
+        request_count += 1
+    return descriptions, {"provider": provider, "model": model, "prompt_version": OVERVIEW_PROMPT_VERSION, "schema_version": OVERVIEW_SCHEMA_VERSION, "request_count": request_count, "image_count": image_count}
+
+
+DETAIL_SYSTEM_PROMPT = """你是视频素材精细化证据分析器。输入是从已标记联系表单元格回取的原始清晰帧。
+只描述图像直接支持的事实，不根据文件名、脚本或常识补全身份、产品型号、因果或用途。
+只输出 JSON：{"details":[{"detail_id":"DETAIL-001","summary":"可见细节","observations":["可见事实"],"unknowns":["无法确认的信息"],"confidence":0.0}]}。
+必须为每个输入 detail_id 恰好返回一项；不要输出时间戳。"""
+
+
+def describe_detail_frames(
+    frames: list[dict[str, Any]],
+    *,
+    provider: str = "default",
+    post: Callable[..., Any] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if not frames:
+        return [], {"provider": provider, "model": "", "prompt_version": DETAIL_PROMPT_VERSION, "schema_version": DETAIL_SCHEMA_VERSION, "request_count": 0, "image_count": 0}
+    content: list[dict[str, Any]] = [{"type": "text", "text": "以下是需要精细复核的原始证据帧，按 detail_id 输出。"}]
+    for frame in frames:
+        content.append({"type": "text", "text": f"证据 {frame['detail_id']}，来自 {frame['cell_id']}"})
+        content.append({"type": "image_url", "image_url": {"url": _jpeg_data_url(Path(str(frame["path"])), longest_edge=1280), "detail": "auto"}})
+    raw, model = _post_vision_json(DETAIL_SYSTEM_PROMPT, content, provider=provider, post=post)
+    rows = raw.get("details") if isinstance(raw.get("details"), list) else None
+    if rows is None:
+        raise VisionAIError("精细化结果缺少 details 数组")
+    supplied = {str(row.get("detail_id")): row for row in rows if isinstance(row, dict)}
+    expected = {str(frame["detail_id"]) for frame in frames}
+    if set(supplied) != expected or len(rows) != len(expected):
+        raise VisionAIError("精细化结果没有为每张输入证据帧恰好返回一项")
+    output = []
+    for frame in frames:
+        raw_row = supplied[str(frame["detail_id"])]
+        observations = raw_row.get("observations") if isinstance(raw_row.get("observations"), list) else []
+        unknowns = raw_row.get("unknowns") if isinstance(raw_row.get("unknowns"), list) else []
+        output.append({"detail_id": str(frame["detail_id"]), "cell_id": str(frame["cell_id"]), "summary": _short_text(raw_row.get("summary"), 300, required=True), "observations": [_short_text(value, 180) for value in observations[:12] if _short_text(value, 180)], "unknowns": [_short_text(value, 180) for value in unknowns[:12] if _short_text(value, 180)], "confidence": _confidence(raw_row.get("confidence"))})
+    return output, {"provider": provider, "model": model, "prompt_version": DETAIL_PROMPT_VERSION, "schema_version": DETAIL_SCHEMA_VERSION, "request_count": 1, "image_count": len(frames)}
 
 
 def test_vision_ai_connection(*, provider: str = "default", post: Callable[..., Any] | None = None) -> dict[str, Any]:

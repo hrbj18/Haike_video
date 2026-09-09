@@ -94,6 +94,35 @@ class TestBacklotServerApi:
         assert response.status_code == 200
         assert response.json() == {"ok": True, "app": "backlot"}
 
+    def test_doubao_asr_config_is_masked_and_signed_audio_route_is_project_scoped(self, client, projects_root, monkeypatch):
+        project = _make_project(projects_root, "asr-api")
+        audio = project / "artifacts" / "asr" / "S-001" / "sample.mp3"
+        audio.parent.mkdir(parents=True)
+        audio.write_bytes(b"safe-test-audio")
+        monkeypatch.setattr(server_mod, "read_doubao_asr_config", lambda: {
+            "configured": True,
+            "api_key_masked": "abc••••••xyz",
+            "project_media_ready": True,
+        })
+        calls = []
+
+        def fake_resolve(project_id, project_dir, path, expires_at, signature):
+            calls.append((project_id, project_dir, path, expires_at, signature))
+            return audio
+
+        monkeypatch.setattr(server_mod, "resolve_signed_project_audio", fake_resolve)
+        config = client.get("/api/asr/doubao/config")
+        response = client.get(
+            "/api/project/asr-api/workbench/asr-audio",
+            params={"path": "artifacts/asr/S-001/sample.mp3", "expires_at": 123, "signature": "signed"},
+        )
+
+        assert config.status_code == 200
+        assert config.json()["api_key_masked"] == "abc••••••xyz"
+        assert response.status_code == 200
+        assert response.content == b"safe-test-audio"
+        assert calls == [("asr-api", project, "artifacts/asr/S-001/sample.mp3", 123, "signed")]
+
     def test_material_vision_details_endpoint_is_project_scoped(self, client, projects_root, monkeypatch):
         project = _make_project(projects_root, "vision-api")
         calls = []
@@ -108,6 +137,21 @@ class TestBacklotServerApi:
         assert response.status_code == 200
         assert response.json()["shot_count"] == 1
         assert calls == [(project, "S-001", 12)]
+
+    def test_material_overview_details_endpoint_is_project_scoped(self, client, projects_root, monkeypatch):
+        project = _make_project(projects_root, "overview-api")
+        calls = []
+
+        def fake_read(current_project: Path, asset_id: str):
+            calls.append((current_project, asset_id))
+            return {"asset_id": asset_id, "status": "sheets_ready", "sheets": [], "cells": []}
+
+        monkeypatch.setattr(server_mod, "read_asset_material_overview", fake_read)
+        response = client.get("/api/project/overview-api/workbench/assets/S-002/media-index/overview")
+
+        assert response.status_code == 200
+        assert response.json()["status"] == "sheets_ready"
+        assert calls == [(project, "S-002")]
 
     def test_narration_gain_api_is_independent_from_music(self, client, projects_root, monkeypatch):
         _make_project(projects_root, "voice-level")
