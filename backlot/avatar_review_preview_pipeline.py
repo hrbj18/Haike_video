@@ -93,6 +93,11 @@ POLL_TIMEOUT_SECONDS = 8 * 60 * 60
 MAX_TRANSIENT_POLL_ERRORS = 3
 MAX_TRANSIENT_POLL_BACKOFF_SECONDS = 5.0
 MAX_TRAILING_CLOCK_PAD_FRAMES = 5
+# InfiniteTalk can stop on the video frame that contains only the final few
+# milliseconds of speech. Keep this below one quarter of a 25 FPS frame; the
+# missing interval itself must still begin after speech and the remaining
+# frozen PCM tail must independently prove to be all-zero.
+MAX_CLONED_FRAME_SPEECH_OVERLAP_MS = 10
 ONE_CLICK_AVATAR_MAX_DURATION_SECONDS = 300.0
 # The configured text relay may keep an SSE connection alive with heartbeat
 # events even after it stops producing a usable plan. A visual plan is
@@ -1663,10 +1668,19 @@ def _trailing_silence_padding_plan(
     last_speech_end_frame = (
         last_speech_end_sample + samples_per_video_frame - 1
     ) // samples_per_video_frame
-    # The frame cloned by tpad must itself begin at or after speech end.  Merely
-    # covering the final spoken sample is insufficient because cloning that
-    # frame could visibly freeze a mouth pose that still belongs to speech.
-    if actual_frames <= 0 or last_speech_end_sample > (actual_frames - 1) * samples_per_video_frame:
+    if actual_frames <= 0:
+        return None
+    cloned_frame_start_sample = (actual_frames - 1) * samples_per_video_frame
+    missing_interval_start_sample = actual_frames * samples_per_video_frame
+    cloned_frame_speech_overlap_samples = max(0, last_speech_end_sample - cloned_frame_start_sample)
+    max_overlap_samples = int(round(expected_sample_rate * MAX_CLONED_FRAME_SPEECH_OVERLAP_MS / 1000))
+    # The missing interval must be pure post-speech tail. The cloned source
+    # frame may contain only a sub-quarter-frame speech remainder; a larger
+    # overlap could visibly freeze a speaking mouth pose and stays a hard fail.
+    if (
+        last_speech_end_sample > missing_interval_start_sample
+        or cloned_frame_speech_overlap_samples > max_overlap_samples
+    ):
         return None
     trailing_silence_frames = exact_total_frames - last_speech_end_frame
     if missing_frames > trailing_silence_frames:
@@ -1686,6 +1700,11 @@ def _trailing_silence_padding_plan(
         "added_frames": missing_frames,
         "last_speech_end_frame": last_speech_end_frame,
         "trailing_silence_frames": trailing_silence_frames,
+        "last_speech_end_sample": last_speech_end_sample,
+        "cloned_frame_speech_overlap_samples": cloned_frame_speech_overlap_samples,
+        "cloned_frame_speech_overlap_ms": round(
+            cloned_frame_speech_overlap_samples * 1000 / expected_sample_rate, 3
+        ),
     }
 
 
@@ -1749,7 +1768,7 @@ def _validate_or_normalize_exact_clock_avatar_output(
             )
             recovered_plan["pcm_tail_validation"] = _verify_pcm_tail_is_silent(
                 source_audio,
-                start_sample=(int(recovered_plan["source_frames"]) - 1) * samples_per_video_frame,
+                start_sample=int(recovered_plan["last_speech_end_sample"]),
                 expected_sample_rate=expected_sample_rate,
                 expected_sample_frames=sample_frame_count,
             )
@@ -1782,7 +1801,7 @@ def _validate_or_normalize_exact_clock_avatar_output(
 
     plan["pcm_tail_validation"] = _verify_pcm_tail_is_silent(
         source_audio,
-        start_sample=(int(plan["source_frames"]) - 1) * samples_per_video_frame,
+        start_sample=int(plan["last_speech_end_sample"]),
         expected_sample_rate=expected_sample_rate,
         expected_sample_frames=sample_frame_count,
     )

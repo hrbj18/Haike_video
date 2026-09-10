@@ -5192,10 +5192,11 @@ function renderOverview() {
   );
 }
 
-function renderGainControl({ label, value, min, max, step, ariaLabel, help }) {
+function renderGainControl({ label, value, min, max, step, ariaLabel, help, unit = "dB", signed = true }) {
   const input = el("input", { type: "range", min: String(min), max: String(max), step: String(step), value: String(value), "aria-label": ariaLabel });
-  const output = el("strong", { class: "music-gain-value" }, `${Number(value) > 0 ? "+" : ""}${value} dB`);
-  input.addEventListener("input", () => { output.textContent = `${Number(input.value) > 0 ? "+" : ""}${input.value} dB`; });
+  const formatValue = (raw) => `${signed && Number(raw) > 0 ? "+" : ""}${raw} ${unit}`;
+  const output = el("strong", { class: "music-gain-value" }, formatValue(value));
+  input.addEventListener("input", () => { output.textContent = formatValue(input.value); });
   return {
     input,
     node: el("label", { class: "field music-gain-control" }, el("span", {}, label), el("div", { class: "music-gain-row" }, input, output), el("small", {}, help)),
@@ -5260,8 +5261,11 @@ function renderBackgroundMusicPanel() {
   const tracks = Array.isArray(musicCatalog.tracks) ? musicCatalog.tracks : [];
   const defaults = musicCatalog.defaults || { playback_gain_db: -8 };
   const narrationDefaults = musicCatalog.narration_defaults || { playback_gain_db: 0 };
+  const outputLoudnessDefaults = musicCatalog.output_loudness_defaults || { target_lufs: -10 };
   const policy = Object.assign({ enabled: false, track_id: null, playback_gain_db: defaults.playback_gain_db, source_start_seconds: 0, source_end_seconds: null, sample: {} }, state.music_policy || musicCatalog.policy || {});
   const narrationPolicy = Object.assign({ playback_gain_db: narrationDefaults.playback_gain_db }, state.narration_policy || musicCatalog.narration_policy || {});
+  const outputLoudnessPolicy = Object.assign({ target_lufs: outputLoudnessDefaults.target_lufs }, state.output_loudness_policy || musicCatalog.output_loudness_policy || {});
+  const sourceAudioOnly = ((state.automation || {}).audio_mode || "") === "source_audio_only";
   const sample = Object.assign({ status: "idle", output_path: null, scene_id: null, error: "", stale_reason: "" }, policy.sample || {});
   const selectedId = uploadedMusicTrackId || policy.track_id || (tracks[0] && tracks[0].id) || "";
   const enabled = el("input", { type: "checkbox", checked: policy.enabled ? "" : null, "aria-label": "为全片添加背景音乐" });
@@ -5298,8 +5302,19 @@ function renderBackgroundMusicPanel() {
   );
   const gainValue = Math.max(-24, Math.min(0, Number(policy.playback_gain_db ?? defaults.playback_gain_db ?? -8)));
   const narrationGainValue = Math.max(-12, Math.min(12, Number(narrationPolicy.playback_gain_db ?? narrationDefaults.playback_gain_db ?? 0)));
+  const outputLoudnessValue = Math.max(-16, Math.min(-8, Number(outputLoudnessPolicy.target_lufs ?? outputLoudnessDefaults.target_lufs ?? -10)));
   const narrationGain = renderGainControl({ label: "人物台词音量", value: narrationGainValue, min: -12, max: 12, step: .5, ariaLabel: "人物台词音量", help: "只调整人物相对背景音乐的强弱；不会覆盖本地配音音频或数字人原片。" });
   const musicGain = renderGainControl({ label: "背景音乐相对人声音量", value: gainValue, min: -24, max: 0, step: 1, ariaLabel: "背景音乐混音音量", help: "建议从 -8 dB 开始。最终响度归一化会保留人物与音乐的相对比例。" });
+  const outputLoudness = renderGainControl({ label: sourceAudioOnly ? "原音轨整体响度" : "成片整体响度", value: outputLoudnessValue, min: -16, max: -8, step: .5, ariaLabel: "成片整体响度", help: sourceAudioOnly ? "同时调整原音轨内的人声和音乐；可调范围 -16 至 -8 LUFS，True Peak 会自动限制在安全范围内。" : "控制最终视频的整体响度；数值越接近 0 越响，可调范围 -16 至 -8 LUFS。", unit: "LUFS", signed: false });
+  const nudgeOutputLoudness = (direction) => {
+    if (direction > 0) outputLoudness.input.stepUp();
+    else outputLoudness.input.stepDown();
+    outputLoudness.input.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+  const outputLoudnessButtons = el("div", { class: "inline-actions" },
+    button("音量小一点（-0.5 LU）", "quiet small", () => nudgeOutputLoudness(-1)),
+    button("音量大一点（+0.5 LU）", "quiet small", () => nudgeOutputLoudness(1)),
+  );
   if (!tracks.length) select.append(el("option", { value: "" }, "暂无可用新闻背景音乐"));
   for (const track of tracks) select.append(el("option", { value: track.id }, `${track.scope === "project" ? "本项目 · " : "内置 · "}${track.title} · ${fmtDuration(track.duration_seconds || 0)}`));
   select.value = selectedId;
@@ -5388,6 +5403,14 @@ function renderBackgroundMusicPanel() {
   updateDetail({ resetRange: selectedId !== policy.track_id || uploadedMusicTrackId === selectedId });
   const savePolicy = async ({ sampleAfterSave = false } = {}) => {
     try {
+      state = await api("/output-loudness-policy", { method: "PUT", body: { target_lufs: Number(outputLoudness.input.value) } });
+      if (sourceAudioOnly) {
+        musicCatalog.output_loudness_policy = state.output_loudness_policy;
+        stateFingerprint = JSON.stringify(state);
+        render();
+        showToast("原音轨整体响度已保存；请重新合成全片预览。", false);
+        return;
+      }
       state = await api("/narration-policy", { method: "PUT", body: { playback_gain_db: Number(narrationGain.input.value) } });
       state = await api("/music-policy", { method: "PUT", body: {
         enabled: enabled.checked,
@@ -5442,6 +5465,21 @@ function renderBackgroundMusicPanel() {
       render();
     } catch (error) { showToast(error.message || "默认人物音量保存失败", true); }
   });
+  const saveLoudnessAsDefault = button(`设为以后默认整体响度（${outputLoudnessValue} LUFS）`, "quiet", async () => {
+    try {
+      const response = await fetch("/api/workbench/output-loudness-defaults", {
+        method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ target_lufs: Number(outputLoudness.input.value) }),
+      });
+      if (!response.ok) {
+        let detail = "默认整体响度保存失败";
+        try { detail = (await response.json()).detail || detail; } catch (error) { /* ignored */ }
+        throw new Error(detail);
+      }
+      musicCatalog.output_loudness_defaults = await response.json();
+      showToast(`已将 ${Number(outputLoudness.input.value)} LUFS 保存为以后新项目的默认整体响度。`);
+      render();
+    } catch (error) { showToast(error.message || "默认整体响度保存失败", true); }
+  });
   const sampleBody = el("div", { class: "music-sample-status" });
   if (sample.status === "generating") {
     sampleBody.append(el("p", { class: "music-sample-pending" }, "正在生成第 1 段实际混音样板。可继续编辑其他内容；完成后自动刷新。"));
@@ -5470,14 +5508,32 @@ function renderBackgroundMusicPanel() {
     ? ` · ${fmtDuration(Number(policy.source_start_seconds || 0))}—${fmtDuration(savedRangeEnd)}`
     : "";
   const summary = `人物 ${narrationGainValue >= 0 ? "+" : ""}${narrationGainValue} dB · ${policy.enabled ? `${selectedTrack ? selectedTrack.title : "未选择曲目"} ${gainValue} dB${savedRange}` : "无背景音乐"} · ${sample.status === "approved" ? "样板已确认" : sample.status === "generating" ? "样板生成中" : "待试听确认"}`;
+  if (sourceAudioOnly) {
+    const sourceSummary = `原音轨 ${selectedTrack ? selectedTrack.title : "未选择"} · ${outputLoudnessValue} LUFS · 人声与音乐整轨同步调整`;
+    const sourceBody = el("div", { class: "panel-body music-panel-body" },
+      outputLoudness.node,
+      outputLoudnessButtons,
+      el("p", { class: "muted" }, "这类项目的人声和音乐已经混在同一条原音轨中，不能分别调整。保存后重新合成全片即可听到新的整体响度。"),
+      detail,
+      el("div", { class: "inline-actions" }, button("保存本项目整体响度", "primary", () => savePolicy()), saveLoudnessAsDefault),
+    );
+    return el("section", { class: `panel music-panel ${musicPanelOpen ? "is-open" : ""}` },
+      el("button", { type: "button", class: "music-panel-head", onclick: () => { musicPanelOpen = !musicPanelOpen; render(); } },
+        el("div", {}, el("p", { class: "eyebrow" }, "全片声音"), el("h4", {}, "原音轨整体响度：保存后重新合成全片"), el("span", {}, sourceSummary)),
+        el("div", { class: "music-panel-status" }, status("pending"), el("span", {}, musicPanelOpen ? "收起" : "展开"))),
+      musicPanelOpen ? sourceBody : null,
+    );
+  }
   const body = el("div", { class: "panel-body music-panel-body" },
+      outputLoudness.node,
+      outputLoudnessButtons,
       narrationGain.node,
       el("label", { class: "music-toggle" }, enabled, el("span", {}, "为全片添加背景音乐")),
       uploadBox,
       el("label", { class: "field" }, el("span", {}, "选择新闻音乐"), select),
       musicGain.node,
       detail,
-      el("div", { class: "inline-actions" }, save, generateSample, saveNarrationAsDefault, saveMusicAsDefault),
+      el("div", { class: "inline-actions" }, save, generateSample, saveLoudnessAsDefault, saveNarrationAsDefault, saveMusicAsDefault),
       sampleBody,
     );
   return el("section", { class: `panel music-panel ${musicPanelOpen ? "is-open" : ""}` },

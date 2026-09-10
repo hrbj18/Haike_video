@@ -770,6 +770,20 @@ def test_background_music_supports_project_upload_progress_and_source_range() ->
         assert selector in WORKBENCH_CSS
 
 
+def test_sound_panel_exposes_master_loudness_and_source_audio_semantics() -> None:
+    body = _function_body("renderBackgroundMusicPanel")
+    assert '"/output-loudness-policy"' in body
+    assert '"/api/workbench/output-loudness-defaults"' in body
+    assert "成片整体响度" in body
+    assert "原音轨整体响度" in body
+    assert "人声和音乐已经混在同一条原音轨中" in body
+    assert "source_audio_only" in body
+    assert "True Peak" in body
+    assert 'max: -8' in body
+    assert "音量小一点（-0.5 LU）" in body
+    assert "音量大一点（+0.5 LU）" in body
+
+
 def test_visual_composition_exposes_bounded_focus_card_workflow() -> None:
     body = _function_body("renderVisualCompositionEditor")
     assert "/visual-composition" in body

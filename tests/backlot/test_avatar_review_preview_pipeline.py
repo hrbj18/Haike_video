@@ -849,6 +849,9 @@ def test_trailing_silence_padding_plan_never_masks_missing_speech_frames() -> No
         "added_frames": 3,
         "last_speech_end_frame": 185,
         "trailing_silence_frames": 4,
+        "last_speech_end_sample": 177_600,
+        "cloned_frame_speech_overlap_samples": 0,
+        "cloned_frame_speech_overlap_ms": 0.0,
     }
     speech_truncated = json.loads(json.dumps(media))
     speech_truncated["video"]["frame_count"] = 185
@@ -861,6 +864,43 @@ def test_trailing_silence_padding_plan_never_masks_missing_speech_frames() -> No
         sample_frame_count=181_440,
         samples_per_video_frame=960,
         timing_turns=turns,
+    ) is None
+
+
+def test_trailing_silence_padding_allows_tiny_final_frame_speech_overlap() -> None:
+    media = {
+        "duration_seconds": 36.52,
+        "video": {
+            "present": True, "width": 448, "height": 560, "fps": 25.0,
+            "frame_count": 910, "duration_seconds": 36.4,
+        },
+        "audio": {
+            "present": True, "sample_rate": 24_000, "channels": 1,
+            "duration_seconds": 36.52,
+        },
+    }
+    plan = pipeline._trailing_silence_padding_plan(
+        media,
+        role="yaya",
+        exact_total_frames=913,
+        expected_sample_rate=24_000,
+        sample_frame_count=876_480,
+        samples_per_video_frame=960,
+        timing_turns=[{"speaker_id": "yaya", "speech_end_sample": 872_832}],
+    )
+    assert plan is not None
+    assert plan["added_frames"] == 3
+    assert plan["cloned_frame_speech_overlap_samples"] == 192
+    assert plan["cloned_frame_speech_overlap_ms"] == 8.0
+
+    assert pipeline._trailing_silence_padding_plan(
+        media,
+        role="yaya",
+        exact_total_frames=913,
+        expected_sample_rate=24_000,
+        sample_frame_count=876_480,
+        samples_per_video_frame=960,
+        timing_turns=[{"speaker_id": "yaya", "speech_end_sample": 872_881}],
     ) is None
 
 

@@ -193,6 +193,7 @@ from backlot.workbench import (
     add_surgical_directive,
     build_baseline_cache,
     cleanup_unused_assets,
+    configure_source_audio_only,
     bootstrap_workbench,
     freeze_segment,
     generate_asset_media_index,
@@ -316,8 +317,11 @@ from backlot.workbench import (
     update_music_preferences_settings,
     update_narration_policy,
     update_narration_preferences_settings,
+    update_output_loudness_policy,
+    update_output_loudness_preferences_settings,
     read_music_preferences_settings,
     read_narration_preferences_settings,
+    read_output_loudness_preferences_settings,
     read_subtitle_preferences_settings,
     start_music_sample,
     generate_music_sample,
@@ -2042,9 +2046,18 @@ def create_app() -> FastAPI:
     async def put_project_music_policy(project_id: str, payload: dict = Body(...)) -> dict:
         return await workbench_call(update_music_policy, project_id, payload)
 
+    @app.put("/api/project/{project_id}/workbench/source-audio-only")
+    async def put_project_source_audio_only(project_id: str, payload: dict = Body(...)) -> dict:
+        """Save an exact source-audio clock and its timed scene/caption contract."""
+        return await workbench_call(configure_source_audio_only, project_id, payload)
+
     @app.put("/api/project/{project_id}/workbench/narration-policy")
     async def put_project_narration_policy(project_id: str, payload: dict = Body(...)) -> dict:
         return await workbench_call(update_narration_policy, project_id, payload)
+
+    @app.put("/api/project/{project_id}/workbench/output-loudness-policy")
+    async def put_project_output_loudness_policy(project_id: str, payload: dict = Body(...)) -> dict:
+        return await workbench_call(update_output_loudness_policy, project_id, payload)
 
     @app.get("/api/workbench/music-defaults")
     async def get_music_defaults() -> dict:
@@ -2061,6 +2074,14 @@ def create_app() -> FastAPI:
     @app.put("/api/workbench/narration-defaults")
     async def put_narration_defaults(payload: dict = Body(...)) -> dict:
         return await asyncio.to_thread(update_narration_preferences_settings, payload)
+
+    @app.get("/api/workbench/output-loudness-defaults")
+    async def get_output_loudness_defaults() -> dict:
+        return await asyncio.to_thread(read_output_loudness_preferences_settings)
+
+    @app.put("/api/workbench/output-loudness-defaults")
+    async def put_output_loudness_defaults(payload: dict = Body(...)) -> dict:
+        return await asyncio.to_thread(update_output_loudness_preferences_settings, payload)
 
     @app.get("/api/workbench/subtitle-defaults")
     async def get_subtitle_defaults() -> dict:

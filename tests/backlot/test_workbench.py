@@ -153,6 +153,29 @@ def test_video_loudness_normalization_targets_douyin_ready_level(tmp_path: Path)
     assert report["true_peak_dbtp"] <= -1.0
 
 
+def test_video_loudness_normalization_supports_louder_project_target(tmp_path: Path):
+    ffmpeg = _ffmpeg_available()
+    if not ffmpeg:
+        pytest.skip("ffmpeg unavailable")
+    source = tmp_path / "quiet-louder.mp4"
+    created = subprocess.run(
+        [
+            ffmpeg, "-y", "-f", "lavfi", "-i", "color=c=black:s=320x568:r=25:d=2",
+            "-f", "lavfi", "-i", "sine=frequency=1000:duration=2", "-filter:a", "volume=0.02",
+            "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+        ],
+        capture_output=True,
+        check=False,
+    )
+    assert created.returncode == 0
+
+    report = workbench_mod._normalize_video_loudness(tmp_path, source, target_lufs=-10.0)
+
+    assert -11.5 <= report["integrated_lufs"] <= -8.5
+    assert report["true_peak_dbtp"] <= -1.0
+    assert report["normalization_applied"] is True
+
+
 def test_video_loudness_normalization_uses_measured_two_pass_and_peak_headroom(tmp_path, monkeypatch):
     source = tmp_path / "mixed-preview.mp4"
     source.write_bytes(b"mixed")
@@ -684,18 +707,58 @@ def test_scene_subtitle_edits_preserve_review_preview_and_phrase_timing(projects
             "position": {"x": .5, "y": .78, "width": .72, "anchor": "center"},
         },
         "cue_overrides": {"cue-001": "修改后的开场字幕"},
+        "timed_cues": [
+            {"id": "cue-001", "start_seconds": 0.3, "end_seconds": 1.7, "text": "开场说明"},
+            {"id": "cue-002", "start_seconds": 2.1, "end_seconds": 3.9, "text": "第二条字幕"},
+        ],
     })
     edited = updated["scenes"][0]
 
     assert edited["review_preview"]["status"] == "ready"
     assert edited["review_preview"]["output_path"] == "renders/review-previews/existing.mp4"
     assert edited["subtitles"]["cue_overrides"] == {"cue-001": "修改后的开场字幕"}
+    assert edited["subtitles"]["timed_cues"][0]["start_seconds"] == .3
     assert edited["subtitles"]["style_override"]["font_size"] == 56
     assert edited["subtitles"]["style_override"]["position"]["y"] == .78
+    assert edited["review_preview"]["caption_cues"] == [
+        {"id": "cue-001", "start_seconds": .3, "end_seconds": 1.7, "text": "修改后的开场字幕"},
+        {"id": "cue-002", "start_seconds": 2.1, "end_seconds": 3.9, "text": "第二条字幕"},
+    ]
     assert updated["automation"]["preview_render"]["status"] == "needs_refresh"
     cues = workbench_mod._subtitle_cues(edited, "开场说明", relative_to_scene=True)
     assert cues[0]["id"] == "cue-001"
     assert cues[0]["text"] == "修改后的开场字幕"
+    assert cues[0]["start_seconds"] == .3
+
+
+def test_explicit_timed_subtitles_drive_project_srt_and_reject_overlap(projects_root):
+    project = make_project(projects_root)
+    state = workbench_mod.bootstrap_workbench(project)
+    scene = state["scenes"][0]
+    scene["start_seconds"] = 10.0
+    scene["end_seconds"] = 14.0
+    scene["subtitles"]["timed_cues"] = [
+        {"id": "cue-001", "start_seconds": .3, "end_seconds": 1.2, "text": "逐帧第一句"},
+        {"id": "cue-002", "start_seconds": 2.0, "end_seconds": 3.8, "text": "逐帧第二句"},
+    ]
+
+    cues = workbench_mod._subtitle_cues(scene, "不会采用字符权重", relative_to_scene=False)
+    assert [(item["start_seconds"], item["end_seconds"], item["text"]) for item in cues] == [
+        (10.3, 11.2, "逐帧第一句"),
+        (12.0, 13.8, "逐帧第二句"),
+    ]
+    srt = workbench_mod._write_subtitles(project, [scene], {"s1": {"text": "不会采用字符权重"}})
+    content = srt.read_text(encoding="utf-8")
+    assert "00:00:10,300 --> 00:00:11,200" in content
+    assert "00:00:12,000 --> 00:00:13,800" in content
+
+    with pytest.raises(workbench_mod.WorkbenchError, match="不能相互重叠"):
+        workbench_mod.update_scene_subtitles(project, "scene-a", {
+            "timed_cues": [
+                {"start_seconds": 0, "end_seconds": 2, "text": "第一句"},
+                {"start_seconds": 1.9, "end_seconds": 3, "text": "第二句"},
+            ],
+        })
 
 
 def test_subtitle_template_applies_style_without_copying_words_or_narration(projects_root):
@@ -771,9 +834,18 @@ def test_subtitle_editor_endpoints_and_ass_scene_style_rendering(client, project
     saved = client.put("/api/project/film/workbench/scenes/scene-a/subtitles", json={
         "style": {"font_size": 48, "position": {"x": .5, "y": .84, "width": .8, "anchor": "bottom-center"}},
         "cue_overrides": {"cue-001": "接口改字"},
+        "timed_cues": [
+            {"id": "cue-001", "start_seconds": .25, "end_seconds": 1.5, "text": "接口原文"},
+        ],
     })
     assert saved.status_code == 200
     assert saved.json()["scenes"][0]["subtitles"]["cue_overrides"]["cue-001"] == "接口改字"
+    assert saved.json()["scenes"][0]["subtitles"]["timed_cues"][0]["start_seconds"] == .25
+    invalid = client.put("/api/project/film/workbench/scenes/scene-a/subtitles", json={
+        "timed_cues": [{"start_seconds": 3.9, "end_seconds": 4.2, "text": "越界"}],
+    })
+    assert invalid.status_code == 422
+    assert "不能超出所属片段" in invalid.json()["detail"]
     applied = client.post("/api/project/film/workbench/subtitle-styles", json={
         "scene_id": "scene-a", "template_id": "subtitle-default", "name": "统一字幕", "apply_scope": "all",
         "style": {"font_size": 52, "position": {"x": .5, "y": .86, "width": .82, "anchor": "bottom-center"}},
@@ -4658,6 +4730,41 @@ def test_narration_gain_is_independent_and_invalidates_only_render_derivatives(p
     assert preview.read_bytes() == b"old-preview"
 
 
+def test_output_loudness_policy_is_project_level_and_legacy_safe(projects_root, monkeypatch):
+    monkeypatch.setattr(
+        workbench_mod,
+        "read_output_loudness_preferences",
+        lambda: {"version": 1, "target_lufs": -10.0, "true_peak_limit_dbtp": -1.0},
+    )
+    project = make_project(projects_root)
+    state = workbench_mod.bootstrap_workbench(project)
+    assert state["output_loudness_policy"]["target_lufs"] == -10.0
+
+    old_preview = project / "renders" / "previews" / "old.mp4"
+    old_preview.parent.mkdir(parents=True, exist_ok=True)
+    old_preview.write_bytes(b"old-preview")
+    state["automation"]["preview_render"].update({
+        "status": "completed", "output_path": "renders/previews/old.mp4",
+    })
+    state["music_policy"]["sample"].update({
+        "status": "approved", "output_path": "renders/music-samples/old.mp4",
+        "policy_signature": workbench_mod._audio_mix_signature(state),
+    })
+    workbench_mod._save(project, state)
+
+    updated = workbench_mod.update_output_loudness_policy(project, {"target_lufs": -9.8})
+    assert updated["output_loudness_policy"]["target_lufs"] == -10.0
+    unchanged = workbench_mod.update_output_loudness_policy(project, {"target_lufs": -9.4})
+    assert unchanged["output_loudness_policy"]["target_lufs"] == -9.5
+    assert unchanged["music_policy"]["sample"]["status"] == "stale"
+    assert unchanged["automation"]["preview_render"]["status"] == "needs_refresh"
+    assert old_preview.read_bytes() == b"old-preview"
+
+    legacy = dict(unchanged)
+    legacy.pop("output_loudness_policy", None)
+    assert workbench_mod._ensure_output_loudness_policy(legacy)["target_lufs"] == -14.0
+
+
 def test_background_music_source_range_is_validated_and_invalidates_sample(projects_root, monkeypatch):
     project = make_project(projects_root)
     state = workbench_mod.bootstrap_workbench(project)
@@ -4774,6 +4881,112 @@ def test_music_only_audio_replaces_narration_and_respects_source_range(tmp_path:
     assert report["loop"] is False
 
 
+def test_source_audio_only_contract_builds_exact_timeline_without_tts(projects_root, monkeypatch):
+    project = make_project(projects_root)
+    initial = workbench_mod.bootstrap_workbench(project)
+    initial["scenes"] = []
+    initial["segments"] = []
+    workbench_mod._save(project, initial)
+    source = project / "source.m4a"
+    source.write_bytes(b"audio")
+    track = {
+        "id": "project-source-track", "title": "原音轨", "filename": source.name,
+        "duration_seconds": 6.0, "scope": "project",
+    }
+    monkeypatch.setattr(
+        workbench_mod, "resolve_music_track",
+        lambda _track_id, _project_dir=None: (source, track),
+    )
+
+    updated = workbench_mod.configure_source_audio_only(project, {
+        "confirmed": True, "expected_revision": 0, "track_id": track["id"],
+        "source_asset_id": "S-001", "source_start_seconds": 0, "source_end_seconds": 6,
+        "loop": False, "speed": 1.0, "title": "汽车搞笑复刻",
+        "cues": [
+            {"id": "cue-001", "start_seconds": 0, "end_seconds": 2.5, "text": "第一句", "visual_query": "car driving"},
+            {"id": "cue-002", "start_seconds": 2.5, "end_seconds": 6, "text": "第二句", "visual_query": "sports car"},
+        ],
+    })
+
+    assert updated["automation"]["audio_mode"] == "source_audio_only"
+    assert updated["automation"]["narration_generation"]["status"] == "not_required"
+    assert updated["source_audio_contract"]["revision"] == 1
+    assert updated["source_audio_contract"]["loop"] is False
+    assert [(item["start_seconds"], item["end_seconds"]) for item in updated["scenes"]] == [(0.0, 2.5), (2.5, 6.0)]
+    assert all(item["source_strategy"] == "web_download" for item in updated["scenes"])
+    assert [item["stock_query"] for item in updated["scenes"]] == ["car driving", "sports car"]
+    assert json.loads((project / "artifacts" / "script.json").read_text(encoding="utf-8"))["total_duration_seconds"] == 6.0
+
+    with pytest.raises(workbench_mod.WorkbenchError, match="版本冲突"):
+        workbench_mod.configure_source_audio_only(project, {
+            "confirmed": True, "expected_revision": 0, "track_id": track["id"],
+            "source_end_seconds": 6, "cues": [{"id": "cue-001", "start_seconds": 0, "end_seconds": 6, "text": "旧页面"}],
+        })
+
+
+@pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg is required for source-audio validation")
+def test_source_audio_only_materializes_without_loop_and_keeps_subtitle_mode(tmp_path: Path, monkeypatch):
+    ffmpeg = _ffmpeg_available()
+    assert ffmpeg
+    project = tmp_path / "source-audio"
+    project.mkdir()
+    source = project / "reference.m4a"
+    subprocess.run([
+        ffmpeg, "-y", "-f", "lavfi", "-i", "sine=frequency=330:sample_rate=48000:duration=2",
+        "-c:a", "aac", str(source),
+    ], check=True, capture_output=True)
+    track = {
+        "id": "project-source", "title": "原音轨", "filename": source.name,
+        "duration_seconds": 2.0, "scope": "project",
+    }
+    monkeypatch.setattr(workbench_mod, "resolve_music_track", lambda *_args: (source, track))
+    state = {
+        "automation": {"audio_mode": "source_audio_only", "narration_generation": {"status": "not_required"}},
+        "source_audio_contract": {"track_id": track["id"]},
+        "music_policy": {
+            "version": 3, "enabled": True, "track_id": track["id"], "playback_gain_db": 0.0,
+            "loop": False, "source_start_seconds": 0.25, "source_end_seconds": 1.75,
+            "fade_in_seconds": 0.0, "fade_out_seconds": 0.0,
+        },
+    }
+    monkeypatch.setattr(workbench_mod, "_require_ready_network_assets", lambda *_args: None)
+
+    workbench_mod._require_renderable_project(project, state, state["automation"])
+    output, report = workbench_mod._materialize_music_only_audio(
+        project, state, 1.0, ffmpeg, audio_mode="source_audio_only"
+    )
+
+    assert output.is_file()
+    assert report["audio_mode"] == "source_audio_only"
+    assert report["loop"] is False
+    assert 0.95 <= workbench_mod._probe_duration_seconds(output, ffmpeg) <= 1.05
+    state["music_policy"]["loop"] = True
+    with pytest.raises(workbench_mod.WorkbenchError, match="禁止循环"):
+        workbench_mod._materialize_music_only_audio(project, state, 1.0, ffmpeg, audio_mode="source_audio_only")
+
+
+def test_stock_replacement_updates_simple_visual_timeline_but_preserves_multiblock():
+    state = {"assets": []}
+    scene = {
+        "id": "scene-001", "title": "汽车", "start_seconds": 0, "end_seconds": 4,
+        "visual_timeline": {"version": 1, "revision": 1, "blocks": [{
+            "id": "VB-001", "start_seconds": 0, "end_seconds": 4,
+            "source_mode": "web_download", "asset_id": "S-OLD", "label": "旧素材",
+        }]},
+    }
+
+    assert workbench_mod._sync_single_block_stock_timeline(state, scene, {"id": "S-NEW"}) is True
+    assert scene["visual_timeline"]["blocks"][0]["asset_id"] == "S-NEW"
+    assert scene["visual_timeline"]["revision"] == 2
+
+    scene["visual_timeline"]["blocks"].append({
+        "id": "VB-002", "start_seconds": 2, "end_seconds": 4,
+        "source_mode": "web_download", "asset_id": "S-SECOND",
+    })
+    assert workbench_mod._sync_single_block_stock_timeline(state, scene, {"id": "S-LATER"}) is False
+    assert scene["visual_timeline"]["blocks"][0]["asset_id"] == "S-NEW"
+
+
 def test_audio_mix_signature_changes_for_narration_or_music(projects_root):
     project = make_project(projects_root)
     state = workbench_mod.bootstrap_workbench(project)
@@ -4852,6 +5065,11 @@ def test_background_music_sample_is_isolated_and_must_be_approved(projects_root,
         return {"enabled": True, "output_path": workbench_mod._safe_relpath(_project, str(output_path))}
 
     monkeypatch.setattr(workbench_mod, "_apply_project_background_music", fake_mix)
+    monkeypatch.setattr(
+        workbench_mod,
+        "_normalize_video_loudness",
+        lambda _project, _output, **_kwargs: {"normalization_applied": True},
+    )
     workbench_mod.update_music_policy(project, {"enabled": True, "track_id": "news-opening-01", "playback_gain_db": -12})
     queued = workbench_mod.start_music_sample(project, {})
     assert queued["music_policy"]["sample"]["status"] == "generating"

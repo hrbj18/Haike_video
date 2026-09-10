@@ -126,6 +126,14 @@ from backlot.narration_preferences import (
     read_narration_preferences,
     save_narration_preferences,
 )
+from backlot.output_loudness_preferences import (
+    DEFAULT_OUTPUT_TARGET_LUFS,
+    LEGACY_OUTPUT_TARGET_LUFS,
+    OUTPUT_TRUE_PEAK_LIMIT_DBTP,
+    clamp_output_target_lufs,
+    read_output_loudness_preferences,
+    save_output_loudness_preferences,
+)
 from backlot.subtitle_preferences import read_subtitle_preferences, save_subtitle_preferences
 from backlot.text_overlay_composition import (
     TextOverlayValidationError,
@@ -733,6 +741,51 @@ def _subtitle_cue_text(scene: dict, index: int, fallback: Any) -> str:
     overrides = _scene_subtitles(scene).get("cue_overrides") or {}
     text = str(overrides.get(_subtitle_cue_id(index), fallback) or "").strip()
     return text[:240]
+
+
+def _normalised_timed_subtitle_cues(raw_cues: Any, duration_seconds: float) -> list[dict]:
+    """Validate scene-relative subtitle timing supplied by a real audio clock."""
+    if not isinstance(raw_cues, list):
+        raise WorkbenchError("定时字幕格式无效")
+    if len(raw_cues) > 200:
+        raise WorkbenchError("单个片段最多保存 200 条定时字幕")
+    duration = max(0.04, float(duration_seconds))
+    previous_end = 0.0
+    cues: list[dict] = []
+    for index, raw in enumerate(raw_cues):
+        if not isinstance(raw, dict):
+            raise WorkbenchError("定时字幕条目格式无效")
+        try:
+            start = float(raw.get("start_seconds"))
+            end = float(raw.get("end_seconds"))
+        except (TypeError, ValueError):
+            raise WorkbenchError("定时字幕起止时间必须是数字") from None
+        if not math.isfinite(start) or not math.isfinite(end):
+            raise WorkbenchError("定时字幕起止时间必须是有限数字")
+        if start < 0 or end <= start:
+            raise WorkbenchError("定时字幕结束时间必须晚于开始时间")
+        if end - start < 0.04:
+            raise WorkbenchError("单条定时字幕至少持续 0.04 秒")
+        if end > duration + 0.001:
+            raise WorkbenchError("定时字幕不能超出所属片段")
+        if start < previous_end - 0.001:
+            raise WorkbenchError("定时字幕不能相互重叠")
+        text = str(raw.get("text") or "").strip()
+        if not text:
+            raise WorkbenchError("定时字幕文字不能为空")
+        if len(text) > 240:
+            raise WorkbenchError("单条字幕不能超过 240 个字符")
+        cue_id = str(raw.get("id") or _subtitle_cue_id(index))
+        if not re.fullmatch(r"cue-\d{3}", cue_id):
+            raise WorkbenchError("定时字幕条目标识无效")
+        cues.append({
+            "id": cue_id,
+            "start_seconds": round(start, 3),
+            "end_seconds": round(min(end, duration), 3),
+            "text": text,
+        })
+        previous_end = end
+    return cues
 
 
 def _subtitle_video_style(style: dict) -> dict:
@@ -1450,6 +1503,38 @@ def _narration_policy_default() -> dict:
     }
 
 
+def _output_loudness_policy_default() -> dict:
+    """Project-local final loudness captured from the workstation default."""
+    preferences = read_output_loudness_preferences()
+    return {
+        "version": 1,
+        "target_lufs": clamp_output_target_lufs(
+            preferences.get("target_lufs"), fallback=DEFAULT_OUTPUT_TARGET_LUFS
+        ),
+        "true_peak_limit_dbtp": OUTPUT_TRUE_PEAK_LIMIT_DBTP,
+        "updated_at": None,
+    }
+
+
+def _ensure_output_loudness_policy(state: dict) -> dict:
+    """Read legacy projects at -14 LUFS without silently adopting a new default."""
+    if not isinstance(state.get("output_loudness_policy"), dict):
+        state["output_loudness_policy"] = {
+            "version": 1,
+            "target_lufs": LEGACY_OUTPUT_TARGET_LUFS,
+            "true_peak_limit_dbtp": OUTPUT_TRUE_PEAK_LIMIT_DBTP,
+            "updated_at": None,
+        }
+    policy = state["output_loudness_policy"]
+    policy["version"] = max(1, int(_as_number(policy.get("version")) or 1))
+    policy["target_lufs"] = clamp_output_target_lufs(
+        policy.get("target_lufs"), fallback=LEGACY_OUTPUT_TARGET_LUFS
+    )
+    policy["true_peak_limit_dbtp"] = OUTPUT_TRUE_PEAK_LIMIT_DBTP
+    policy.setdefault("updated_at", None)
+    return policy
+
+
 def _ensure_narration_policy(state: dict) -> dict:
     # Workbenches created before this feature had an implicit unity gain.
     # Migrating them to a newly chosen workstation default would silently
@@ -1478,6 +1563,15 @@ def _audio_mix_signature_for_music_signature(state: dict, music_signature: str) 
         "narration_gain_db": clamp_narration_gain_db(narration.get("playback_gain_db", 0.0)),
         "music_signature": music_signature,
     }
+    # Preserve legacy sample approvals when their effective -14 LUFS behavior
+    # did not change.  Once a project has an explicit policy, loudness becomes
+    # part of the audible fingerprint and changes invalidate the sample.
+    if isinstance(state.get("output_loudness_policy"), dict):
+        loudness = _ensure_output_loudness_policy(state)
+        payload.update({
+            "output_target_lufs": loudness["target_lufs"],
+            "output_true_peak_limit_dbtp": loudness["true_peak_limit_dbtp"],
+        })
     return hashlib.sha256(
         json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     ).hexdigest()
@@ -2419,6 +2513,7 @@ def _build_default(project_dir: Path) -> dict:
         "automation": _automation_default(),
         "narration_policy": _narration_policy_default(),
         "music_policy": _music_policy_default(),
+        "output_loudness_policy": _output_loudness_policy_default(),
         "avatar_package": avatar_package,
         "avatar": {
             "status": "not_configured",
@@ -2557,6 +2652,8 @@ def read_music_catalog(project_dir: Path) -> dict:
         "defaults": read_music_preferences(),
         "narration_policy": deepcopy(_ensure_narration_policy(state)),
         "narration_defaults": read_narration_preferences(),
+        "output_loudness_policy": deepcopy(_ensure_output_loudness_policy(state)),
+        "output_loudness_defaults": read_output_loudness_preferences(),
     }
 
 
@@ -2615,6 +2712,52 @@ def read_narration_preferences_settings() -> dict:
 def update_narration_preferences_settings(payload: dict) -> dict:
     """Persist the future-project speech gain without changing old projects."""
     return save_narration_preferences(payload)
+
+
+def read_output_loudness_preferences_settings() -> dict:
+    """Expose the non-sensitive final loudness default for future projects."""
+    return read_output_loudness_preferences()
+
+
+def update_output_loudness_preferences_settings(payload: dict) -> dict:
+    """Persist the future-project loudness target without rewriting old projects."""
+    return save_output_loudness_preferences(payload)
+
+
+def update_output_loudness_policy(project_dir: Path, payload: dict) -> dict:
+    """Persist final-program loudness and invalidate only rebuildable derivatives."""
+    state = _load_for_write(project_dir)
+    previous = deepcopy(_ensure_output_loudness_policy(state))
+    target_lufs = clamp_output_target_lufs(
+        payload.get("target_lufs"), fallback=previous["target_lufs"]
+    )
+    policy = {
+        "version": 1,
+        "target_lufs": target_lufs,
+        "true_peak_limit_dbtp": OUTPUT_TRUE_PEAK_LIMIT_DBTP,
+        "updated_at": previous.get("updated_at"),
+    }
+    if target_lufs != previous.get("target_lufs"):
+        policy["updated_at"] = _now()
+        _stale_music_sample(
+            _ensure_music_policy(state),
+            "成片整体响度已修改，请重新生成第一段声音样板",
+        )
+        _mark_render_needs_refresh(state, "成片整体响度已修改，请重新生成全片预览")
+        _decision(
+            state,
+            "output_loudness",
+            "成片整体响度",
+            f"{target_lufs:.1f} LUFS",
+            f"两遍响度归一化；True Peak 不高于 {OUTPUT_TRUE_PEAK_LIMIT_DBTP:.1f} dBTP",
+        )
+        _activity(
+            state,
+            "output_loudness_updated",
+            f"成片整体响度已保存为 {target_lufs:.1f} LUFS；请重新生成审核预览",
+        )
+    state["output_loudness_policy"] = policy
+    return _save(project_dir, state)
 
 
 def update_narration_policy(project_dir: Path, payload: dict) -> dict:
@@ -2733,6 +2876,172 @@ def update_music_policy(project_dir: Path, payload: dict) -> dict:
     return _save(project_dir, state)
 
 
+@_project_transactional
+def configure_source_audio_only(project_dir: Path, payload: dict) -> dict:
+    """Bind a project to one exact source-audio selection and timed captions.
+
+    The selected project track is the only audio clock.  This operation makes
+    no provider request and never creates narration/TTS.  Explicit cue times
+    become both the scene boundaries and subtitle timing so preview and final
+    rendering cannot silently drift apart.
+    """
+    if payload.get("confirmed") is not True:
+        raise WorkbenchError("请确认直接使用已登记源音频后再保存")
+    state = _load_for_write(project_dir)
+    automation = _automation(state)
+    _require_no_review_preview_conflict(automation)
+    previous = state.get("source_audio_contract") if isinstance(state.get("source_audio_contract"), dict) else {}
+    try:
+        expected_revision = int(payload.get("expected_revision"))
+    except (TypeError, ValueError) as exc:
+        raise WorkbenchError("源音频合同必须携带 expected_revision") from exc
+    current_revision = int(_as_number(previous.get("revision"), 0))
+    if expected_revision != current_revision:
+        raise WorkbenchError(
+            f"源音频合同版本冲突：提交版本 {expected_revision}，当前版本 {current_revision}；请刷新后重试"
+        )
+    if state.get("scenes") and not previous:
+        raise WorkbenchError("当前项目已有其他时间线，禁止用源音频模式静默覆盖")
+
+    track_id = str(payload.get("track_id") or "").strip()
+    if not track_id:
+        raise WorkbenchError("请选择已登记的项目源音轨")
+    try:
+        _track_path, track = resolve_music_track(track_id, project_dir)
+    except MusicLibraryError as exc:
+        raise WorkbenchError(str(exc)) from exc
+    if str(track.get("scope") or "") != "project":
+        raise WorkbenchError("源音频模式只允许使用当前项目内登记的音轨")
+
+    try:
+        source_start = round(float(payload.get("source_start_seconds", 0.0)), 3)
+        source_end = round(float(payload.get("source_end_seconds", track.get("duration_seconds"))), 3)
+        speed = float(payload.get("speed", 1.0))
+    except (TypeError, ValueError) as exc:
+        raise WorkbenchError("源音频起止时间和速度必须是数字") from exc
+    source_duration = float(track.get("duration_seconds") or 0.0)
+    if source_start < 0 or source_end <= source_start or source_end > source_duration + 0.02:
+        raise WorkbenchError("源音频选区无效或超过已登记音轨时长")
+    if payload.get("loop") is True:
+        raise WorkbenchError("源音频模式禁止循环")
+    if abs(speed - 1.0) > 0.0001:
+        raise WorkbenchError("源音频模式禁止变速")
+    project_duration = round(source_end - source_start, 3)
+
+    raw_cues = payload.get("cues")
+    if not isinstance(raw_cues, list) or not raw_cues:
+        raise WorkbenchError("源音频模式至少需要一个带时间范围的字幕段")
+    if len(raw_cues) > 120:
+        raise WorkbenchError("源音频字幕段不能超过 120 个")
+    cues: list[dict[str, Any]] = []
+    used_ids: set[str] = set()
+    previous_end = 0.0
+    for order, raw in enumerate(raw_cues, 1):
+        if not isinstance(raw, dict):
+            raise WorkbenchError(f"第 {order} 个字幕段格式无效")
+        cue_id = str(raw.get("id") or f"source-cue-{order:03d}").strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{1,63}", cue_id) or cue_id in used_ids:
+            raise WorkbenchError(f"第 {order} 个字幕段 ID 无效或重复")
+        used_ids.add(cue_id)
+        text = str(raw.get("text") or "").strip()
+        if not text or len(text) > 240:
+            raise WorkbenchError(f"第 {order} 个字幕段文字必须为 1 到 240 个字符")
+        try:
+            start = round(float(raw.get("start_seconds")), 3)
+            end = round(float(raw.get("end_seconds")), 3)
+        except (TypeError, ValueError) as exc:
+            raise WorkbenchError(f"第 {order} 个字幕段时间必须是数字") from exc
+        if end - start < 0.04:
+            raise WorkbenchError(f"第 {order} 个字幕段时长过短")
+        if abs(start - previous_end) > 0.02:
+            raise WorkbenchError(f"第 {order} 个字幕段与前一段不连续")
+        if end > project_duration + 0.02:
+            raise WorkbenchError(f"第 {order} 个字幕段超过源音频选区")
+        cues.append({
+            "id": cue_id,
+            "label": str(raw.get("label") or f"片段 {order}").strip()[:120] or f"片段 {order}",
+            "text": text,
+            "start_seconds": start,
+            "end_seconds": end,
+            "visual_query": str(raw.get("visual_query") or "car driving").strip()[:240] or "car driving",
+        })
+        previous_end = end
+    if abs(previous_end - project_duration) > 0.02:
+        raise WorkbenchError("字幕时间线必须从 0 连续覆盖完整源音频选区")
+
+    title = str(payload.get("title") or state.get("project", {}).get("title") or "源音频复刻项目").strip()[:200]
+    sections = [{
+        "id": cue["id"],
+        "label": cue["label"],
+        "text": cue["text"],
+        "start_seconds": cue["start_seconds"],
+        "end_seconds": cue["end_seconds"],
+        "enhancement_cues": [{
+            "timestamp_seconds": round((cue["start_seconds"] + cue["end_seconds"]) / 2.0, 3),
+            "description": cue["visual_query"],
+        }],
+    } for cue in cues]
+    script = {
+        "version": "1.0",
+        "title": title,
+        "total_duration_seconds": project_duration,
+        "sections": sections,
+        "metadata": {"audio_mode": "source_audio_only", "source_audio_contract_revision": current_revision + 1},
+    }
+    scenes = [_scene_from_script_section(section, order) for order, section in enumerate(sections, 1)]
+    for scene, cue in zip(scenes, cues, strict=True):
+        scene["source_strategy"] = "web_download"
+        scene["shot_intent"] = cue["visual_query"]
+        scene["stock_query"] = cue["visual_query"]
+    frame_rate = int(state.get("settings", {}).get("frame_rate") or 30)
+    sample_rate = int(state.get("settings", {}).get("sample_rate") or 48000)
+    state["scenes"] = scenes
+    state["segments"] = _segments_for_scenes(scenes, frame_rate, sample_rate)
+    state["project"]["duration_seconds"] = project_duration
+    state["project"]["script_draft"] = {
+        "status": "approved", "mode": "source_audio_exact", "revision": current_revision + 1,
+        "approved_revision": current_revision + 1, "created_at": _now(), "updated_at": _now(),
+        "approved_at": _now(), "script": deepcopy(script), "original_script": deepcopy(script),
+        "history": [], "review_note": "用户要求直接复用原音频与原文案；未调用脚本模型。",
+    }
+    intake = _normalize_intake(state["project"].get("intake"))
+    intake.update({
+        "video_title": title, "duration_seconds": int(round(project_duration)),
+        "script_status": "draft_approved", "duration_source": "project_source_audio_master",
+        "updated_at": _now(),
+    })
+    state["project"]["intake"] = intake
+    state["music_policy"] = {
+        **_music_policy_default(),
+        "enabled": True, "category": "source_audio", "track_id": track_id,
+        "playback_gain_db": 0.0, "source_calibration_db": track.get("source_calibration_db"),
+        "loop": False, "source_start_seconds": source_start, "source_end_seconds": source_end,
+        "fade_in_seconds": 0.0, "fade_out_seconds": 0.0, "updated_at": _now(),
+    }
+    automation["audio_mode"] = "source_audio_only"
+    automation["narration_generation"] = {
+        "status": "not_required", "stage": "disabled", "audio_path": None,
+        "subtitle_path": None, "error": "", "reason": "audio_mode=source_audio_only；禁止生成 TTS",
+    }
+    state["automation"] = automation
+    state["source_audio_contract"] = {
+        "version": "1.0", "revision": current_revision + 1, "track_id": track_id,
+        "source_asset_id": str(payload.get("source_asset_id") or "").strip() or None,
+        "source_start_seconds": source_start, "source_end_seconds": source_end,
+        "project_duration_seconds": project_duration, "speed": 1.0, "loop": False,
+        "cues": deepcopy(cues), "updated_at": _now(),
+    }
+    _ensure_timeline_state(state)
+    scene_plan = _scene_plan_from_imported_script(script, scenes)
+    _atomic_write(project_dir / "artifacts" / "script.json", script)
+    _atomic_write(project_dir / "artifacts" / "script_draft.json", script)
+    _atomic_write(project_dir / "artifacts" / "scene_plan.json", scene_plan)
+    _mark_render_needs_refresh(state, "源音频主时钟与字幕时间线已更新")
+    _decision(state, "source_audio_only", "全片音频模式", track_id, "直接复用项目内源音轨；无 TTS、无循环、无变速、无额外背景音乐")
+    _activity(state, "source_audio_only_configured", f"已保存源音频合同 revision {current_revision + 1}，建立 {len(scenes)} 个连续片段")
+    return _save(project_dir, state)
+
+
 def _require_approved_music_sample(
     state: dict,
     *,
@@ -2846,6 +3155,12 @@ def generate_music_sample(project_dir: Path) -> dict:
     signature = hashlib.sha256(f"{scene_id}:{preview.get('input_signature')}:{_audio_mix_signature(state)}".encode("utf-8")).hexdigest()
     output = project_dir / MUSIC_SAMPLE_DIRECTORY / f"{scene_id}-{signature[:12]}.mp4"
     _apply_project_audio_mix(project_dir, state, source, output_path=output)
+    _normalize_video_loudness(
+        project_dir,
+        output,
+        target_lufs=_ensure_output_loudness_policy(state)["target_lufs"],
+        enforce_acceptance=False,
+    )
 
     state = _load_for_write(project_dir)
     policy = _ensure_music_policy(state)
@@ -4224,6 +4539,15 @@ def update_scene_subtitles(project_dir: Path, scene_id: str, payload: dict) -> d
             if text:
                 clean_overrides[cue_id] = text
         subtitles["cue_overrides"] = clean_overrides
+    if "timed_cues" in payload:
+        subtitles["timed_cues"] = _normalised_timed_subtitle_cues(
+            payload.get("timed_cues"), _scene_duration(scene),
+        )
+        preview = scene.get("review_preview") if isinstance(scene.get("review_preview"), dict) else {}
+        if preview.get("status") == "ready":
+            preview["caption_cues"] = _subtitle_cues(
+                scene, _scene_text(project_dir, state, scene), relative_to_scene=True,
+            )
     _mark_render_needs_refresh(state, f"{scene_id} 的字幕已更新")
     _decision(state, "subtitle_edit", f"{scene_id} 字幕", "saved", "仅更新字幕图层，不重新生成片段画面或配音")
     _activity(state, "subtitle_saved", f"已保存 {scene_id} 的字幕文字与样式；左侧视频未重载", scene_id=scene_id)
@@ -8088,13 +8412,17 @@ def _stock_query_for_scene(scene: dict, *, surrounding_context: str = "") -> tup
     for the reviewer and later hot-swap decisions.
     """
     refresh_instruction = str(scene.get("asset_refresh_instruction") or "").strip()
+    explicit_query = re.sub(r"\s+", " ", str(scene.get("stock_query") or "")).strip()
     text = " ".join(
         str(scene.get(key) or "")
         for key in ("title", "description", "shot_intent")
     )
     original_context = f"{surrounding_context} {text} {refresh_instruction}".strip().lower()
+    if explicit_query:
+        return (refresh_instruction or explicit_query)[:160], original_context[:500]
     lowered = original_context.lower()
     rules = (
+        (("汽车", "轿车", "开车", "驾驶", "漂移", "车道", "马力", "加速", "car", "driving", "vehicle", "sedan", "suv", "drift"), "car driving road cinematic"),
         (("科技", "ai", "人工智能", "机器人", "手机", "芯片"), "technology news smartphone robot artificial intelligence"),
         (("口播", "解说", "观点", "采访"), "modern studio microphone discussion close up"),
         (("台灯", "夜晚", "晚上"), "person reading book desk lamp"),
@@ -9247,6 +9575,44 @@ def mark_review_preview_sync_failed(project_dir: Path, error: object, expected_j
     return _save(project_dir, state)
 
 
+def _sync_single_block_stock_timeline(state: dict, scene: dict, visual_asset: dict) -> bool:
+    """Point a simple stock scene timeline at its newly selected asset.
+
+    The legacy Pexels pass updated the selected usage but left the one-block
+    visual timeline on the previous asset.  Preview rendering prefers that
+    timeline, so a successful replacement could appear to do nothing.  Only a
+    simple zero/one-block stock timeline is changed here; authored multi-block
+    edits remain untouched.
+    """
+    _ensure_scene_visual_state(state, scene)
+    timeline = scene.get("visual_timeline") if isinstance(scene.get("visual_timeline"), dict) else {}
+    blocks = timeline.get("blocks") if isinstance(timeline.get("blocks"), list) else []
+    if len(blocks) > 1:
+        return False
+    duration = _scene_duration(scene)
+    label = f"{scene.get('title') or scene.get('id')} · Pexels 素材"
+    if blocks:
+        block = blocks[0]
+        previous_asset_id = str(block.get("asset_id") or "")
+        block.update({
+            "start_seconds": 0.0, "end_seconds": duration,
+            "source_mode": "web_download", "asset_id": visual_asset["id"], "label": label,
+        })
+        changed = previous_asset_id != str(visual_asset["id"])
+    else:
+        timeline["blocks"] = [{
+            "id": "VB-001", "start_seconds": 0.0, "end_seconds": duration,
+            "source_mode": "web_download", "asset_id": visual_asset["id"], "label": label,
+        }]
+        changed = True
+    if changed:
+        timeline["revision"] = int(_as_number(timeline.get("revision"), 0)) + 1
+        timeline["updated_at"] = _now()
+        scene["visual_timeline"] = timeline
+        _invalidate_scene_review_preview(scene, "主体素材已更新，请重新生成审核预览")
+    return changed
+
+
 def _stock_review_timeline(
     project_dir: Path,
     state: dict,
@@ -9317,6 +9683,7 @@ def _stock_review_timeline(
         "status": "completed", "finished_at": _now(), "provider": "pexels", "tool": source_tool,
         "expected_count": len(timeline), "completed_count": len(timeline), "review_id": review_id, "error": "",
     }
+    _sync_single_block_stock_timeline(state, scene, visual_asset)
     state["keyframe_reviews"].append({"id": review_id, "scene_id": scene["id"], "status": review["status"], "artifact_path": review["artifact_path"], "created_at": _now()})
     return review
 
@@ -10981,6 +11348,25 @@ def _subtitle_cues(
     scene_start = 0.0 if relative_to_scene else _as_number(scene.get("start_seconds"))
     scene_duration = max(0.1, _as_number(duration_seconds, _scene_duration(scene)))
     scene_end = scene_start + scene_duration
+    explicit_cues = _scene_subtitles(scene).get("timed_cues")
+    if isinstance(explicit_cues, list) and explicit_cues:
+        cues: list[dict] = []
+        for index, item in enumerate(explicit_cues):
+            if not isinstance(item, dict):
+                continue
+            relative_start = max(0.0, min(scene_duration, _as_number(item.get("start_seconds"))))
+            relative_end = max(relative_start, min(scene_duration, _as_number(item.get("end_seconds"))))
+            caption = _subtitle_cue_text(scene, index, item.get("text"))
+            if not caption or relative_end - relative_start < 0.04:
+                continue
+            cues.append({
+                "id": str(item.get("id") or _subtitle_cue_id(index)),
+                "start_seconds": round(scene_start + relative_start, 3),
+                "end_seconds": round(scene_start + relative_end, 3),
+                "text": caption,
+            })
+        if cues:
+            return cues
     phrases = _split_subtitle_phrases(text)
     if not phrases:
         return []
@@ -11042,6 +11428,19 @@ def _write_subtitles(
     cue_index = 1
     for scene in scenes:
         narration = scene.get("narration") if isinstance(scene.get("narration"), dict) else {}
+        section = sections.get(str(scene.get("script_section_id"))) or {}
+        text = str(narration.get("text") or section.get("text") or scene.get("description") or "").strip()
+        explicit_cues = _scene_subtitles(scene).get("timed_cues")
+        if isinstance(explicit_cues, list) and explicit_cues:
+            for cue in _subtitle_cues(scene, text):
+                lines.extend([
+                    str(cue_index),
+                    f"{_srt_time(_as_number(cue.get('start_seconds')))} --> {_srt_time(_as_number(cue.get('end_seconds')))}",
+                    str(cue.get("text") or ""),
+                    "",
+                ])
+                cue_index += 1
+            continue
         current_version = next((
             item for item in narration.get("versions", [])
             if item.get("id") == narration.get("current_version_id")
@@ -11064,8 +11463,6 @@ def _write_subtitles(
                 ])
                 cue_index += 1
             continue
-        section = sections.get(str(scene.get("script_section_id"))) or {}
-        text = str(narration.get("text") or section.get("text") or scene.get("description") or "").strip()
         if not text:
             continue
         for cue in _subtitle_cues(scene, text):
@@ -11611,14 +12008,20 @@ def start_scene_narration_apply(project_dir: Path, scene_id: str, version_id: st
 
 
 def _require_renderable_project(project_dir: Path, state: dict, automation: dict) -> None:
-    if automation.get("audio_mode") == "music_only":
+    if automation.get("audio_mode") in {"music_only", "source_audio_only"}:
         policy = _ensure_music_policy(state)
         if not policy.get("enabled") or not str(policy.get("track_id") or "").strip():
-            raise WorkbenchError("纯音乐项目必须先选择并启用一条项目音乐")
+            raise WorkbenchError("直接音轨项目必须先选择并启用一条项目音轨")
         try:
             resolve_music_track(str(policy["track_id"]), project_dir)
         except MusicLibraryError as exc:
             raise WorkbenchError(str(exc)) from exc
+        if automation.get("audio_mode") == "source_audio_only":
+            contract = state.get("source_audio_contract") if isinstance(state.get("source_audio_contract"), dict) else {}
+            if str(contract.get("track_id") or "") != str(policy.get("track_id") or ""):
+                raise WorkbenchError("源音频合同与当前项目音轨不一致，请重新保存源音频合同")
+            if policy.get("loop") is True:
+                raise WorkbenchError("源音频模式禁止循环")
         _require_ready_network_assets(state, automation)
         return
     narration_job = automation["narration_generation"]
@@ -11663,7 +12066,7 @@ def start_full_preview_render(project_dir: Path, payload: dict) -> dict:
         frozen_signature = str((((parent.get("frozen_input") or {}).get("audio") or {}).get("audio_mix_signature") or ""))
         if candidate and candidate == frozen_signature:
             upfront_audio_signature = candidate
-    if automation.get("audio_mode") != "music_only":
+    if automation.get("audio_mode") not in {"music_only", "source_audio_only"}:
         _require_approved_music_sample(
             state,
             trusted_default=trusted_default_audio,
@@ -11732,7 +12135,7 @@ def start_project_video_render(project_dir: Path, payload: dict) -> dict:
     automation = _automation(state)
     _require_no_review_preview_conflict(automation)
     _require_renderable_project(project_dir, state, automation)
-    if automation.get("audio_mode") != "music_only":
+    if automation.get("audio_mode") not in {"music_only", "source_audio_only"}:
         _require_approved_music_sample(state)
     review = _full_preview_summary(state)
     if not review["all_scenes_approved"]:
@@ -11865,16 +12268,21 @@ def _materialize_music_only_audio(
     state: dict,
     duration_seconds: float,
     ffmpeg: str,
+    *,
+    audio_mode: str = "music_only",
 ) -> tuple[Path, dict]:
-    """Build the exact project-length audio master for ``music_only`` renders.
+    """Build the exact project-length audio master for direct-track renders.
 
     This is deliberately separate from the speech-plus-BGM mixer: the selected
     music replaces every source video's audio stream and narration/TTS is never
     consulted.  The derivative is cached by the complete audible policy.
     """
     policy = deepcopy(_ensure_music_policy(state))
+    if audio_mode not in {"music_only", "source_audio_only"}:
+        raise WorkbenchError("直接音轨模式无效")
+    source_audio_only = audio_mode == "source_audio_only"
     if not policy.get("enabled"):
-        raise WorkbenchError("纯音乐项目尚未启用项目音乐")
+        raise WorkbenchError("直接音轨项目尚未启用项目音轨")
     try:
         music_path, track = resolve_music_track(str(policy.get("track_id") or ""), project_dir)
     except MusicLibraryError as exc:
@@ -11886,11 +12294,13 @@ def _materialize_music_only_audio(
     end = source_duration if raw_end is None else float(raw_end)
     duration = max(0.1, float(duration_seconds))
     if start < 0 or end <= start or end > source_duration + 0.05:
-        raise WorkbenchError("纯音乐选区无效，请重新选择音乐起止时间")
+        raise WorkbenchError("直接音轨选区无效，请重新选择起止时间")
     loop = bool(policy.get("loop", True))
+    if source_audio_only and loop:
+        raise WorkbenchError("源音频模式禁止循环")
     selection_duration = end - start
     if not loop and selection_duration + 0.02 < duration:
-        raise WorkbenchError("纯音乐选区短于项目时长且未启用循环")
+        raise WorkbenchError("直接音轨选区短于项目时长且未启用循环")
 
     gain_db = clamp_playback_gain_db(policy.get("playback_gain_db"))
     fade_in = max(0.0, min(duration / 2.0, float(policy.get("fade_in_seconds") or 0.0)))
@@ -11909,7 +12319,7 @@ def _materialize_music_only_audio(
     ).hexdigest()
     output_dir = project_dir / "renders" / "audio"
     output_dir.mkdir(parents=True, exist_ok=True)
-    output = output_dir / f"music-only-{signature[:16]}.m4a"
+    output = output_dir / f"{audio_mode.replace('_', '-')}-{signature[:16]}.m4a"
     if not output.is_file():
         filters = [
             f"atrim=start={start:.6f}:end={end:.6f}",
@@ -11930,11 +12340,11 @@ def _materialize_music_only_audio(
         ])
         if not ok or not temporary.is_file():
             temporary.unlink(missing_ok=True)
-            raise WorkbenchError(f"纯音乐音轨生成失败：{detail}")
+            raise WorkbenchError(f"直接音轨生成失败：{detail}")
         os.replace(temporary, output)
     return output, {
         "enabled": True,
-        "audio_mode": "music_only",
+        "audio_mode": audio_mode,
         "track_id": track["id"],
         "title": track["title"],
         "filename": track["filename"],
@@ -12374,6 +12784,7 @@ def _normalize_video_loudness(
         "peak_safety_attenuation_db": peak_safety_attenuation_db,
         "acceptance_enforced": bool(enforce_acceptance),
         "acceptance_status": "passed" if meets_acceptance else "warning",
+        "normalization_applied": True,
         **measured,
         "output_path": _safe_relpath(project_dir, str(video_path)),
     }
@@ -12422,19 +12833,22 @@ def _generate_project_video_render(project_dir: Path, *, preview: bool) -> dict:
         raise WorkbenchError("没有场景可用于合成视频")
     audio_mode = str(automation.get("audio_mode") or "generated_narration")
     music_only = audio_mode == "music_only"
-    ffmpeg = _ffmpeg_available() if music_only else None
-    music_only_report: dict[str, Any] | None = None
-    if music_only:
+    source_audio_only = audio_mode == "source_audio_only"
+    direct_track_audio = music_only or source_audio_only
+    ffmpeg = _ffmpeg_available() if direct_track_audio else None
+    direct_track_report: dict[str, Any] | None = None
+    if direct_track_audio:
         if not ffmpeg:
-            raise WorkbenchError("本机未发现 FFmpeg，无法生成纯音乐音轨")
+            raise WorkbenchError("本机未发现 FFmpeg，无法生成直接音轨")
         project_duration = max(_as_number(scene.get("end_seconds")) for scene in scenes)
-        narration, music_only_report = _materialize_music_only_audio(
-            project_dir, state, project_duration, ffmpeg
+        narration, direct_track_report = _materialize_music_only_audio(
+            project_dir, state, project_duration, ffmpeg, audio_mode=audio_mode
         )
-        subtitle_path = None
+        subtitle_path = _write_subtitles(project_dir, scenes, sections) if source_audio_only else None
         narration_job.update({
             "status": "not_required", "stage": "disabled", "audio_path": None,
-            "subtitle_path": None, "error": "", "reason": "audio_mode=music_only；禁止生成 TTS",
+            "subtitle_path": _safe_relpath(project_dir, str(subtitle_path)) if subtitle_path else None,
+            "error": "", "reason": f"audio_mode={audio_mode}；禁止生成 TTS",
         })
     elif _is_avatar_project(state) and audio_mode == "native_avatar_audio":
         # This is a render derivative, not an immutable source artifact.
@@ -12449,7 +12863,7 @@ def _generate_project_video_render(project_dir: Path, *, preview: bool) -> dict:
         subtitle_path = _write_subtitles(project_dir, scenes, sections)
         narration_job["subtitle_path"] = _safe_relpath(project_dir, str(subtitle_path))
     if not narration.is_file() or (not music_only and (subtitle_path is None or not subtitle_path.is_file())):
-        raise WorkbenchError("项目旁白或字幕文件不存在，请重新生成旁白")
+        raise WorkbenchError("项目音频或字幕文件不存在，请重新检查音频合同")
     manifest = _automation_asset_manifest(project_dir, state)
     _atomic_write(project_dir / AUTOMATION_ASSET_MANIFEST, manifest)
     cuts: list[dict] = []
@@ -12522,7 +12936,7 @@ def _generate_project_video_render(project_dir: Path, *, preview: bool) -> dict:
     } for scene in scenes]
     edit_decisions = {
         "version": "1.0", "renderer_family": "stock-video-narration", "render_runtime": "ffmpeg", "composition_mode": "templated",
-        "metadata": {"proposal_render_runtime": "ffmpeg", "compose_target": {"width": width, "height": height, "fit": "cover"}, "automation": "music_only" if music_only else "separate_narration_then_render"},
+        "metadata": {"proposal_render_runtime": "ffmpeg", "compose_target": {"width": width, "height": height, "fit": "cover"}, "automation": audio_mode if direct_track_audio else "separate_narration_then_render"},
         "cuts": cuts,
         "subtitles": ({"enabled": False, "source": None, "mode": "disabled", "style": {}}
                       if music_only else
@@ -12572,11 +12986,11 @@ def _generate_project_video_render(project_dir: Path, *, preview: bool) -> dict:
     # only after the clean reusable segments have been created below.
     audio_mix_result = (
         {
-            "narration": {"enabled": False, "audio_mode": "music_only", "tts_generated": False},
-            "background_music": music_only_report or {"enabled": True, "audio_mode": "music_only"},
+            "narration": {"enabled": False, "audio_mode": audio_mode, "tts_generated": False},
+            "background_music": direct_track_report or {"enabled": True, "audio_mode": audio_mode},
             "output_path": _safe_relpath(project_dir, str(output)),
         }
-        if music_only else _apply_project_audio_mix(project_dir, state, output)
+        if direct_track_audio else _apply_project_audio_mix(project_dir, state, output)
         if preview else {
             "narration": {
                 "enabled": False,
@@ -12590,10 +13004,11 @@ def _generate_project_video_render(project_dir: Path, *, preview: bool) -> dict:
             },
         }
     )
+    loudness_policy = _ensure_output_loudness_policy(state)
     loudness_result = _normalize_video_loudness(
         project_dir,
         output,
-        target_lufs=-14.0 if preview else -16.0,
+        target_lufs=loudness_policy["target_lufs"],
         enforce_acceptance=not preview,
     )
     report_path = AUTOMATION_PREVIEW_RENDER_REPORT if preview else AUTOMATION_RENDER_REPORT
@@ -12688,16 +13103,20 @@ def _generate_project_video_render(project_dir: Path, *, preview: bool) -> dict:
     state = build_baseline_cache(project_dir)
     audio_mix_result = (
         {
-            "narration": {"enabled": False, "audio_mode": "music_only", "tts_generated": False},
-            "background_music": music_only_report or {"enabled": True, "audio_mode": "music_only"},
+            "narration": {"enabled": False, "audio_mode": audio_mode, "tts_generated": False},
+            "background_music": direct_track_report or {"enabled": True, "audio_mode": audio_mode},
             "output_path": _safe_relpath(project_dir, str(output)),
         }
-        if music_only else _apply_project_audio_mix(project_dir, state, output)
+        if direct_track_audio else _apply_project_audio_mix(project_dir, state, output)
     )
     render_report["narration_gain"] = audio_mix_result["narration"]
     render_report["background_music"] = audio_mix_result["background_music"]
     render_report["audio_mix_signature"] = _audio_mix_signature(state)
-    render_report["loudness"] = _normalize_video_loudness(project_dir, output, target_lufs=-14.0)
+    render_report["loudness"] = _normalize_video_loudness(
+        project_dir,
+        output,
+        target_lufs=_ensure_output_loudness_policy(state)["target_lufs"],
+    )
     _atomic_write(project_dir / report_path, render_report)
     _activity(state, "video_render_finished", "成片与片段基线已就绪，可以进入逐片段审核或局部热插拔")
     return _save(project_dir, state)
@@ -17349,7 +17768,9 @@ def render_patch(project_dir: Path, patch_id: str) -> dict:
                         ),
                     })
                     patch_loudness = _normalize_video_loudness(
-                        project_dir, composition, target_lufs=-14.0
+                        project_dir,
+                        composition,
+                        target_lufs=_ensure_output_loudness_policy(state)["target_lufs"],
                     )
                     report["audio_mix"] = {
                         **patch_mix,

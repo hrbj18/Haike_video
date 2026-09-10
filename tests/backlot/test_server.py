@@ -94,6 +94,28 @@ class TestBacklotServerApi:
         assert response.status_code == 200
         assert response.json() == {"ok": True, "app": "backlot"}
 
+    def test_source_audio_only_endpoint_forwards_versioned_contract(self, client, projects_root, monkeypatch):
+        project = _make_project(projects_root, "source-audio-api")
+        captured = {}
+
+        def configure(project_dir, payload):
+            captured.update(payload)
+            assert project_dir == project
+            return {"automation": {"audio_mode": "source_audio_only"}, "source_audio_contract": {"revision": 1}}
+
+        monkeypatch.setattr(server_mod, "configure_source_audio_only", configure)
+        response = client.put(
+            "/api/project/source-audio-api/workbench/source-audio-only",
+            json={
+                "confirmed": True, "expected_revision": 0, "track_id": "project-source",
+                "source_end_seconds": 3, "cues": [{"id": "cue-001", "start_seconds": 0, "end_seconds": 3, "text": "台词"}],
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["automation"]["audio_mode"] == "source_audio_only"
+        assert captured["expected_revision"] == 0
+
     def test_doubao_asr_config_is_masked_and_signed_audio_route_is_project_scoped(self, client, projects_root, monkeypatch):
         project = _make_project(projects_root, "asr-api")
         audio = project / "artifacts" / "asr" / "S-001" / "sample.mp3"
@@ -173,6 +195,36 @@ class TestBacklotServerApi:
         assert response.status_code == 200
         assert response.json()["narration_policy"]["playback_gain_db"] == 3.5
         assert response.json()["music_policy"]["playback_gain_db"] == -8.0
+
+    def test_output_loudness_project_and_default_apis(self, client, projects_root, monkeypatch):
+        project = _make_project(projects_root, "output-loudness")
+        captured = []
+
+        def update_project(current_project, payload):
+            captured.append((current_project, payload["target_lufs"]))
+            return {"output_loudness_policy": {"target_lufs": float(payload["target_lufs"])}}
+
+        monkeypatch.setattr(server_mod, "update_output_loudness_policy", update_project)
+        monkeypatch.setattr(
+            server_mod,
+            "update_output_loudness_preferences_settings",
+            lambda payload: {"version": 1, "target_lufs": float(payload["target_lufs"]), "true_peak_limit_dbtp": -1.0},
+        )
+
+        project_response = client.put(
+            "/api/project/output-loudness/workbench/output-loudness-policy",
+            json={"target_lufs": -10.0},
+        )
+        default_response = client.put(
+            "/api/workbench/output-loudness-defaults",
+            json={"target_lufs": -10.0},
+        )
+
+        assert project_response.status_code == 200
+        assert project_response.json()["output_loudness_policy"]["target_lufs"] == -10.0
+        assert default_response.status_code == 200
+        assert default_response.json()["target_lufs"] == -10.0
+        assert captured == [(project, -10.0)]
 
     def test_project_music_upload_streams_into_current_project(self, client, projects_root, monkeypatch):
         project = _make_project(projects_root, "local-bgm")
