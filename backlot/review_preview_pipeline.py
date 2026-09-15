@@ -460,9 +460,19 @@ def _freeze_voice(capabilities: dict[str, Any]) -> tuple[dict[str, Any] | None, 
         if selected is None:
             return None, "通用配音中心中用户明确选择的默认音色已不存在，请重新选择后再试"
     else:
-        selected = next((item for item in profiles if str(item.get("name") or "") == "雅雅"), None)
+        # No user-explicit default: prefer the local voicebox "雅雅"
+        # clone (the project's historical default voice).  The lookup is
+        # by either the human-readable name or the catalogue's ``role``
+        # tag, so future renames of the local clone still match.
+        selected = next(
+            (item for item in profiles if str(item.get("name") or "").lower() in {"雅雅", "豆包雅雅"}),
+            None,
+        ) or next(
+            (item for item in profiles if str(item.get("role") or "").lower() == "yaya"),
+            None,
+        )
         if selected is None:
-            return None, "未检测到精确名称为“雅雅”的内置音色；未显式选择其他音色时禁止静默回退"
+            return None, "配音中心缺少 voicebox 雅雅音色；禁止静默回退到非默认音色，请先在配音中心完成配置"
     provider_id = str(selected.get("provider_id") or LOCAL_PROVIDER_ID)
     runtime_profile = selected
     # Cloud profiles contain private provider data. Resolve that data only
@@ -1919,27 +1929,35 @@ def _audio_gate_policy(
 ) -> dict[str, Any]:
     """Return the explicit sample-gate policy for one frozen parent run.
 
-    A new no-avatar project deliberately inherits the workstation's built-in
-    Yaya narration gain.  That known default is part of the one-click product
-    promise, so it must not create a surprise human pause merely because the
-    calibrated gain is non-zero.  Any project-level gain edit, non-Yaya voice,
-    or enabled BGM restores the existing real-mix audition gate.
+    A new no-avatar project deliberately inherits the workstation's
+    built-in local narration gain so the one-click product flow can ship
+    without a surprise human pause for the well-known local default.  Any
+    project-level gain edit, a cloud (paid) voice, or enabled BGM restores
+    the existing real-mix audition gate.
     """
     narration_policy = wb._ensure_narration_policy(state)
     music_policy = wb._ensure_music_policy(state)
     narration_gain = wb.clamp_narration_gain_db(narration_policy.get("playback_gain_db"))
     music_enabled = bool(music_policy.get("enabled"))
-    voice_name = str((frozen_voice or {}).get("profile_name") or "").strip()
+    voice = frozen_voice or {}
+    voice_provider = str(voice.get("provider_id") or LOCAL_PROVIDER_ID)
+    voice_label = str(voice.get("profile_name") or "").strip()
     unity_mix = narration_gain == 0.0 and not music_enabled
+    # Local voicebox "雅雅" + untouched project settings = the well-known
+    # default that ships without forcing an audition pause.  Any cloud
+    # provider (Tencent / Doubao) is paid per character, and any non-雅雅
+    # local voice counts as a deliberate user choice, so both still need
+    # a real sample gate.
     trusted_default = bool(
         not unity_mix
         and not music_enabled
         and not narration_policy.get("updated_at")
-        and voice_name == "雅雅"
+        and voice_provider == LOCAL_PROVIDER_ID
+        and voice_label in {"雅雅", "豆包雅雅"}
     )
     required = bool(not unity_mix and not trusted_default)
     if trusted_default:
-        reason = "使用项目内置雅雅默认配音、继承的人声增益且未启用背景音乐，无需声音样板暂停"
+        reason = f"使用项目内置本地默认配音({voice_label or '本地音色'})、继承的人声增益且未启用背景音乐，无需声音样板暂停"
     elif unity_mix:
         reason = "人物增益为 0 dB 且背景音乐关闭，无需声音样板暂停"
     elif music_enabled:

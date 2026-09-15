@@ -22,7 +22,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Optional
 
-from fastapi import Body, FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -55,6 +55,18 @@ from backlot.doubao_asr import (
     read_doubao_asr_config,
     resolve_signed_project_audio,
     test_doubao_asr_connection,
+)
+from backlot.tencent_asr import (
+    TencentASRError,
+    read_tencent_asr_config,
+    test_tencent_asr_connection,
+)
+from backlot.tencent_config import (
+    TencentConfigError,
+    clear_tencent_config,
+    read_tencent_config,
+    save_tencent_config,
+    test_tencent_tts_connection,
 )
 from backlot.runninghub_config import (
     RunningHubConfigError,
@@ -153,7 +165,8 @@ from backlot.production_queue import (
     ProductionQueueError,
 )
 from backlot.production_queue_worker import ProductionQueueWorker
-from backlot.state import PROJECTS_DIR, REPO_ROOT, list_projects, load_board_state, summarize_project
+from backlot.state import (LIVE_WINDOW_SECONDS, PROJECTS_DIR, REPO_ROOT, list_projects, load_board_state,
+                           summarize_project)
 from backlot.script_templates import ScriptTemplateError, list_avatar_script_templates, preview_avatar_script_template
 from backlot.script_imports import (
     MAX_SCRIPT_IMPORT_BYTES,
@@ -243,6 +256,7 @@ from backlot.workbench import (
     read_asset_media_index_batch,
     read_asset_material_overview,
     read_asset_material_interactions,
+    interaction_rank_preferences,
     run_asset_material_interaction_candidate_job,
     run_asset_material_interaction_second_pass_job,
     start_asset_material_interaction_candidate_job,
@@ -251,8 +265,12 @@ from backlot.workbench import (
     update_asset_material_interaction_review,
     update_asset_material_interaction_candidate,
     update_asset_material_interaction_second_pass,
+    export_asset_material_interaction_second_pass,
+    export_asset_material_interaction_second_pass_deliverables,
     preflight_asset_material_interactions,
     preflight_asset_material_interactions_batch,
+    default_transcript_provider,
+    transcript_provider_catalog,
     resolve_asset_material_interaction_ambiguity,
     read_asset_material_vision,
     read_music_catalog,
@@ -990,6 +1008,11 @@ def _cached_summaries() -> list[dict]:
                     "render_count": 0, "scene_count": 0, "error": "unreadable",
                 }
             _summary_cache[entry.name] = cached
+        # live 是纯时间敏感字段（最近 5 分钟内有文件写入），摘要缓存却只在文件再次变化时失效。
+        # 任务收尾写入之后再无文件改动 → 缓存永不失效 → 项目列表一直显示「制作中 · 4m ago」。
+        # 缓存只应承担昂贵的状态解析，时效字段每次按缓存里的 last_activity 重算。
+        cached["live"] = bool(cached.get("last_activity")
+                              and (time.time() - cached["last_activity"]) < LIVE_WINDOW_SECONDS)
         summaries.append(cached)
     summaries.sort(key=lambda s: (not s["live"], -(s["last_activity"] or 0)))
     return summaries
@@ -1735,17 +1758,65 @@ def create_app() -> FastAPI:
         except AudioCenterError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+        preview_id = str((state.get("preview_job") or {}).get("id") or "")
+
         async def run_preview() -> None:
             try:
                 await asyncio.to_thread(generate_preview)
             except Exception as exc:
                 try:
-                    await asyncio.to_thread(mark_preview_failed, exc)
+                    await asyncio.to_thread(mark_preview_failed, exc, preview_id or None)
                 except Exception:
                     pass
 
         asyncio.create_task(run_preview())
         return state
+
+    # ---- 腾讯云语音（配音中心「API 管理」：TTS + ASR） ------------------
+
+    @app.get("/api/tencent/config")
+    async def tencent_config() -> dict:
+        return await asyncio.to_thread(read_tencent_config)
+
+    @app.put("/api/tencent/config")
+    async def put_tencent_config(payload: dict = Body(...)) -> dict:
+        try:
+            return await asyncio.to_thread(save_tencent_config, payload)
+        except TencentConfigError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.delete("/api/tencent/config")
+    async def delete_tencent_config() -> dict:
+        try:
+            return await asyncio.to_thread(clear_tencent_config)
+        except TencentConfigError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/tencent/test")
+    async def tencent_test(payload: dict = Body(default={})) -> dict:
+        """Explicit, minimal connectivity test for one Tencent Cloud service."""
+        service = str(payload.get("service") or "tts").strip().lower()
+        if service not in {"tts", "asr"}:
+            raise HTTPException(status_code=422, detail="service 只能是 tts 或 asr")
+        try:
+            if service == "asr":
+                result = await asyncio.to_thread(test_tencent_asr_connection)
+            else:
+                result = await asyncio.to_thread(test_tencent_tts_connection)
+        except (TencentConfigError, TencentASRError) as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return {"service": service, **result}
+
+    @app.get("/api/asr/tencent/config")
+    async def tencent_asr_config() -> dict:
+        return await asyncio.to_thread(read_tencent_asr_config)
+
+    @app.post("/api/asr/tencent/test")
+    async def tencent_asr_test() -> dict:
+        try:
+            return await asyncio.to_thread(test_tencent_asr_connection)
+        except TencentASRError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
     @app.get("/api/projects")
     async def projects() -> list:
@@ -3178,6 +3249,7 @@ def create_app() -> FastAPI:
                 payload.get("asset_ids") if isinstance(payload.get("asset_ids"), list) else None,
                 str(payload.get("profile") or "efficient"),
                 payload.get("recognize_audio", True),
+                payload.get("transcript_provider"),
             )
         except WorkbenchError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -3261,20 +3333,39 @@ def create_app() -> FastAPI:
         asset_id: str,
         profile: str = "efficient",
         recognize_audio: bool = True,
+        transcript_provider: str | None = None,
     ) -> dict:
         project_dir = _safe_project_dir(project_id)
         try:
             return await asyncio.to_thread(
-                preflight_asset_material_interactions, project_dir, asset_id, profile, recognize_audio
+                preflight_asset_material_interactions, project_dir, asset_id, profile,
+                recognize_audio, transcript_provider,
             )
         except WorkbenchError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
+    @app.get("/api/project/{project_id}/workbench/transcript-providers")
+    async def get_workbench_transcript_providers(project_id: str) -> dict:
+        """List the transcript engines this machine can run, plus the default."""
+        _safe_project_dir(project_id)
+        catalog = await asyncio.to_thread(transcript_provider_catalog)
+        return {
+            "providers": catalog,
+            "default": await asyncio.to_thread(default_transcript_provider),
+        }
+
     @app.get("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interactions")
-    async def get_workbench_asset_interactions(project_id: str, asset_id: str) -> dict:
+    async def get_workbench_asset_interactions(project_id: str, asset_id: str,
+                                               order_mode: str | None = Query(None),
+                                               w: str | None = Query(None)) -> dict:
         project_dir = _safe_project_dir(project_id)
         try:
-            return await asyncio.to_thread(read_asset_material_interactions, project_dir, asset_id)
+            # Ranking is a *view*: the caller may ask for a different order or
+            # different weights, and the answer is recomputed locally from the
+            # same cached factors without touching the canonical side-car.
+            preferences = interaction_rank_preferences(order_mode=order_mode, weights=w)
+            return await asyncio.to_thread(read_asset_material_interactions, project_dir, asset_id,
+                                           preferences=preferences)
         except WorkbenchError as exc:
             raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -3410,6 +3501,38 @@ def create_app() -> FastAPI:
             return {"second_pass_job": job}
         return await workbench_call(
             update_asset_material_interaction_second_pass,
+            project_id, asset_id, plan_id, payload,
+        )
+
+    @app.post("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interactions/second-pass/{plan_id}/deliverables")
+    async def post_workbench_asset_interaction_second_pass_deliverables(
+        project_id: str,
+        asset_id: str,
+        plan_id: str,
+        payload: dict = Body(default={}),
+    ) -> dict:
+        """Export a caption-free clip plus its SRT — local render, no paid call."""
+        project_dir = _safe_project_dir(project_id)
+        try:
+            return await asyncio.to_thread(
+                export_asset_material_interaction_second_pass_deliverables,
+                project_dir, asset_id, plan_id, payload,
+            )
+        except WorkbenchError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+    @app.post("/api/project/{project_id}/workbench/assets/{asset_id}/media-index/interactions/second-pass/{plan_id}/export")
+    async def post_workbench_asset_interaction_second_pass_export(
+        project_id: str,
+        asset_id: str,
+        plan_id: str,
+        payload: dict = Body(...),
+    ) -> dict:
+        """P0-5：导出剪辑决策（JSON cut-list-v1 / FCP7 XML / OTIO）。零付费、零副作用。"""
+        if payload.get("confirmed") is not True:
+            raise HTTPException(status_code=422, detail="导出前请先确认导出范围与媒体引用方式")
+        return await workbench_call(
+            export_asset_material_interaction_second_pass,
             project_id, asset_id, plan_id, payload,
         )
 

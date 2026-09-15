@@ -18,6 +18,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+import time
 import unicodedata
 from datetime import UTC, datetime
 from fractions import Fraction
@@ -28,6 +29,7 @@ from typing import Any
 from uuid import uuid4
 
 from schemas.artifacts import validate_artifact
+from lib.ffmpeg_locator import resolve_ffmpeg_with_option
 from tools.video import video_compose as video_compose_runtime
 
 
@@ -47,6 +49,9 @@ EXACT_CLOCK_MANIFEST_VERSIONS = frozenset({
 })
 _PACKAGE_WRITE_LOCKS: dict[str, RLock] = {}
 _PACKAGE_WRITE_LOCKS_GUARD = RLock()
+# 读取素材包遇到瞬时 PermissionError 时的重试预算（很短：只是躲开一次 os.replace）。
+_PACKAGE_READ_ATTEMPTS = 3
+_PACKAGE_READ_BACKOFF_SECONDS = 0.01
 
 
 class AvatarImportError(ValueError):
@@ -125,14 +130,29 @@ def _save_package(project_dir: Path, package: dict) -> dict:
 
 
 def read_avatar_package(project_dir: Path) -> dict | None:
+    """读取数字人素材包；缺失时返回 ``None``（``None`` 契约不变）。
+
+    读者与使用「临时文件 + ``os.replace``」的写者会短暂争用：Windows 上读者在写者替换
+    的瞬间可能抛 ``PermissionError``。此前它被当作「读不出来」直接返回 ``None``，于是
+    接口响应里出现 ``avatar_package: null``，前端 ``["voicebox"]`` 取下标就
+    ``TypeError``。这里对 ``PermissionError`` 做一两次很短的退避重试，只有重试仍失败才
+    返回 ``None``；文件不存在或内容损坏仍然立刻返回 ``None``。
+    """
     path = project_dir / PACKAGE_FILE
-    if not path.is_file():
-        return None
-    try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-        return value if isinstance(value, dict) else None
-    except (OSError, json.JSONDecodeError):
-        return None
+    for attempt in range(_PACKAGE_READ_ATTEMPTS):
+        if not path.is_file():
+            return None
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+            return value if isinstance(value, dict) else None
+        except PermissionError:
+            # 瞬时争用：写者正在 os.replace，重试就能拿到完整的新内容。
+            if attempt == _PACKAGE_READ_ATTEMPTS - 1:
+                return None
+            time.sleep(_PACKAGE_READ_BACKOFF_SECONDS * (attempt + 1))
+        except (OSError, json.JSONDecodeError):
+            return None
+    return None
 
 
 def _plan_kind(generation_mode: str, import_mode: str) -> str:
@@ -2571,13 +2591,31 @@ def _complete_avatar_assembly(project_dir: Path, package: dict, candidate_output
     return _save_package(project_dir, package)
 
 
+def _graph_script_ffmpeg() -> str:
+    """An FFmpeg that can read the filter graph from a file.
+
+    The avatar graph goes through ``-filter_complex_script`` so it stays under
+    the Windows command-line limit.  Not every build implements that option —
+    the master builds currently first on this machine's ``PATH`` do not — so the
+    binary is chosen by capability rather than by whatever ``PATH`` resolves
+    first.  Failing here with a readable reason is far better than failing in
+    assembly, after the paid avatar generation has already run.
+    """
+    pair = resolve_ffmpeg_with_option("filter_complex_script")
+    if not pair:
+        raise AvatarImportError(
+            "本机没有支持 -filter_complex_script 的 FFmpeg，无法把长滤镜图写入文件合成数字人母版；"
+            "请改用项目自带的 static-ffmpeg"
+            "（.venv/Lib/site-packages/static_ffmpeg/bin/win32/）后重试"
+        )
+    return pair[0]
+
+
 def _assemble_avatar_package_parallel(project_dir: Path, payload: dict | None = None) -> dict:
     package = read_avatar_package(project_dir)
     if not package or package["assembly"]["status"] != "running":
         raise AvatarImportError("当前没有待执行的数字人合成任务")
-    ffmpeg = _find_binary("ffmpeg")
-    if not ffmpeg:
-        raise AvatarImportError("未发现 ffmpeg，无法合成数字人母版")
+    ffmpeg = _graph_script_ffmpeg()
     inputs, graph, timeline = _build_filter_graph(project_dir, package)
     output_dir = project_dir / OUTPUT_DIRECTORY
     output_dir.mkdir(parents=True, exist_ok=True)

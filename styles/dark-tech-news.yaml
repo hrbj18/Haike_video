@@ -1,0 +1,126 @@
+identity:
+  name: "Dark Tech News"
+  category: cinematic
+  mood: editorial, precise, restrained, newsroom-grade
+  pace: moderate
+  best_for: "Tech news explainers, knowledge-sharing vertical shorts (9:16), science/AI briefings"
+
+taste_profile:
+  design_read: "Dark-mode vertical video language: full-bleed real footage as the single source of truth, with four fixed anchors (top-left chip, top-right avatar, bottom subtitle) for cross-shot consistency."
+  visual_variance: 3
+  motion_intensity: 2
+  information_density: 4
+  palette_discipline: "Background is always the same near-black field; one cyan accent used sparingly; the footage itself is the colour anchor — overlays never fight it."
+  layout_variation: "All frames share the same four-anchor grid: top-left chip title, top-right avatar pip, bottom subtitle strip. Per-scene variation comes from the footage, not the chrome."
+  reference_strategy: "Lock four-anchor positions before any per-scene work; reuse them across every scene to prevent drift between takes."
+  anti_patterns:
+    - "Flat illustrated cards on top of footage (two different visual languages)"
+    - "Decorative divider lines or grid backgrounds that compete with the footage"
+    - "Card-style data widgets inside the video frame"
+    - "Pulsing, neon, or gradient overlays that look like marketing intros"
+  quality_gates:
+    - "Every frame must keep the four anchors in the same screen positions."
+    - "Headline text and subtitle must be legible at 720p over busy footage (chip bg must provide contrast)."
+    - "Avatar pip must remain in the top-right corner; never re-styled per scene."
+
+visual_language:
+  color_palette:
+    primary: ["#0F172A", "#1E293B"]
+    accent: ["#22D3EE", "#A78BFA"]
+    background: "#0F172A"
+    text: "#F8FAFC"
+    muted: "#94A3B8"
+  composition: "full-bleed 9:16 footage; four fixed anchors: top-left chip title (24-32px from edge), top-right avatar pip (96-128px circle), bottom subtitle strip (full width), no other chrome"
+  texture: real footage carries texture; overlays are flat (chip uses solid background with optional blur, no gradient)
+
+typography:
+  headings:
+    font: "Inter"
+    weight: 700
+    tracking: "-0.01em"
+  body:
+    font: "Inter"
+    weight: 500
+    line_height: 1.5
+  code:
+    font: "JetBrains Mono"
+    weight: 400
+  stat_card:
+    font: "Inter"
+    weight: 700
+    size_multiplier: 2.4
+  scale_system: "major_third"
+  weight_matrix:
+    title: 700
+    heading: 600
+    body: 500
+    caption: 400
+
+motion:
+  transitions: [fade, dissolve]
+  animation_style: "subtle: short fade between shots, no slide/wipe/zoom; footage owns the visual rhythm"
+  pacing_rules:
+    min_scene_hold_seconds: 3.0
+    max_scene_hold_seconds: 9.0
+    text_card_hold_seconds: 4.0
+    stat_card_hold_seconds: 3.5
+    transition_duration_seconds: 0.35
+  entrance: "avatar pip fades in first (0.2s), then chip (0.2s), then subtitle strip slides up 8px (0.3s)"
+  exit: "chip and subtitle fade together; avatar remains (live presenter feel)"
+
+audio:
+  voice_style: "newsroom narration: clear, measured, confident; Chinese-language professional reading pace"
+  music_mood: "minimal ambient pulse, no melody; ducked to ~6% under narration"
+  music_volume: 0.06
+  sfx_style: "soft whoosh only on transitions; no other sfx"
+  ducking_threshold_db: -6
+  voice_variation_allowed: false
+  hero_moment_voice_shift: "slower, lower pitch, no extra emphasis tags"
+  transition_voice_shift: "200ms silence between segments, no breath"
+
+asset_generation:
+  image_prompt_prefix: "dark mode vertical video still, real-world tech news footage, full bleed 9:16, no UI overlay, "
+  image_negative_prompt: "cartoon, illustrated, infographic, gradient background, neon, text overlay, watermark, busy UI"
+  diagram_style: "rare; when needed, a single number 96px in white over footage, no chart chrome"
+  consistency_anchors:
+    - "Background: footage full-bleed or #0F172A fallback, never a third surface colour"
+    - "Top-left: headline chip, white text on rgba(0,0,0,0.55) with backdrop-blur 4-8px"
+    - "Top-right: circular avatar pip, 96-128px, always present, 12% from top and right edges"
+    - "Bottom: subtitle strip, white text on rgba(0,0,0,0.55) with backdrop-blur 4-8px, max 2 lines"
+    - "One accent colour only: #22D3EE; use for short underline (28px) below the chip or for a stat callout — never as a fill"
+
+overlays:
+  stat_card:
+    bg: "rgba(0,0,0,0.55)"
+    border: "transparent"
+    radius: 8
+    shadow: "none"
+  key_term:
+    bg: "rgba(0,0,0,0.55)"
+    text: "#F8FAFC"
+    radius: 6
+  code_block:
+    bg: "#0F172A"
+    text: "#F8FAFC"
+    highlight: "#22D3EE"
+
+quality_rules:
+  - "Top-left chip headline must be readable at 720p (use 22-26px on a 1280-wide render)"
+  - "Subtitle strip max two lines, total height ≤ 18% of frame"
+  - "Avatar pip must remain in the top-right corner across every shot — no resizing or repositioning"
+  - "No more than 2 stacked text elements visible at once (chip + subtitle, or avatar label + stat)"
+  - "Every generated still uses the four-anchor grid; verify by counting anchor positions before approving"
+  - "Hold establishing shots at least 3.0s; no faster than 0.35s transitions"
+
+chart_palette:
+  - "#22D3EE"
+  - "#F8FAFC"
+  - "#94A3B8"
+  - "#A78BFA"
+  - "#F59E0B"
+  - "#34D399"
+
+color_rules:
+  harmony_type: "analogous"
+  contrast_validation: true
+  colorblind_safe: true

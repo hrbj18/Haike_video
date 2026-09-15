@@ -699,6 +699,7 @@ class TestCapabilityMetadata:
             "openai",
             "piper",
             "openmontage_local_tts",
+            "tencent",
         }
 
 

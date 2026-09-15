@@ -29,6 +29,7 @@ import type { TerminalStep } from "./components/TerminalScene";
 import { ScreenshotScene } from "./components/ScreenshotScene";
 import type { ScreenshotStep } from "./components/ScreenshotScene";
 import { ProviderChip } from "./components/ProviderChip";
+import { NewsAnchor } from "./components/NewsAnchor";
 import { resolveAsset } from "./lib/resolveAsset";
 import type { ParticleType } from "./components/ParticleOverlay";
 import { resolveTheme, type ThemeConfig, DEFAULT_THEME } from "./Root";
@@ -250,6 +251,11 @@ interface Cut {
   screenshotSteps?: ScreenshotStep[];
   screenshotSize?: { width: number; height: number };
   cursorStartAt?: [number, number];
+  // News anchor props (type: "news_anchor")
+  kicker?: string;
+  avatarImage?: string;
+  avatarLabel?: string;
+  centerMotif?: string;
 }
 
 interface Overlay {
@@ -625,6 +631,23 @@ const SceneRenderer: React.FC<{ cut: Cut; theme: ThemeConfig }> = ({ cut, theme 
         steps={cut.screenshotSteps as ScreenshotStep[]}
         accentColor={accent}
         cursorStartAt={cut.cursorStartAt}
+      />
+    );
+  }
+  if (cut.type === "news_anchor" && cut.text) {
+    return (
+      <NewsAnchor
+        backgroundImage={cut.backgroundImage}
+        backgroundVideo={cut.backgroundVideo}
+        backgroundVideoStart={cut.backgroundVideoStart ?? 0}
+        backgroundOverlay={cut.backgroundOverlay ?? 0.28}
+        headline={cut.text}
+        kicker={cut.kicker}
+        avatarImage={cut.avatarImage}
+        avatarLabel={cut.avatarLabel}
+        subtitle={cut.subtitle}
+        centerMotif={cut.centerMotif}
+        accentColor={accent}
       />
     );
   }

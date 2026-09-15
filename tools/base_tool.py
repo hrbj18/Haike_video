@@ -21,6 +21,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from lib.subprocess_window import no_window_kwargs
+
 
 def _load_dotenv() -> None:
     """Load local env files into os.environ once at import time.
@@ -447,6 +449,9 @@ class BaseTool(ABC):
                 timeout=timeout,
                 cwd=cwd,
                 check=True,
+                # npx / node / ffmpeg are console programs; without this each one
+                # opens its own console window when the server runs detached.
+                **no_window_kwargs(),
             )
         except subprocess.CalledProcessError as exc:
             stderr = (exc.stderr or "").strip()

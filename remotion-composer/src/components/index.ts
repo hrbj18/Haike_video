@@ -13,6 +13,7 @@ export { AnimeScene } from "./AnimeScene";
 export { TerminalScene } from "./TerminalScene";
 export { ScreenshotScene } from "./ScreenshotScene";
 export { ProviderChip } from "./ProviderChip";
+export { NewsAnchor } from "./NewsAnchor";
 export type { ParticleType } from "./ParticleOverlay";
 export type { CameraMotion, AnimeSceneProps } from "./AnimeScene";
 export type { TerminalStep } from "./TerminalScene";

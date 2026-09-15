@@ -11,38 +11,6 @@ $projectRoot = Split-Path -Parent $PSScriptRoot
 $python = Join-Path $projectRoot ".venv\Scripts\python.exe"
 $workbenchUrl = "http://127.0.0.1:$Port/"
 
-function Repair-ProcessPathEnvironment {
-    # Some launch hosts expose both `Path` and `PATH` with different values.
-    # Windows PowerShell's Start-Process copies them into a case-insensitive
-    # dictionary and then fails before the child process is created.  Merge the
-    # variants for this launcher and its children only; do not touch the user's
-    # persistent machine or account environment.
-    $environment = [Environment]::GetEnvironmentVariables('Process')
-    $pathKeys = @($environment.Keys | Where-Object { [string]$_ -ieq 'Path' })
-    if ($pathKeys.Count -lt 2) { return }
-
-    $orderedKeys = @($pathKeys | Sort-Object {
-        if ([string]$_ -ceq 'Path') { 0 }
-        elseif ([string]$_ -ceq 'PATH') { 1 }
-        else { 2 }
-    })
-    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
-    $parts = New-Object System.Collections.Generic.List[string]
-    foreach ($key in $orderedKeys) {
-        foreach ($part in ([string]$environment[$key] -split ';')) {
-            $trimmed = $part.Trim()
-            if ($trimmed -and $seen.Add($trimmed)) {
-                [void]$parts.Add($trimmed)
-            }
-        }
-    }
-    $mergedPath = $parts -join ';'
-    [Environment]::SetEnvironmentVariable('Path', $mergedPath, 'Process')
-    [Environment]::SetEnvironmentVariable('PATH', $mergedPath, 'Process')
-}
-
-Repair-ProcessPathEnvironment
-
 if (-not (Test-Path -LiteralPath $python)) {
     Write-Host "未找到项目虚拟环境：$python" -ForegroundColor Red
     Write-Host "请先按 README_zh-CN.md 完成一次依赖安装，再双击“启动工作台.bat”。" -ForegroundColor Yellow
@@ -152,21 +120,75 @@ try {
     if ($Restart) {
         Stop-VerifiedBacklotServer -TargetPort $Port
     }
-    Write-Host "正在启动本地工作台，首次启动可能需要约一分钟……" -ForegroundColor Cyan
-    & $python -m backlot open --no-browser
-    if ($LASTEXITCODE -ne 0) {
-        throw "本地工作台未能在端口 $Port 启动。"
-    }
-    if (-not (Test-BacklotHealth -BaseUrl $workbenchUrl)) {
-        throw "本地工作台进程已启动，但健康检查未通过（端口 $Port）。"
+    $logDir = Join-Path $projectRoot '.backlot\logs'
+    New-Item -ItemType Directory -Path $logDir -Force | Out-Null
+    # launch_backlot.py captures crashes that happen before the server can log
+    # (a failed import, for instance); once running, the server appends to
+    # backlot.log by itself (see backlot/__main__.py).
+    $outLog = Join-Path $logDir 'backlot.out.log'
+    $errLog = Join-Path $logDir 'backlot.err.log'
+    $serverLog = Join-Path $logDir 'backlot.log'
+
+    if (Test-BacklotHealth -BaseUrl $workbenchUrl) {
+        Write-Host "端口 $Port 上已有工作台在运行，直接复用。" -ForegroundColor Green
+    } else {
+        Write-Host "正在启动本地工作台，首次启动可能需要约一分钟……" -ForegroundColor Cyan
+        # The workbench must not be tied to this console window: launching it
+        # with the call operator (& python -m backlot open) kept the server a
+        # child of this window, so closing the window killed the workbench and
+        # left the port dead with no log to explain it.  PowerShell cannot take
+        # over the launching either, because Start-Process and
+        # ProcessStartInfo both abort as soon as the host injected the same
+        # environment variable twice with different casing (Path/PATH,
+        # http_proxy/HTTP_PROXY, ...).  scripts\launch_backlot.py detaches the
+        # server with plain subprocess flags, which are immune to that.
+        $launcher = Join-Path $projectRoot 'scripts\launch_backlot.py'
+        if (-not (Test-Path -LiteralPath $launcher)) {
+            throw "缺少启动器：$launcher"
+        }
+
+        # A forced stop can leave the port briefly unusable; wait for the
+        # previous listener to disappear before starting a fresh server.
+        $releaseDeadline = (Get-Date).AddSeconds(15)
+        while (@(Get-ListeningProcessIds -TargetPort $Port).Count -and (Get-Date) -lt $releaseDeadline) {
+            Start-Sleep -Milliseconds 400
+        }
+
+        & $python $launcher
+        if ($LASTEXITCODE -ne 0) {
+            throw "工作台启动器返回退出码 $LASTEXITCODE（$launcher）。"
+        }
+
+        $deadline = (Get-Date).AddSeconds(90)
+        while (-not (Test-BacklotHealth -BaseUrl $workbenchUrl)) {
+            if ((Get-Date) -ge $deadline) { break }
+            Start-Sleep -Milliseconds 600
+        }
+
+        if (-not (Test-BacklotHealth -BaseUrl $workbenchUrl)) {
+            $tail = @()
+            foreach ($candidate in @($serverLog, $errLog, $outLog)) {
+                if (Test-Path -LiteralPath $candidate) {
+                    $content = ((Get-Content -LiteralPath $candidate -Tail 15) -join "`n").Trim()
+                    if ($content) { $tail += "--- $candidate ---`n$content" }
+                }
+            }
+            throw "本地工作台未能在端口 $Port 就绪。`n$($tail -join "`n")"
+        }
+        Write-Host "工作台已在后台就绪。" -ForegroundColor Green
     }
 } catch {
     Write-Host "启动失败：$($_.Exception.Message)" -ForegroundColor Red
+    if ($_.InvocationInfo -and $_.InvocationInfo.PositionMessage) {
+        Write-Host "出错位置：$($_.InvocationInfo.PositionMessage)" -ForegroundColor DarkGray
+    }
     Write-Host "请确认端口 $Port 没有被其他程序占用，并检查 .venv 是否已完成依赖安装。" -ForegroundColor Yellow
+    Write-Host "详细日志：$(Join-Path $projectRoot '.backlot\logs\backlot.log')" -ForegroundColor Yellow
     exit 1
 }
 
 Write-Host "`n工作台已就绪：$workbenchUrl" -ForegroundColor Green
+Write-Host "工作台已在后台独立运行，关闭本窗口不会影响它。" -ForegroundColor DarkGray
 if (-not $NoBrowser) {
     if (-not (Open-WorkbenchBrowser -Url $workbenchUrl)) {
         Write-Host '工作台已经启动，但系统未能自动打开浏览器。请复制上面的地址到浏览器访问。' -ForegroundColor Yellow

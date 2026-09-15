@@ -121,6 +121,7 @@ def normalize_text_overlay_layer(raw: Any, index: int = 0) -> dict[str, Any]:
         "font_family": str(raw.get("font_family") or "Microsoft YaHei").strip()[:120],
         "font_size": round(_bounded_number(raw.get("font_size", 56), f"{layer_id}.font_size", 8, 400), 3),
         "font_weight": _integer(raw.get("font_weight", 700), f"{layer_id}.font_weight", 100, 900),
+        "font_variation": str(raw.get("font_variation") or "").strip()[:40],
         "color": _color(raw.get("color"), f"{layer_id}.color", "#FFFFFF"),
         "stroke_color": _color(raw.get("stroke_color"), f"{layer_id}.stroke_color", "#111111"),
         "stroke_width": round(_bounded_number(raw.get("stroke_width", 0), f"{layer_id}.stroke_width", 0, 30), 3),
@@ -238,8 +239,13 @@ def _font_path(font_family: str, bold: bool) -> Path | None:
     root = Path("C:/Windows/Fonts")
     family = font_family.lower()
     candidates: list[str]
-    if "yahei" in family or "雅黑" in family:
+    if "noto" in family or "思源" in family or "source han" in family:
+        # Noto Sans SC ships as a variable font; weight is selected by _font_variation().
+        candidates = ["NotoSansSC-VF.ttf", "msyhbd.ttc", "msyh.ttc"]
+    elif "yahei" in family or "雅黑" in family:
         candidates = ["msyhbd.ttc", "msyh.ttc"] if bold else ["msyh.ttc", "msyhbd.ttc"]
+    elif "deng" in family or "等线" in family:
+        candidates = ["Dengb.ttf", "Deng.ttf", "msyhbd.ttc"] if bold else ["Deng.ttf", "Dengb.ttf", "msyh.ttc"]
     elif "simhei" in family or "黑体" in family:
         candidates = ["simhei.ttf", "msyhbd.ttc"]
     elif "simsun" in family or "宋体" in family:
@@ -247,6 +253,45 @@ def _font_path(font_family: str, bold: bool) -> Path | None:
     else:
         candidates = ["msyhbd.ttc", "arialbd.ttf", "msyh.ttc"] if bold else ["msyh.ttc", "arial.ttf"]
     return next((root / name for name in candidates if (root / name).is_file()), None)
+
+
+_DEFAULT_VARIATION_BY_WEIGHT = (
+    (900, "Black"),
+    (800, "ExtraBold"),
+    (700, "Bold"),
+    (600, "SemiBold"),
+    (500, "Medium"),
+)
+
+
+def _font_variation(layer: dict[str, Any]) -> str:
+    """Resolve the variable-font instance name for a layer.
+
+    An explicit ``font_variation`` always wins; otherwise the weight is mapped
+    onto Noto Sans SC's named instances so a 900-weight layer really renders
+    black instead of silently falling back to the font's Regular instance.
+    """
+    explicit = str(layer.get("font_variation") or "").strip()
+    if explicit:
+        return explicit
+    family = str(layer.get("font_family") or "").lower()
+    if "noto" not in family and "思源" not in family and "source han" not in family:
+        return ""
+    weight = int(layer.get("font_weight") or 400)
+    for threshold, name in _DEFAULT_VARIATION_BY_WEIGHT:
+        if weight >= threshold:
+            return name
+    return ""
+
+
+def _apply_variation(font: Any, variation: str) -> Any:
+    if not variation or not hasattr(font, "set_variation_by_name"):
+        return font
+    try:
+        font.set_variation_by_name(variation)
+    except (ValueError, OSError, TypeError):
+        return font
+    return font
 
 
 def _draw_text_asset(path: Path, layer: dict[str, Any], pixel_width: int, pixel_height: int, scale: float) -> None:
@@ -262,6 +307,7 @@ def _draw_text_asset(path: Path, layer: dict[str, Any], pixel_width: int, pixel_
     font_size = max(1, round(layer["font_size"] * scale))
     font_path = _font_path(layer["font_family"], layer["font_weight"] >= 600)
     font = ImageFont.truetype(str(font_path), font_size) if font_path else ImageFont.load_default()
+    font = _apply_variation(font, _font_variation(layer))
     stroke = max(0, round(layer["stroke_width"] * scale))
     pad_x = max(0, round(layer["padding_x"] * scale))
     pad_y = max(0, round(layer["padding_y"] * scale))

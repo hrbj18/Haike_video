@@ -1132,3 +1132,73 @@ textarea, input, select { width: 100%; border: 1px solid var(--line-bright); bor
 .material-overview-detail-frame img { width: 110px; max-height: 140px; object-fit: contain; border: 1px solid var(--line); background: var(--surface-raised); }
 .material-overview-detail-frame > div { display: grid; gap: 5px; }
 @media (max-width: 620px) { .material-overview-detail-frame { grid-template-columns: 1fr; }.material-overview-detail-frame img { width: 100%; max-height: none; } }
+
+/* --- 粗剪推荐：每条排名「左＝对应切片，右＝对应评分」 -------------------------
+   评分曾经和素材挤在同一条纵向卡片流里：素材被顶到屏幕外，素材编号与排名也
+   看不出对应关系。 这里改成：**原片回看单独折叠在最上面（原素材不参与排名），
+   排名从第 1 名往下排，每一条自己左切片、右评分。** */
+.interaction-rank-layout { display: grid; gap: 14px; align-content: start; }
+.interaction-rank-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.interaction-source-review { border: 1px solid var(--line); background: var(--surface-soft); }
+.interaction-source-review > summary { cursor: pointer; padding: 9px 11px; color: var(--muted); font-size: 12px; }
+.interaction-source-body { display: grid; gap: 8px; padding: 0 11px 11px; }
+.interaction-source-body video { width: 100%; max-height: 46vh; background: var(--surface-raised); }
+.interaction-column-title { margin: 0; color: var(--muted); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; }
+.interaction-column-head { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 8px; }
+.interaction-material-diagnostics summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.interaction-material-diagnostics { padding: 8px 10px; border: 1px solid var(--line); background: var(--surface-soft); }
+.interaction-rank-badge { padding: 3px 9px; border: 1px solid var(--cyan); background: var(--cyan-deep); color: var(--text); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.interaction-score-list { display: grid; gap: 5px; }
+.interaction-score-row { display: grid; grid-template-columns: 76px minmax(0, 1fr); gap: 8px; align-items: center; font-size: 12px; }
+.interaction-score-name { color: var(--muted); }
+.interaction-score-bar { display: grid; grid-template-columns: minmax(0, 1fr) 30px; gap: 7px; align-items: center; }
+.interaction-score-track { display: block; height: 8px; border: 1px solid var(--line); background: var(--surface-soft); }
+.interaction-score-track i { display: block; height: 100%; background: var(--cyan); }
+.interaction-score-bar em { color: var(--muted); font-style: normal; font-size: 11px; text-align: right; }
+.interaction-requirement { width: fit-content; padding: 4px 8px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--muted); font-size: 11px; }
+.interaction-requirement.is-ok { border-color: var(--ok); color: var(--ok); }
+.interaction-requirement.is-unmet { border-color: var(--danger); color: var(--danger); }
+.interaction-rank-toolbar { position: sticky; top: 10px; z-index: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 14px; padding: 10px; border: 1px solid var(--line); background: var(--surface-raised); }
+.interaction-rank-toolbar label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.interaction-weight-wrap summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.interaction-weight-panel { display: grid; gap: 8px; margin-top: 8px; padding: 10px; border: 1px solid var(--line); background: var(--surface); }
+.interaction-weight-rows { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.interaction-weight-row { display: grid; grid-template-columns: auto minmax(60px, 1fr) auto; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.interaction-weight-row input { width: 100%; }
+.interaction-rank-card { display: grid; gap: 10px; padding: 12px; border: 1px solid var(--line); background: var(--surface); color: var(--text); }
+.interaction-rank-card.is-selected { border-left: 4px solid var(--cyan); box-shadow: inset 0 0 0 1px var(--cyan-deep); }
+.interaction-rank-card.review-kept { border-left: 4px solid var(--ok); }
+.interaction-rank-card.review-discarded { opacity: .72; border-left: 4px solid var(--danger); }
+.interaction-rank-card.is-orphan { border-left: 4px dashed var(--line-bright); }
+.interaction-rank-card-head { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center; }
+.interaction-rank-identity { display: grid; gap: 3px; min-width: 0; }
+.interaction-rank-identity strong { font-size: 13px; }
+.interaction-rank-total { display: grid; gap: 2px; justify-items: end; text-align: right; }
+/* 左边是这条排名自己的切片，右边是这条排名自己的评分。 */
+.interaction-rank-card-body { display: grid; grid-template-columns: minmax(180px, 260px) minmax(0, 1fr); gap: 14px; align-items: start; }
+.interaction-rank-clip { display: grid; gap: 6px; min-width: 0; }
+.interaction-clip-player { width: 100%; max-height: 340px; background: var(--surface-raised); }
+.interaction-clip-badge { margin: 0; width: fit-content; padding: 3px 7px; border: 1px solid var(--line-bright); background: var(--surface-raised); color: var(--muted); font-size: 11px; }
+.interaction-clip-badge.is-cut { border-color: var(--ok); color: var(--ok); }
+.interaction-rank-scores { display: grid; gap: 7px; min-width: 0; }
+.interaction-rank-scores p { margin: 0; line-height: 1.6; }
+.interaction-rank-actions { display: grid; gap: 8px; }
+/* 每条素材自己的两层折叠详情：第一次完整切片 / 二次精剪。二次精剪不再单独占页面底部一整块。 */
+.interaction-row-detail { border: 1px solid var(--line); border-left: 3px solid var(--line-bright); background: var(--surface-soft); }
+.interaction-row-detail > summary { cursor: pointer; padding: 8px 10px; color: var(--muted); font-size: 12px; }
+.interaction-row-detail[open] > summary { color: var(--text); }
+.interaction-row-detail > *:not(summary) { margin: 0 10px 10px; }
+.interaction-story-transcript { padding-left: 2px; }
+.interaction-story-transcript > summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+.interaction-story-wrap { border-top: 1px dashed var(--line); padding-top: 8px; }
+.interaction-story-wrap > summary { cursor: pointer; color: var(--muted); font-size: 12px; }
+.interaction-deliverables { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 9px 10px; border: 1px solid var(--ok); background: var(--surface-raised); }
+.interaction-deliverables a.button { text-decoration: none; }
+@media (max-width: 880px) {
+  .interaction-rank-card-body { grid-template-columns: 1fr; }
+  .interaction-clip-player { max-height: 46vh; }
+}
+@media (max-width: 620px) {
+  .interaction-rank-card-head { grid-template-columns: auto 1fr; }
+  .interaction-rank-total { grid-column: 1 / -1; justify-items: start; text-align: left; }
+}

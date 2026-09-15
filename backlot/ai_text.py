@@ -555,24 +555,33 @@ def plan_interaction_story(context: dict[str, Any]) -> tuple[dict[str, Any], str
     """Group one selected interaction into auditable, chronological story units.
 
     Source timestamps are intentionally absent from the requested output.  The
-    caller resolves every supplied utterance ID back to frozen local evidence.
+    caller resolves every supplied item id back to frozen local evidence.
+
+    The supplied items are **2—6 second phrase-level speech units** whose edges
+    are real VAD gaps (``context["unit_source"] == "vad_aligned"``), which is what
+    makes a fine-grained drop and a 3—5 second hook expressible at all.  The
+    earlier 27—60 second ASR blocks are why a whole 27-second stretch used to be
+    deleted as "low information density" while a 2-second greeting could not be
+    removed on its own.  When the context says ``asr_utterance`` the evidence
+    degraded to block granularity and the same rules apply to coarser atoms.
     """
     system = """你是短视频互动素材的剪辑策划，只处理用户已选择的同一组互动。
-把所有 supplied utterances 按原顺序分成连续的语义组，每条分句必须且只能出现一次。
-每组只能引用给定 utterance id，不得输出或猜测时间戳，不得添加台词。
+把所有 supplied units 按原顺序分成连续的语义组，每个 unit 必须且只能出现一次。
+每个 unit 是一次 2 至 6 秒的连续说话片段，其起止都落在没有语音的间隙里，因此组与组的边界就是安全的切口。
+每组只引用给定的 unit id，不得输出或猜测时间戳，不得添加台词；一组可以只含 1 个 unit，也可以含相邻的多个 unit。
+取舍原则：**优先保留完整叙事链**。只有整组内容明显重复、明显跑题、或与本次互动无关时才建议 drop；
+不得为了凑某个时长而删除包含有效信息的对话，也不得把一次完整互动切成很多碎组。
+同一件事的多轮重复尝试（例如连续拍照、反复确认、重复解释）要标成 repetition，并且**只保留信息或反应最完整的那一轮**，其余整轮 drop。
+判断完整的问答、追问、铺垫、笑点、反应、动作和结果，删除必须以完整语义组为单位。
+depends_on 用于声明保留本组时必须保留的前提组。对问答、动作结果和依赖上下文要保守。
+片头与片尾由系统按明确的开场词与告别词自动锚定，你**不需要**为了"掐头去尾"而删除开场或结尾的组；
+如果你认为开场寒暄或结尾告别本身没有信息价值，仍然可以按上面的原则 drop，系统会自行决定边界。
 visual_evidence 是此前画面理解留下的只读摘要、帧ID和停顿证据；可以辅助判断动作、反应和开场，但不能把摘要当作新台词。
 组内 evidence_ids 只能引用 visual_evidence.frames 或 pause_windows 中确实提供的 id；没有直接证据可以留空，不得编造。
-正文不能重排。判断完整的问答、追问、铺垫、笑点、反应、动作和结果；删除必须以完整语义组为单位。
-depends_on 用于声明保留本组时必须保留的前提组。对问答、动作结果和依赖上下文要保守。
-greeting/farewell/repetition 可以建议 drop，但有叙事价值时保留。
-同一件事的多轮重复尝试（例如连续拍照、反复确认、重复解释）要标成 repetition 并只保留信息或反应最完整的一轮；
-不要因为每句话单独都有意义就把所有轮次都保留。若后一处笑点依赖前一处铺垫，用 depends_on 明确依赖。
-参考输入 options 中的 target_min_seconds、target_max_seconds 和 speed，尽量让“已保留正文/倍速 + 一次精彩前置/倍速”进入目标区间；
-但语义完整、问答依赖和动作结果优先于凑时长。无法安全达标时保留必要内容，不得拆半句话。
 hook_candidates 最多3个，只能引用连续且已建议保留的组；候选必须能独立理解，优先3至5秒，但你不知道精确时长，系统会校验。
 默认精彩前置会把所选组移动到片头而不是复制，正文必须在去掉该组后仍然逻辑通顺。
 只返回 JSON 对象：
-{"summary":"...","groups":[{"id":"G001","type":"greeting|question_answer|follow_up|setup|punchline|reaction|action|result|farewell|repetition|other","utterance_ids":["U00001"],"evidence_ids":["F000012000"],"decision":"keep|drop","reason":"...","depends_on":[],"hook_eligible":false,"hook_score":0.0}],"hook_candidates":[{"id":"H001","group_ids":["G002"],"reason":"..."}]}"""
+{"summary":"...","groups":[{"id":"G001","type":"greeting|question_answer|follow_up|setup|punchline|reaction|action|result|farewell|repetition|other","utterance_ids":["P00001"],"evidence_ids":["F000012000"],"decision":"keep|drop","reason":"...","depends_on":[],"hook_eligible":false,"hook_score":0.0}],"hook_candidates":[{"id":"H001","group_ids":["G002"],"reason":"..."}]}"""
     # The UI freezes a one-submit budget before this paid step.  Unlike older
     # generic callers, do not issue compatibility fallback POSTs here: a 4xx
     # is surfaced for configuration repair instead of risking a second submit.

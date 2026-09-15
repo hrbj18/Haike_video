@@ -36,7 +36,7 @@ from uuid import uuid4
 
 from backlot.state import _collect_artifacts, _collect_checkpoints, _read_json
 from backlot.audio_center import get_default_voice, get_voice_profile, read_audio_center
-from backlot.tts_runtime import generate_voice_audio
+from backlot.tts_runtime import LOCAL_PROVIDER_ID, generate_voice_audio
 from backlot.ai_text import TextAIError, plan_visual_copy, plan_visual_routes, read_text_ai_config
 from backlot.ai_vision import (
     describe_contact_sheets,
@@ -82,9 +82,39 @@ from backlot.material_interaction_second_pass_candidates import (
 )
 from backlot.material_interaction_second_pass import (
     InteractionSecondPassError,
+    VERSION as INTERACTION_SECOND_PASS_VERSION,
+    pause_probe_bridge_seconds,
+    pause_probe_min_silence,
+    pause_survivor_seconds,
     plan_path as interaction_second_pass_plan_path,
 )
-from backlot.material_audio_evidence import resolve_audio_evidence
+from backlot.material_interaction_story import VERSION as INTERACTION_STORY_VERSION
+from backlot.material_interaction_units import VERSION as INTERACTION_UNITS_VERSION
+from backlot.material_pause_evidence import (
+    InteractionPauseEvidenceError,
+    detect_pause_evidence as detect_interaction_pause_evidence,
+)
+from backlot.material_evidence import (
+    MaterialEvidenceError,
+    build_material_evidence,
+    read_material_evidence,
+    summarize_material_evidence,
+)
+from backlot.material_interaction_recommend import (
+    InteractionRecommendError,
+    SCORED_FACTORS,
+    VERSION as INTERACTION_RECOMMEND_VERSION,
+    build_recommendations as build_interaction_recommendations,
+    read_recommendations as read_interaction_recommendations,
+    resolve_order_mode,
+    write_recommendations as write_interaction_recommendations,
+)
+from backlot.material_audio_evidence import (
+    DEFAULT_TRANSCRIPT_PROVIDER,
+    TRANSCRIPT_PROVIDERS,
+    audio_policy,
+    resolve_audio_evidence,
+)
 from backlot.visual_director import DIRECTOR_VERSION, candidate_asset_id, decide_candidate, prepare_candidates
 from backlot.avatar_import import AvatarImportError, initialize_avatar_package, read_avatar_package
 from backlot.ppt_cards import CARD_TYPES, normalize_spec as normalize_ppt_card_spec, render_card as render_ppt_card
@@ -107,6 +137,13 @@ from backlot.doubao_asr import (
     create_project_transcript_provider,
     doubao_asr_runtime_identity,
 )
+from backlot.tencent_asr import (
+    TencentASRAmbiguous,
+    TencentASRError,
+    assert_tencent_asr_ready,
+    create_project_transcript_provider as create_tencent_transcript_provider,
+    tencent_asr_runtime_identity,
+)
 from backlot.local_material_orchestration import (
     LocalMaterialOrchestrationError,
     build_orchestration_draft,
@@ -128,7 +165,6 @@ from backlot.narration_preferences import (
 )
 from backlot.output_loudness_preferences import (
     DEFAULT_OUTPUT_TARGET_LUFS,
-    LEGACY_OUTPUT_TARGET_LUFS,
     OUTPUT_TRUE_PEAK_LIMIT_DBTP,
     clamp_output_target_lufs,
     read_output_loudness_preferences,
@@ -314,7 +350,18 @@ PRESENTER_LAYOUT_DEFAULTS = (
     # Approved on the 2026-08-23 daily-tech project: this framing keeps the
     # shared 4:5 avatar's full head and upper torso visible in the circle.
     {"id": "pip_top_left", "name": "左上角解说员", "geometry": {"x": 0.04, "y": 0.03, "width": 0.29}, "shape": "circle", "face_crop": {"x": .48, "y": .38, "zoom": 1.15}},
-    {"id": "pip_top_right", "name": "右上圆形解说员", "geometry": {"x": 0.675, "y": 0.04, "width": 0.29}, "shape": "circle", "face_crop": {"x": .48, "y": .38, "zoom": 1.15}},
+    # 2026-09-14: the historic right-top framing (x .675 + width .29 ⇒ right
+    # edge .965) sat inside the platform interaction column (点赞/评论/收藏
+    # 列压在 x > .87 on 抖音/快手), so the presenter got clipped on publish.
+    # First pass moved it to a compact mid-right box (.52/.16/.24) — safe but
+    # reviewers read it as "too small / too low" against the source material.
+    # Second pass uses the reviewer's marked-up screenshot as the measurement:
+    # the hand-drawn ring sits at preview centre (467.5, 210.5) with diameter
+    # ~162 px inside a 511x910 preview area (ratio .5615 ≈ 9:16), giving
+    # width .317 / x .557 / y .076 → rounded to .31 / .555 / .075.
+    # Right edge .865 stays just inside the .87 interaction column, and the
+    # circle reads roughly 29% larger while sitting near the top of the canvas.
+    {"id": "pip_top_right", "name": "中上偏右解说员", "geometry": {"x": 0.555, "y": 0.075, "width": 0.31}, "shape": "circle", "face_crop": {"x": .48, "y": .38, "zoom": 1.15}},
     {"id": "pip_lower_left", "name": "左下留字幕", "geometry": {"x": 0.035, "y": 0.43, "width": 0.24}, "shape": "rounded", "face_crop": {"x": .5, "y": 0, "zoom": 1}},
 )
 STORY_HEADLINE_LAYOUT_DEFAULT = {"x": .04, "y": .055, "width": .56, "height": .125}
@@ -740,7 +787,9 @@ def _subtitle_cue_id(index: int) -> str:
 def _subtitle_cue_text(scene: dict, index: int, fallback: Any) -> str:
     overrides = _scene_subtitles(scene).get("cue_overrides") or {}
     text = str(overrides.get(_subtitle_cue_id(index), fallback) or "").strip()
-    return text[:240]
+    # Applies to hand-edited captions too: the frame cut already terminates a
+    # caption line, so a comma or period at its end only reads as a typo.
+    return _strip_subtitle_trailing_punctuation(text)[:240]
 
 
 def _normalised_timed_subtitle_cues(raw_cues: Any, duration_seconds: float) -> list[dict]:
@@ -1049,11 +1098,79 @@ def _default_visual_plan_prompt(state: dict, scene: dict) -> str:
     )[:6000]
 
 
+def _current_style_playbook_name(state: dict) -> str:
+    """Read the active style playbook name from project metadata.
+
+    Falls back to ``clean-professional`` so legacy projects keep behaving
+    the same; new dark-tech-news projects opt in to the Remotion default.
+    """
+    project = state.get("project") if isinstance(state.get("project"), dict) else {}
+    return str(
+        project.get("style_playbook")
+        or state.get("style_playbook")
+        or project.get("render_profile", {}).get("style_playbook")
+        or "clean-professional"
+    ).strip() or "clean-professional"
+
+
+def _default_visual_engine_for_style(state: dict) -> str:
+    """Map a style playbook to the engine that produces its scenes best.
+
+    dark-tech-news targets four-anchor full-bleed shots with overlay-only
+    text; Remotion's data-driven templates handle that cleanly.  Other
+    styles keep the historical openai_image default so existing tests and
+    preflight behaviour stay stable.
+    """
+    name = _current_style_playbook_name(state)
+    if name == "dark-tech-news":
+        return "remotion"
+    return "openai_image"
+
+
+# 开场钩子的疑问句标记；只有首段本身在提问时才加中央动态组件。
+_HOOK_QUESTION_MARKERS = ("?", "？", "为什么", "怎么", "吗", "难道", "是不是")
+
+
+def _is_hook_scene(project_dir: Path, state: dict, scene: dict) -> bool:
+    """Detect the opening hook shot that deserves a centred motion motif.
+
+    Only the first shot qualifies, and only when its narration actually asks
+    a question — otherwise the motif would just be decorative noise that
+    competes with the footage.
+    """
+    try:
+        order = int(scene.get("order") or 0)
+    except (TypeError, ValueError):
+        order = 0
+    if order != 1:
+        return False
+    try:
+        text = _scene_text(project_dir, state, scene)
+    except Exception:  # noqa: BLE001 - motif is cosmetic, never block a render
+        return False
+    return any(marker in text for marker in _HOOK_QUESTION_MARKERS)
+
+
 def _ensure_scene_visual_state(state: dict, scene: dict) -> None:
     """Add the controllable visual plan and timeline without changing a decision."""
     plan = scene.get("visual_plan") if isinstance(scene.get("visual_plan"), dict) else {}
     plan.setdefault("version", 1)
-    plan.setdefault("engine", "openai_image")
+    # Default engine is chosen by the project's style playbook so the
+    # dark-tech-news style falls onto Remotion automatically while legacy
+    # styles keep their historical openai_image default.  A user who has
+    # already chosen a non-default engine keeps it.
+    if "engine" not in plan:
+        plan["engine"] = _default_visual_engine_for_style(state)
+    # dark-tech-news assumes full-bleed real footage is available and the
+    # Remotion template composes the on-screen text; the actual asset still
+    # comes from Pexels (source_strategy=web_download downstream), but the
+    # Remotion render path requires "ai_generated" to fire.  Auto-set the
+    # default so users do not need a manual click for the most common case.
+    if (
+        str(scene.get("source_strategy") or "undecided") == "undecided"
+        and _default_visual_engine_for_style(state) == "remotion"
+    ):
+        scene["source_strategy"] = "ai_generated"
     plan.setdefault("prompt", "")
     if not str(plan.get("prompt") or "").strip():
         plan["prompt"] = _default_visual_plan_prompt(state, scene)
@@ -1517,18 +1634,21 @@ def _output_loudness_policy_default() -> dict:
 
 
 def _ensure_output_loudness_policy(state: dict) -> dict:
-    """Read legacy projects at -14 LUFS without silently adopting a new default."""
+    """Backfill the final-loudness contract for a project that never captured one.
+
+    A project without an explicit policy has no recorded target, so it adopts the
+    *current* workstation default -- the same contract ``_ensure_music_policy``
+    already follows.  Hard-coding the legacy -14 here used to override that
+    default for every project whose bootstrap path skipped the field, which is
+    how one workstation ended up producing both -10 and -14 projects.
+    Projects that already carry a policy keep their recorded value untouched.
+    """
     if not isinstance(state.get("output_loudness_policy"), dict):
-        state["output_loudness_policy"] = {
-            "version": 1,
-            "target_lufs": LEGACY_OUTPUT_TARGET_LUFS,
-            "true_peak_limit_dbtp": OUTPUT_TRUE_PEAK_LIMIT_DBTP,
-            "updated_at": None,
-        }
+        state["output_loudness_policy"] = _output_loudness_policy_default()
     policy = state["output_loudness_policy"]
     policy["version"] = max(1, int(_as_number(policy.get("version")) or 1))
     policy["target_lufs"] = clamp_output_target_lufs(
-        policy.get("target_lufs"), fallback=LEGACY_OUTPUT_TARGET_LUFS
+        policy.get("target_lufs"), fallback=DEFAULT_OUTPUT_TARGET_LUFS
     )
     policy["true_peak_limit_dbtp"] = OUTPUT_TRUE_PEAK_LIMIT_DBTP
     policy.setdefault("updated_at", None)
@@ -3065,12 +3185,17 @@ def _require_approved_music_sample(
         and set(frozen_roles) == {"yaya", "mengmeng"}
         and all(str((frozen_roles.get(role) or {}).get("profile_id") or "").strip() for role in ("yaya", "mengmeng"))
     )
+    # Treat any local-provider voice (not just the legacy "雅雅" name) as
+    # the well-known built-in default; cloud providers (Tencent / Doubao)
+    # always require an approved sample because they are paid per character.
+    voice_provider = str((frozen_voice or {}).get("provider_id") or LOCAL_PROVIDER_ID)
+    is_builtin_local_voice = voice_provider == LOCAL_PROVIDER_ID
     if (
         trusted_default
         and not policy.get("enabled")
         and not narration_policy.get("updated_at")
         and (
-            str(frozen_voice.get("profile_name") or frozen_voice.get("label") or "").strip() == "雅雅"
+            is_builtin_local_voice
             or trusted_avatar_roles
         )
     ):
@@ -4363,6 +4488,12 @@ def generate_scene_plan_from_script(project_dir: Path) -> dict:
     state["segments"] = _segments_for_scenes(scenes, frame_rate, sample_rate)
     state["project"]["duration_seconds"] = max(_as_number(scene["end_seconds"]) for scene in scenes)
     _ensure_timeline_state(state)
+    # 每个 scene 立刻初始化 visual_plan，让 style_playbook=dark-tech-news
+    # 的项目自动把默认 engine 选为 remotion；其它风格保持 openai_image
+    # 历史默认。后续的素材拉取、关键帧、动态画面接口都会读到一致的
+    # engine，不再因为 scene_plan 早于 style 切换而留下 openai_image 残留。
+    for scene in scenes:
+        _ensure_scene_visual_state(state, scene)
 
     scene_plan = {
         "version": "1.0",
@@ -7584,25 +7715,88 @@ def generate_scene_motion_visual(project_dir: Path, scene_id: str) -> dict:
     support = " · ".join(components[:4]) or "数据关系 · 产品轮廓 · 信息节点"
     temporary = project_dir / "renders" / "motion-candidates" / f"{scene_id}-{engine}-{uuid4().hex[:8]}.mp4"
     temporary.parent.mkdir(parents=True, exist_ok=True)
-    edit_decisions = {
-        "version": "1.0", "renderer_family": "explainer-data", "render_runtime": engine, "composition_mode": "templated",
-        "metadata": {
-            "title": headline, "proposal_render_runtime": engine,
-            "compose_target": {"width": width, "height": height, "fit": "cover"},
-            "target_duration_seconds": duration,
-            "visual_brief": plan.get("prompt"), "motion": spec.get("motion"), "palette": spec.get("palette"),
-        },
-        "cuts": [
-            {"id": f"{scene_id}-hero", "type": "text_card", "text": headline, "in_seconds": 0, "out_seconds": max(.5, duration * .55)},
-            {"id": f"{scene_id}-support", "type": "callout", "text": support, "in_seconds": max(.5, duration * .55), "out_seconds": duration},
-        ],
-    }
+
+    # 依据项目风格决定 Remotion 的 cut 模板：dark-tech-news 走四固定位
+    # news_anchor（全屏素材 + 左上 chip + 右上数字人 pip + 底部字幕），
+    # 其余风格保留历史 text_card + callout 排版，避免破坏既有测试与预览。
+    is_dark_news = _current_style_playbook_name(state) == "dark-tech-news"
+
+    if engine == "remotion" and is_dark_news:
+        # 拿到场景主体素材作为全屏背景（Pexels 图或视频）。
+        visual = _selected_visual_asset(state, scene_id) or {}
+        bg_path = str(visual.get("path") or "")
+        bg_is_video = str(visual.get("type") or "").lower() == "video" and bg_path
+        bg_is_image = str(visual.get("type") or "").lower() == "image" and bg_path
+        subtitle = str(spec.get("center_label") or "").strip() or _scene_text(project_dir, state, scene)
+        # 副标签只接受显式的短标签，退化为项目类别。
+        # 绝不能回退到 shot_intent：那是内部画面简报（可能长达两三句），
+        # 一旦当 kicker 渲染就会被烧进成片画面。
+        kicker = str(spec.get("kicker") or "").strip()
+        if not kicker:
+            category = (state.get("project") or {}).get("category") or ""
+            kicker = str(category).strip()
+        # 右上角数字人口播占位标签：来自场景 presenter 昵称。
+        presenter = _scene_presenter(scene)
+        avatar_label = str(presenter.get("nickname") or presenter.get("name") or "数字人主播").strip()
+        cut = {
+            "id": f"{scene_id}-news-anchor", "type": "news_anchor", "text": headline,
+            "in_seconds": 0, "out_seconds": duration,
+            "subtitle": subtitle, "kicker": kicker,
+            "avatarLabel": avatar_label,
+        }
+        if bg_is_video:
+            cut["backgroundVideo"] = bg_path
+        elif bg_is_image:
+            cut["backgroundImage"] = bg_path
+        # 钩子镜头（首段疑问句引子）：在画面中央叠一组动态问号，
+        # 让开场不依赖静态素材，同时保持四固定位与全片一致。
+        if _is_hook_scene(project_dir, state, scene):
+            cut["centerMotif"] = "question_marks"
+            # 钩子镜头加深暗层，让中央问号在实拍素材上有足够对比。
+            cut["backgroundOverlay"] = 0.46
+        edit_decisions = {
+            "version": "1.0", "renderer_family": "news-anchor", "render_runtime": engine,
+            "composition_mode": "templated",
+            "metadata": {
+                "title": headline, "proposal_render_runtime": engine,
+                "compose_target": {"width": width, "height": height, "fit": "cover"},
+                "target_duration_seconds": duration,
+                "visual_brief": plan.get("prompt"), "motion": spec.get("motion"),
+                "palette": spec.get("palette"),
+            },
+            "cuts": [cut],
+        }
+    else:
+        edit_decisions = {
+            "version": "1.0", "renderer_family": "explainer-data", "render_runtime": engine, "composition_mode": "templated",
+            "metadata": {
+                "title": headline, "proposal_render_runtime": engine,
+                "compose_target": {"width": width, "height": height, "fit": "cover"},
+                "target_duration_seconds": duration,
+                "visual_brief": plan.get("prompt"), "motion": spec.get("motion"), "palette": spec.get("palette"),
+            },
+            "cuts": [
+                {"id": f"{scene_id}-hero", "type": "text_card", "text": headline, "in_seconds": 0, "out_seconds": max(.5, duration * .55)},
+                {"id": f"{scene_id}-support", "type": "callout", "text": support, "in_seconds": max(.5, duration * .55), "out_seconds": duration},
+            ],
+        }
     if engine == "remotion":
-        result = VideoCompose().execute({
+        remotion_inputs = {
             "operation": "render", "edit_decisions": edit_decisions,
             "asset_manifest": {"version": "1.0", "assets": []}, "output_path": str(temporary),
             "options": {"subtitle_burn": False},
-        })
+            # The workbench stores media at projects/<id>/assets/...; without
+            # this hint the Remotion stager (which runs from the composer cwd)
+            # cannot resolve relative paths to the actual file on disk.
+            "project_root": str(project_dir),
+        }
+        # dark-tech-news：让 Remotion 直接从项目渲染尺寸出竖屏，并从
+        # playbook 颜色派生主题；其余风格沿用历史默认（1920x1080 + 默认主题）。
+        if is_dark_news:
+            remotion_inputs["width"] = width
+            remotion_inputs["height"] = height
+            edit_decisions.setdefault("metadata", {})["playbook"] = "dark-tech-news"
+        result = VideoCompose().execute(remotion_inputs)
     elif engine == "hyperframes":
         style_pack = plan.get("style_pack") if isinstance(plan.get("style_pack"), dict) else {}
         style_pack_id = str(style_pack.get("id") or STYLE_PACK_ID)
@@ -11284,7 +11478,41 @@ def _srt_time(seconds: float) -> str:
     return f"{hours:02d}:{minutes:02d}:{whole_seconds:02d},{ms:03d}"
 
 
-def _split_subtitle_phrases(text: str, max_chars: int = 18) -> list[str]:
+# --- Subtitle phrase splitting ----------------------------------------------
+# The repo ships no CJK segmenter, so a phrase boundary is decided by
+# punctuation plus a guarded hard limit.  Two defects were visible in a
+# delivered film:
+#   1. a comma sitting one character past the limit lost to the hard cut, so a
+#      word was sliced in half and its last character opened the next frame
+#      ("更狠的是…全部开" / "源，个人开发者也能改。");
+#   2. a one-to-three character tail was stranded on its own frame
+#      ("器人。", "上。").
+# ``SUBTITLE_MAX_CHARS`` is therefore a width-driven *soft* limit: punctuation
+# may claim ``SUBTITLE_BREAK_LOOKAHEAD`` extra characters rather than split a
+# word to hit the count, and a stranded short tail is merged back.
+# Worst case width = max_chars + lookahead + 1 = 21 CJK glyphs
+# ≈ 21 × 0.727em × 64px ≈ 977px, inside the 1080px portrait frame.
+SUBTITLE_MAX_CHARS = 18
+SUBTITLE_BREAK_LOOKAHEAD = 2
+SUBTITLE_MIN_TAIL_CHARS = 4
+
+# A burned-in caption is already terminated by the frame cut, so a comma or
+# period left dangling at the end of a line reads as a typo ("…卖了260万美元，").
+# Interior punctuation is kept: a comma marking a semantic pause *inside* one
+# frame is what makes a long caption readable.  Interrogative and exclamatory
+# marks stay even in final position, and so does an ellipsis, because those
+# carry intonation that the cut itself cannot express.
+SUBTITLE_TRAILING_PUNCTUATION = "，,、。.；;：:"
+
+
+def _strip_subtitle_trailing_punctuation(text: str) -> str:
+    """Drop sentence-final punctuation from one caption line only."""
+    stripped = str(text or "").strip()
+    trimmed = stripped.rstrip(SUBTITLE_TRAILING_PUNCTUATION).rstrip()
+    return trimmed or stripped
+
+
+def _split_subtitle_phrases(text: str, max_chars: int = SUBTITLE_MAX_CHARS) -> list[str]:
     """Split narration into short, natural Chinese subtitle phrases.
 
     A scene is a production unit, not a subtitle unit.  The previous
@@ -11292,6 +11520,10 @@ def _split_subtitle_phrases(text: str, max_chars: int = 18) -> list[str]:
     caused a long multi-line block to cover most of a portrait frame.  Keep
     sentence punctuation with the preceding phrase, then use commas (and
     finally a hard character limit) only when a sentence is still too long.
+
+    Punctuation is kept while the split is being decided, then dropped from
+    the *end* of each finished phrase (see
+    ``_strip_subtitle_trailing_punctuation``).
     """
     normalized = re.sub(r"\s+", " ", str(text or "")).strip()
     normalized = re.sub(
@@ -11305,11 +11537,14 @@ def _split_subtitle_phrases(text: str, max_chars: int = 18) -> list[str]:
     sentence_parts = re.findall(r".+?[。！？!?；;]+|.+$", normalized)
     phrases: list[str] = []
     break_chars = set("，、,：:")
+    wide_limit = max_chars + SUBTITLE_BREAK_LOOKAHEAD + 1
 
     for sentence in sentence_parts:
         remainder = sentence
-        while len(remainder) > max_chars:
-            window = remainder[: max_chars + 1]
+        # A sentence up to ``wide_limit`` characters stays on one frame: cutting
+        # it would only produce a stranded tail, and it still fits the frame.
+        while len(remainder) > wide_limit:
+            window = remainder[:wide_limit]
             comma_breaks = [index + 1 for index, char in enumerate(window) if char in break_chars]
             cut = max(comma_breaks) if comma_breaks else max_chars
             if not comma_breaks:
@@ -11329,7 +11564,14 @@ def _split_subtitle_phrases(text: str, max_chars: int = 18) -> list[str]:
         if remainder:
             phrases.append(remainder)
 
-    return phrases
+    # Never end on a fragment that reads as the previous phrase's leftover.
+    if len(phrases) >= 2 and len(phrases[-1]) < SUBTITLE_MIN_TAIL_CHARS:
+        merged = phrases[-2] + phrases[-1]
+        if len(merged) <= wide_limit:
+            phrases[-2:] = [merged]
+
+    # Sentence-final punctuation belongs to the sentence, not to the frame.
+    return [_strip_subtitle_trailing_punctuation(phrase) for phrase in phrases]
 
 
 def _subtitle_cues(
@@ -12140,7 +12382,7 @@ def start_project_video_render(project_dir: Path, payload: dict) -> dict:
     review = _full_preview_summary(state)
     if not review["all_scenes_approved"]:
         raise WorkbenchError(f"正式成片需要先完成人工确认：已通过 {review['approved_count']}/{review['total_scenes']} 段。请先生成全片预览，查看后使用“一键确认全部可发布片段”。")
-    if automation["render"].get("status") == "generating":
+    if automation["render"].get("status") in {"generating", "mixing"}:
         raise WorkbenchError("视频正在合成，请不要重复点击")
     _assert_ffmpeg_render_available(state, subject="正式成片合成运行时")
     automation["status"] = "rendering_video"
@@ -13091,6 +13333,57 @@ def _generate_project_video_render(project_dir: Path, *, preview: bool) -> dict:
             )
             return _save(project_dir, latest)
     _atomic_write(project_dir / report_path, render_report)
+    # ★★★ 终态必须等音频阶段（热插拔基线 → 人声增益 → BGM → 响度归一化）全部跑完再写。
+    # 早期版本在这里就把 automation[job_key]["status"] 写成 completed、项目状态写成
+    # review_ready 并落盘，而真正的混音还在后面。外部轮询（自动化脚本 / 队列 / UI）一看到
+    # completed 就判定成片就绪并回收渲染进程，正在执行的混音随之被杀 —— 成片永久缺少 BGM
+    # 且没有任何错误记录（2026-09-15 事故：gpu、iphoneduoo 正式成片无背景音乐）。
+    automation[job_key] = {
+        "status": "mixing", "runtime": "ffmpeg",
+        "output_path": render_report["output_path"], "report_path": report_path,
+        "version": job.get("version", 1), "parent_job_id": job.get("parent_job_id"),
+        "input_fingerprint": job.get("input_fingerprint"),
+        "finished_at": "", "error": "",
+    }
+    _activity(state, "video_render_finished", "正式成片主体已生成，正在建立无背景音乐的可热插拔片段基线", output_path=render_report["output_path"])
+    _save(project_dir, state)
+    state = build_baseline_cache(project_dir)
+    try:
+        audio_mix_result = (
+            {
+                "narration": {"enabled": False, "audio_mode": audio_mode, "tts_generated": False},
+                "background_music": direct_track_report or {"enabled": True, "audio_mode": audio_mode},
+                "output_path": _safe_relpath(project_dir, str(output)),
+            }
+            if direct_track_audio else _apply_project_audio_mix(project_dir, state, output)
+        )
+        render_report["narration_gain"] = audio_mix_result["narration"]
+        render_report["background_music"] = audio_mix_result["background_music"]
+        render_report["audio_mix_signature"] = _audio_mix_signature(state)
+        render_report["loudness"] = _normalize_video_loudness(
+            project_dir,
+            output,
+            target_lufs=_ensure_output_loudness_policy(state)["target_lufs"],
+        )
+    except Exception as exc:  # noqa: BLE001
+        # 让失败可被轮询看到，而不是永远停在 mixing —— 混音失败时成片是无 BGM 的半成品。
+        message = _safe_automation_error(str(exc) or "音频混音阶段失败")
+        render_report["status"] = "failed"
+        render_report["error"] = message
+        _atomic_write(project_dir / report_path, render_report)
+        automation = _automation(state)
+        automation[job_key] = {
+            "status": "failed", "runtime": "ffmpeg",
+            "output_path": render_report["output_path"], "report_path": report_path,
+            "version": job.get("version", 1), "parent_job_id": job.get("parent_job_id"),
+            "input_fingerprint": job.get("input_fingerprint"),
+            "finished_at": _now(), "error": f"音频混音阶段失败：{message}",
+        }
+        _activity(state, "video_render_failed", f"正式成片音频混音失败：{message}", output_path=render_report["output_path"])
+        _save(project_dir, state)
+        raise WorkbenchError(f"音频混音阶段失败：{message}") from exc
+    _atomic_write(project_dir / report_path, render_report)
+    automation = _automation(state)
     automation[job_key] = {
         "status": "completed", "runtime": "ffmpeg", "output_path": render_report["output_path"],
         "report_path": report_path, "version": job.get("version", 1),
@@ -13098,26 +13391,6 @@ def _generate_project_video_render(project_dir: Path, *, preview: bool) -> dict:
         "finished_at": _now(), "error": "",
     }
     automation["status"] = "review_ready"
-    _activity(state, "video_render_finished", "正式成片主体已生成，正在建立无背景音乐的可热插拔片段基线", output_path=render_report["output_path"])
-    _save(project_dir, state)
-    state = build_baseline_cache(project_dir)
-    audio_mix_result = (
-        {
-            "narration": {"enabled": False, "audio_mode": audio_mode, "tts_generated": False},
-            "background_music": direct_track_report or {"enabled": True, "audio_mode": audio_mode},
-            "output_path": _safe_relpath(project_dir, str(output)),
-        }
-        if direct_track_audio else _apply_project_audio_mix(project_dir, state, output)
-    )
-    render_report["narration_gain"] = audio_mix_result["narration"]
-    render_report["background_music"] = audio_mix_result["background_music"]
-    render_report["audio_mix_signature"] = _audio_mix_signature(state)
-    render_report["loudness"] = _normalize_video_loudness(
-        project_dir,
-        output,
-        target_lufs=_ensure_output_loudness_policy(state)["target_lufs"],
-    )
-    _atomic_write(project_dir / report_path, render_report)
     _activity(state, "video_render_finished", "成片与片段基线已就绪，可以进入逐片段审核或局部热插拔")
     return _save(project_dir, state)
 
@@ -13768,6 +14041,116 @@ def _media_index_source(project_dir: Path, state: dict, asset_id: str) -> tuple[
     return asset, source
 
 
+_TRANSCRIPT_PROVIDER_LABELS = {
+    "doubao": "豆包 ASR",
+    "tencent": "腾讯云 ASR",
+    "local": "本地 Whisper",
+}
+
+
+def transcript_provider_catalog() -> dict[str, dict[str, Any]]:
+    """Report every selectable engine and whether this machine can run it now.
+
+    Read-only and side-effect free: nothing is downloaded and no paid request is
+    made, so the browser can render an accurate selector without guessing.
+    """
+    catalog: dict[str, dict[str, Any]] = {}
+    try:
+        assert_tencent_asr_ready()
+        catalog["tencent"] = {"available": True, "label": _TRANSCRIPT_PROVIDER_LABELS["tencent"],
+                              "detail": "腾讯云一句话/录音文件识别；按识别音频时长计费，音轨需外发。"}
+    except TencentASRError as exc:
+        catalog["tencent"] = {"available": False, "label": _TRANSCRIPT_PROVIDER_LABELS["tencent"],
+                              "detail": str(exc)}
+    try:
+        assert_doubao_asr_media_ready()
+        catalog["doubao"] = {"available": True, "label": _TRANSCRIPT_PROVIDER_LABELS["doubao"],
+                             "detail": "豆包录音文件识别；按识别音频时长计费，音轨需外发。"}
+    except DoubaoASRError as exc:
+        catalog["doubao"] = {"available": False, "label": _TRANSCRIPT_PROVIDER_LABELS["doubao"],
+                             "detail": str(exc)}
+    try:
+        from backlot.avatar_import import list_local_whisper_models
+        local_models = list_local_whisper_models()
+    except Exception:  # noqa: BLE001 - availability probing must never break the UI
+        local_models = []
+    catalog["local"] = {
+        "available": bool(local_models),
+        "label": _TRANSCRIPT_PROVIDER_LABELS["local"],
+        "detail": "离线本地识别，零调用费用；不会自动下载模型。"
+        if local_models else "本机尚无 faster-whisper 模型快照，且系统不会在后台静默下载。",
+    }
+    return {name: catalog[name] for name in TRANSCRIPT_PROVIDERS if name in catalog}
+
+
+def default_transcript_provider() -> str:
+    """Pick the engine used when the caller does not name one.
+
+    Order is deliberate: an explicitly configured cloud engine wins over the
+    offline one, and 腾讯云 is preferred because the workbench ships it as the
+    first-class alternative to 豆包.
+    """
+    catalog = transcript_provider_catalog()
+    for name in ("tencent", "doubao", "local"):
+        if bool((catalog.get(name) or {}).get("available")):
+            return name
+    return "none"
+
+
+def _normalise_transcript_provider(value: Any, *, allow_none: bool = True) -> str:
+    """Resolve one requested engine name, or fail closed on anything unknown."""
+
+    name = str(value or "").strip().lower()
+    if not name:
+        return default_transcript_provider() if allow_none else DEFAULT_TRANSCRIPT_PROVIDER
+    if name not in TRANSCRIPT_PROVIDERS:
+        allowed = "、".join(_TRANSCRIPT_PROVIDER_LABELS[item] for item in TRANSCRIPT_PROVIDERS)
+        raise WorkbenchError(f"语音识别只能选择不识别或 {allowed}")
+    return name
+
+
+def _assert_transcript_provider_ready(provider: str) -> None:
+    """Fail closed when the chosen engine cannot run on this machine."""
+
+    if provider == "tencent":
+        try:
+            assert_tencent_asr_ready()
+        except TencentASRError as exc:
+            raise WorkbenchError(str(exc)) from exc
+    elif provider == "doubao":
+        try:
+            assert_doubao_asr_media_ready()
+        except DoubaoASRError as exc:
+            raise WorkbenchError(str(exc)) from exc
+    elif provider == "local":
+        from backlot.avatar_import import list_local_whisper_models
+        if not list_local_whisper_models():
+            raise WorkbenchError("本机没有已安装的 faster-whisper 模型；系统不会在后台静默下载")
+
+
+def _assert_any_transcript_provider_ready() -> str:
+    """Resolve the default engine, or explain why none of them can run."""
+
+    provider = default_transcript_provider()
+    if provider == "none":
+        catalog = transcript_provider_catalog()
+        reasons = "；".join(
+            f"{item['label']}：{item['detail']}" for item in catalog.values() if not item["available"]
+        )
+        raise WorkbenchError(f"没有可用的语音识别服务。{reasons}")
+    return provider
+
+
+def transcript_provider_identity(provider: str) -> str:
+    """Freeze the exact engine identity so cached transcripts never mix."""
+
+    if provider == "tencent":
+        return tencent_asr_runtime_identity()
+    if provider == "doubao":
+        return doubao_asr_runtime_identity()
+    return provider
+
+
 def _media_transcript_provider(
     provider_name: str = "local",
     *,
@@ -13779,23 +14162,30 @@ def _media_transcript_provider(
     resume_request_id: str | None = None,
     on_doubao_accepted: Callable[[str], None] | None = None,
     on_doubao_submitting: Callable[[str], None] | None = None,
+    asr_concurrency: int | None = None,
 ):
     """Create a selected, explicit transcript provider for one media job."""
     provider_name = str(provider_name or "none").strip().lower()
-    if provider_name == "doubao":
+    if provider_name in {"doubao", "tencent"}:
         if not project_id or project_dir is None or not asset_id or not ffmpeg:
-            raise WorkbenchError("豆包 ASR 缺少项目音频上下文，无法安全启动")
+            raise WorkbenchError(f"{_TRANSCRIPT_PROVIDER_LABELS[provider_name]} 缺少项目音频上下文，无法安全启动")
+        factory = create_project_transcript_provider if provider_name == "doubao" else create_tencent_transcript_provider
+        error_type = DoubaoASRError if provider_name == "doubao" else TencentASRError
+        options = dict(
+            project_id=project_id,
+            project_dir=project_dir,
+            asset_id=asset_id,
+            ffmpeg=ffmpeg,
+            resume_request_id=resume_request_id,
+            on_accepted=on_doubao_accepted,
+            on_submitting=on_doubao_submitting,
+        )
+        if provider_name == "tencent":
+            # 分片并发只在腾讯云长音轨链路上实现（F07）；豆包链路保持原样。
+            options["asr_concurrency"] = asr_concurrency
         try:
-            return create_project_transcript_provider(
-                project_id=project_id,
-                project_dir=project_dir,
-                asset_id=asset_id,
-                ffmpeg=ffmpeg,
-                resume_request_id=resume_request_id,
-                on_accepted=on_doubao_accepted,
-                on_submitting=on_doubao_submitting,
-            )
-        except DoubaoASRError as exc:
+            return factory(**options)
+        except error_type as exc:
             raise WorkbenchError(str(exc)) from exc
     if provider_name != "local":
         return None
@@ -13819,19 +14209,65 @@ def _media_transcript_provider(
     return transcribe
 
 
+def _concurrency_option(value: Any, label: str) -> int | None:
+    """校验一个可选的并发上限（1–4）。``None`` 表示走默认值。"""
+    from backlot.interaction_concurrency import MAX_CONCURRENCY
+
+    if value is None or value == "":
+        return None
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise WorkbenchError(f"{label}并发上限必须是 1 到 {MAX_CONCURRENCY} 之间的整数，请调整后重试") from exc
+    if not 1 <= number <= MAX_CONCURRENCY:
+        raise WorkbenchError(f"{label}并发上限必须在 1 到 {MAX_CONCURRENCY} 之间，请调整后重试")
+    return number
+
+
 def preflight_asset_material_interactions(
     project_dir: Path,
     asset_id: str,
     profile: str = "efficient",
     recognize_audio: bool = True,
+    transcript_provider: str | None = None,
+    window_context_policy: str = "serial_equivalent",
+    interaction_concurrency: int | None = None,
+    asr_concurrency: int | None = None,
 ) -> dict:
     """Read-only exact budget for the single browser confirmation; no AI calls."""
-    from backlot.material_interactions import runtime_identity, window_plan, digest
+    from backlot.material_interactions import (
+        MAX_DURATION as INTERACTION_MAX_DURATION,
+        InteractionError,
+        WINDOW_CONTEXT_POLICIES,
+        digest,
+        runtime_identity,
+        window_plan,
+    )
+    from backlot.interaction_concurrency import (
+        KIND_ASR,
+        KIND_INTERACTION,
+        MAX_CONCURRENCY,
+        resolve_limit,
+        serial_kill_switch_active,
+    )
     from backlot.media_index import probe_media, media_content_fingerprint
     if profile not in {"efficient", "detailed"}:
         raise WorkbenchError("互动分析深度只能是高效率或精细核验")
     if not isinstance(recognize_audio, bool):
         raise WorkbenchError("识别音频必须明确为开启或关闭")
+    if window_context_policy not in WINDOW_CONTEXT_POLICIES:
+        raise WorkbenchError("窗口上下文策略无效，请选择「串行等价」或「并发」后重试")
+    try:
+        parallelism = {
+            "vision_windows": resolve_limit(KIND_INTERACTION, interaction_concurrency),
+            "asr_chunks": resolve_limit(KIND_ASR, asr_concurrency),
+            "max": MAX_CONCURRENCY,
+            "force_serial": serial_kill_switch_active(),
+            "window_context_policy": window_context_policy,
+            "notice": "并发只重叠本机等待时间；已完成的窗口不会重算，也不会作废在途的付费分析。",
+        }
+    except ValueError as exc:
+        raise WorkbenchError(str(exc)) from exc
     _, source = _media_index_source(project_dir, read_workbench(project_dir), asset_id)
     ffmpeg = _ffmpeg_available()
     ffprobe = _ffprobe_available(ffmpeg) if ffmpeg else None
@@ -13844,23 +14280,39 @@ def preflight_asset_material_interactions(
         has_audio = any(x.get("codec_type") == "audio" for x in probe.get("streams", []))
         effective_recognize_audio = recognize_audio and has_audio
         if effective_recognize_audio:
-            assert_doubao_asr_media_ready()
-            audio_identity = doubao_asr_runtime_identity()
+            selected_provider = _normalise_transcript_provider(transcript_provider)
+            if selected_provider == "none":
+                selected_provider = _assert_any_transcript_provider_ready()
+            _assert_transcript_provider_ready(selected_provider)
+            audio_identity = transcript_provider_identity(selected_provider)
         else:
+            selected_provider = "none"
             audio_identity = "no_audio" if recognize_audio else "disabled"
+    except WorkbenchError:
+        raise
+    except InteractionError as exc:
+        raise WorkbenchError(f"互动分析预检失败：{exc}") from exc
     except (ValueError, RuntimeError) as exc:
-        raise WorkbenchError("互动分析预检失败：请检查视觉模型和豆包配置；素材须为0.4秒至60分钟") from exc
+        hours = INTERACTION_MAX_DURATION / 3600
+        limit = f"{hours:g} 小时" if hours >= 1 else f"{INTERACTION_MAX_DURATION / 60:g} 分钟"
+        raise WorkbenchError(
+            f"互动分析预检失败：请检查视觉模型和语音识别配置；素材须为 0.4 秒至 {limit}"
+        ) from exc
     result = {"identity": identity, "asr_identity": audio_identity, "source": media_content_fingerprint(source),
               "recognize_audio": recognize_audio, "effective_recognize_audio": effective_recognize_audio,
-              "has_audio": has_audio,
+              "has_audio": has_audio, "transcript_provider": selected_provider,
               "profile": profile, "budget": {"model_calls_max": len(plan) + 1, "detail_frames_max": 12 if profile == "detailed" else 6,
               "audio_seconds_max": probe["duration_seconds"] if effective_recognize_audio else 0,
               "windows": len(plan)}, "duration": probe["duration_seconds"]}
-    return {**result, "signature": digest(result)}
+    # parallelism / export 只作为界面可读的运行时能力展示，不进签名（签名仍只覆盖预算与身份）。
+    return {**result, "signature": digest(result), "parallelism": parallelism,
+            "export": {"formats": ["json", "fcp7_xml", "otio"], "media_reference_policy": "review_proxy",
+                       "notice": "导出只读取已冻结的剪辑计划，不发起任何付费调用。"}}
 
 
 def _interaction_index_matches_options(
-    project_dir: Path, asset: dict[str, Any], *, profile: str, recognize_audio: bool
+    project_dir: Path, asset: dict[str, Any], *, profile: str, recognize_audio: bool,
+    transcript_provider: str | None = None,
 ) -> bool:
     media_state = asset.get("media_index") if isinstance(asset.get("media_index"), dict) else {}
     relative = str(media_state.get("interaction_index_path") or "")
@@ -13872,7 +14324,10 @@ def _interaction_index_matches_options(
         index = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, json.JSONDecodeError):
         return False
-    expected_policy = "doubao_transcript" if recognize_audio else "disabled"
+    try:
+        expected_policy = audio_policy(recognize_audio, transcript_provider)
+    except ValueError:
+        return False
     return (
         index.get("status") == "completed"
         and str(index.get("profile") or "") == profile
@@ -13881,7 +14336,8 @@ def _interaction_index_matches_options(
 
 
 def _preflight_optional_overview_audio(
-    project_dir: Path, state: dict[str, Any], asset_id: str, recognize_audio: bool
+    project_dir: Path, state: dict[str, Any], asset_id: str, recognize_audio: bool,
+    transcript_provider: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(recognize_audio, bool):
         raise WorkbenchError("识别音频必须明确为开启或关闭")
@@ -13889,6 +14345,7 @@ def _preflight_optional_overview_audio(
         return {
             "recognize_audio": False, "effective_recognize_audio": False,
             "has_audio": None, "asr_identity": "disabled", "audio_seconds_max": 0,
+            "transcript_provider": "none",
         }
     _, source = _media_index_source(project_dir, state, asset_id)
     ffmpeg = _ffmpeg_available()
@@ -13902,15 +14359,16 @@ def _preflight_optional_overview_audio(
         raise WorkbenchError("无法读取本地素材的音轨信息") from exc
     has_audio = any(row.get("codec_type") == "audio" for row in probe.get("streams", []))
     effective = recognize_audio and has_audio
+    selected_provider = "none"
     if effective:
-        try:
-            assert_doubao_asr_media_ready()
-        except DoubaoASRError as exc:
-            raise WorkbenchError(str(exc)) from exc
+        selected_provider = _normalise_transcript_provider(transcript_provider)
+        if selected_provider == "none":
+            selected_provider = _assert_any_transcript_provider_ready()
+        _assert_transcript_provider_ready(selected_provider)
     return {
         "recognize_audio": recognize_audio, "effective_recognize_audio": effective,
-        "has_audio": has_audio,
-        "asr_identity": doubao_asr_runtime_identity() if effective else "no_audio" if recognize_audio else "disabled",
+        "has_audio": has_audio, "transcript_provider": selected_provider,
+        "asr_identity": transcript_provider_identity(selected_provider) if effective else "no_audio" if recognize_audio else "disabled",
         "audio_seconds_max": float(probe.get("duration_seconds") or 0) if effective else 0,
     }
 
@@ -13920,6 +14378,7 @@ def preflight_asset_material_interactions_batch(
     asset_ids: list[str] | None = None,
     profile: str = "efficient",
     recognize_audio: bool = True,
+    transcript_provider: str | None = None,
 ) -> dict:
     """Read-only aggregate preflight for one durable outdoor batch."""
     from backlot.material_interactions import digest
@@ -13935,10 +14394,13 @@ def preflight_asset_material_interactions_batch(
         if media_state.get("status") == "ambiguous" and media_state.get("stage") == "interaction":
             raise WorkbenchError(f"{asset_id} 有受理状态不明的互动请求，请先核实供应商记录并使用安全续跑")
         if _interaction_index_matches_options(
-            project_dir, asset, profile=profile, recognize_audio=recognize_audio
+            project_dir, asset, profile=profile, recognize_audio=recognize_audio,
+            transcript_provider=transcript_provider,
         ):
             continue
-        plan = preflight_asset_material_interactions(project_dir, asset_id, profile, recognize_audio)
+        plan = preflight_asset_material_interactions(
+            project_dir, asset_id, profile, recognize_audio, transcript_provider
+        )
         items.append({"asset_id": asset_id, "asset_name": str(asset.get("name") or asset_id), **plan})
     if not items:
         raise WorkbenchError("没有需要进行户外互动分析的本地视频")
@@ -13948,6 +14410,7 @@ def preflight_asset_material_interactions_batch(
         "stage": "interaction",
         "profile": profile,
         "recognize_audio": recognize_audio,
+        "transcript_provider": str(items[0].get("transcript_provider") or "none"),
         "items": items,
         "asset_count": len(items),
         "budget": {
@@ -13957,7 +14420,23 @@ def preflight_asset_material_interactions_batch(
             "windows": sum(int(item["budget"]["windows"]) for item in items),
         },
     }
-    return {**result, "signature": digest(result)}
+    from backlot.interaction_concurrency import (
+        KIND_ASR,
+        KIND_INTERACTION,
+        MAX_CONCURRENCY,
+        resolve_limit,
+        serial_kill_switch_active,
+    )
+    runtime = {
+        "vision_windows": items[0].get("parallelism", {}).get("vision_windows") or resolve_limit(KIND_INTERACTION),
+        "asr_chunks": items[0].get("parallelism", {}).get("asr_chunks") or resolve_limit(KIND_ASR),
+        "max": MAX_CONCURRENCY,
+        "force_serial": serial_kill_switch_active(),
+        "notice": "批内每个素材串行分析；并发只重叠单个素材内的本地等待。",
+    }
+    return {**result, "signature": digest(result),
+            "parallelism": runtime,
+            "export": {"formats": ["json", "fcp7_xml", "otio"], "media_reference_policy": "review_proxy"}}
 
 
 def start_asset_media_index(project_dir: Path, asset_id: str, payload: dict) -> dict:
@@ -13981,7 +14460,7 @@ def start_asset_media_index(project_dir: Path, asset_id: str, payload: dict) -> 
         raise WorkbenchError("已有本地视频素材分析任务正在运行，请等待完成")
     stage = str(payload.get("stage") or "coarse")
     if stage not in {"coarse", "fine", "vision", "overview", "interaction"}:
-        raise WorkbenchError("素材分析阶段只能是粗筛、精筛、画面理解或快速概览")
+        raise WorkbenchError("素材分析阶段只能是粗筛、精筛、画面理解、快速概览或户外互动分析")
     if (
         stage == "interaction"
         and current.get("status") == "ambiguous"
@@ -14022,13 +14501,18 @@ def start_asset_media_index(project_dir: Path, asset_id: str, payload: dict) -> 
             raise WorkbenchError("户外互动分析需要一次确认联系表、原帧和音轨外发及可能的模型费用")
         if payload.get("remote_vision_confirmed") is not True:
             raise WorkbenchError("户外互动分析需确认联系表与原帧外发及可能的模型费用")
-        preflight = preflight_asset_material_interactions(project_dir, asset_id, profile, recognize_audio)
+        preflight = preflight_asset_material_interactions(
+            project_dir, asset_id, profile, recognize_audio, payload.get("transcript_provider")
+        )
         effective_recognize_audio = bool(preflight["effective_recognize_audio"])
         if effective_recognize_audio and payload.get("remote_asr_confirmed") is not True:
-            raise WorkbenchError("识别音频会提取并发送项目音轨到豆包，请在同一次启动确认中明确授权")
-        expected_provider = "doubao" if effective_recognize_audio else "none"
+            raise WorkbenchError("识别音频会提取并发送项目音轨到云端语音服务，请在同一次启动确认中明确授权")
+        expected_provider = str(preflight.get("transcript_provider") or "none") if effective_recognize_audio else "none"
         supplied_provider = str(payload.get("transcript_provider") or expected_provider)
-        compatible_legacy_no_audio = legacy_audio_contract and recognize_audio and not preflight["has_audio"] and supplied_provider == "doubao"
+        compatible_legacy_no_audio = (
+            legacy_audio_contract and recognize_audio and not preflight["has_audio"]
+            and supplied_provider in {"doubao", "tencent"}
+        )
         if supplied_provider != expected_provider and not compatible_legacy_no_audio:
             raise WorkbenchError("户外互动语音服务与本次音频开关不一致")
         if payload.get("preflight_signature") != preflight["signature"]:
@@ -14041,31 +14525,36 @@ def start_asset_media_index(project_dir: Path, asset_id: str, payload: dict) -> 
         raise WorkbenchError("识别音频必须明确为开启或关闭")
     if stage == "overview":
         overview_audio_preflight = _preflight_optional_overview_audio(
-            project_dir, state, asset_id, bool(payload.get("recognize_audio", False))
+            project_dir, state, asset_id, bool(payload.get("recognize_audio", False)),
+            payload.get("transcript_provider"),
         )
         if overview_audio_preflight["effective_recognize_audio"] and payload.get("remote_asr_confirmed") is not True:
-            raise WorkbenchError("豆包语音识别会提取并发送项目音轨，请在同一次启动确认中授权")
+            raise WorkbenchError("云端语音识别会提取并发送项目音轨，请在同一次启动确认中授权")
     if stage == "overview" and payload.get("remote_vision_confirmed") is not True:
         raise WorkbenchError("高效率内容处理会在本地生成联系表后发送给已配置的 AI 视觉服务，请先确认可能的模型费用")
-    transcript_provider = str(
-        payload.get("transcript_provider")
-        or ("doubao" if stage == "interaction" and effective_recognize_audio
-            else "doubao" if stage == "overview" and payload.get("recognize_audio") is True
-            else "local" if payload.get("transcribe") else "none")
-    ).strip().lower()
+    requested_provider = payload.get("transcript_provider")
+    if requested_provider is None or not str(requested_provider).strip():
+        if stage == "interaction" and effective_recognize_audio:
+            requested_provider = preflight.get("transcript_provider")
+        elif stage == "overview" and bool((overview_audio_preflight or {}).get("effective_recognize_audio")):
+            requested_provider = (overview_audio_preflight or {}).get("transcript_provider")
+        elif payload.get("transcribe"):
+            requested_provider = _assert_any_transcript_provider_ready()
+        else:
+            requested_provider = "none"
+    if str(requested_provider).strip().lower() == "none":
+        transcript_provider = "none"
+    else:
+        transcript_provider = _normalise_transcript_provider(requested_provider)
     if stage == "overview" and not bool((overview_audio_preflight or {}).get("effective_recognize_audio")):
         transcript_provider = "none"
-    if transcript_provider not in {"none", "local", "doubao"}:
-        raise WorkbenchError("语音识别只能选择不识别、本地 Whisper 或豆包 ASR")
     if transcript_provider != "none" and stage not in {"coarse", "fine", "overview", "interaction"}:
         raise WorkbenchError("语音识别仅能在素材分析任务中启动")
-    if transcript_provider == "doubao":
+    if transcript_provider in {"doubao", "tencent"}:
         if payload.get("remote_asr_confirmed") is not True:
-            raise WorkbenchError("豆包语音识别会提取并发送该项目音轨到云端，请先明确确认可能的费用与音频外发")
-        try:
-            assert_doubao_asr_media_ready()
-        except DoubaoASRError as exc:
-            raise WorkbenchError(str(exc)) from exc
+            label = _TRANSCRIPT_PROVIDER_LABELS[transcript_provider]
+            raise WorkbenchError(f"{label} 会提取并发送该项目音轨到云端，请先明确确认可能的费用与音频外发")
+        _assert_transcript_provider_ready(transcript_provider)
     selected_chapter_ids = payload.get("selected_chapter_ids")
     if selected_chapter_ids is not None and not isinstance(selected_chapter_ids, list):
         raise WorkbenchError("选择的概览章节格式无效")
@@ -14073,6 +14562,18 @@ def start_asset_media_index(project_dir: Path, asset_id: str, payload: dict) -> 
     if any(not re.fullmatch(r"CHAPTER-\d{2,}", item) for item in chapters):
         raise WorkbenchError("选择的概览章节编号无效")
     job_id = f"MIJ-{uuid4().hex[:10]}"
+    interaction_runtime: dict[str, Any] = {}
+    if stage == "interaction":
+        from backlot.material_interactions import WINDOW_CONTEXT_POLICIES
+
+        policy = str(payload.get("window_context_policy") or "serial_equivalent")
+        if policy not in WINDOW_CONTEXT_POLICIES:
+            raise WorkbenchError("窗口上下文策略无效，请选择「串行等价」或「并发」后重试")
+        interaction_runtime = {
+            "window_context_policy": policy,
+            "interaction_concurrency": _concurrency_option(payload.get("interaction_concurrency"), "互动窗口"),
+            "asr_concurrency": _concurrency_option(payload.get("asr_concurrency"), "语音识别"),
+        }
     job = {
         "status": "queued", "job_id": job_id, "asset_id": asset_id, "stage": stage,
         "started_at": _now(), "finished_at": None, "result": None, "error": "",
@@ -14098,6 +14599,7 @@ def start_asset_media_index(project_dir: Path, asset_id: str, payload: dict) -> 
             "interaction_asr_identity": interaction_asr_identity if stage == "interaction" else None,
             "interaction_preflight_signature": str(payload.get("preflight_signature") or "") if stage == "interaction" else None,
             "selected_chapter_ids": chapters if stage == "overview" else [],
+            **interaction_runtime,
         },
         "progress": {"stage": "queued", "message": "等待共享媒体分析资源"},
     }
@@ -14214,19 +14716,20 @@ def start_asset_media_index_batch(project_dir: Path, payload: dict) -> dict:
     if stage == "overview":
         for asset_id in candidate_ids:
             overview_audio_preflights[asset_id] = _preflight_optional_overview_audio(
-                project_dir, state, asset_id, bool(payload.get("recognize_audio", False))
+                project_dir, state, asset_id, bool(payload.get("recognize_audio", False)),
+                payload.get("transcript_provider"),
             )
         if any(item["effective_recognize_audio"] for item in overview_audio_preflights.values()):
             if payload.get("remote_asr_confirmed") is not True:
-                raise WorkbenchError("所选素材需要豆包语音识别，请在同一次启动确认中授权音频外发")
+                raise WorkbenchError("所选素材需要云端语音识别，请在同一次启动确认中授权音频外发")
     if stage == "interaction":
         recognize_audio = bool(payload.get("recognize_audio", True))
         interaction_preflight = preflight_asset_material_interactions_batch(
-            project_dir, candidate_ids, profile, recognize_audio
+            project_dir, candidate_ids, profile, recognize_audio, payload.get("transcript_provider")
         )
         if any(item.get("effective_recognize_audio") for item in interaction_preflight["items"]):
             if payload.get("remote_asr_confirmed") is not True:
-                raise WorkbenchError("所选素材需要豆包语音识别，请在同一次启动确认中授权音频外发")
+                raise WorkbenchError("所选素材需要云端语音识别，请在同一次启动确认中授权音频外发")
         if str(payload.get("preflight_signature") or "") != interaction_preflight["signature"]:
             raise WorkbenchError("素材、模型、语音服务或预算在确认期间变化，请重新确认")
 
@@ -14310,7 +14813,8 @@ def generate_asset_media_index_batch(project_dir: Path, expected_job_id: str) ->
                     recognize_audio = bool(frozen_audio.get("recognize_audio"))
                     child_payload.update({
                         "recognize_audio": recognize_audio,
-                        "transcript_provider": "doubao" if frozen_audio.get("effective_recognize_audio") else "none",
+                        "transcript_provider": (str(frozen_audio.get("transcript_provider") or "none")
+                                                if frozen_audio.get("effective_recognize_audio") else "none"),
                         "remote_asr_confirmed": bool(frozen_audio.get("effective_recognize_audio")),
                     })
                 if batch.get("stage") == "interaction":
@@ -14319,7 +14823,8 @@ def generate_asset_media_index_batch(project_dir: Path, expected_job_id: str) ->
                         "remote_asr_confirmed": bool((batch.get("request") or {}).get("remote_asr_confirmed")),
                         "recognize_audio": bool(frozen.get("recognize_audio")),
                         "generate_candidates": bool((batch.get("request") or {}).get("generate_candidates")),
-                        "transcript_provider": "doubao" if frozen.get("effective_recognize_audio") else "none",
+                        "transcript_provider": (str(frozen.get("transcript_provider") or "none")
+                                                if frozen.get("effective_recognize_audio") else "none"),
                         "preflight_signature": frozen.get("signature"),
                     })
                 started = start_asset_media_index(project_dir, asset_id, child_payload)
@@ -14380,41 +14885,114 @@ def _set_media_index_progress(project_dir: Path, expected_job_id: str, stage: st
     _save(project_dir, state)
 
 
-def _persist_doubao_asr_acceptance(project_dir: Path, expected_job_id: str, request_id: str) -> None:
+_INTERACTION_REJECTION_TEXT = {
+    "model_referenced_unsupplied_evidence": "模型引用了未提供的证据，该事件已单独拒绝并保留其他合法结果",
+    "window_failed_local_validation": "该窗口的模型回复未通过本地校验，已整窗跳过并保留其他窗口的合法结果",
+}
+
+
+def _interaction_analysis_warnings(rejected: Any) -> list[dict]:
+    """Turn durable rejection records into human-readable review warnings."""
+    rows = rejected if isinstance(rejected, list) else []
+    warnings = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        text = _INTERACTION_REJECTION_TEXT.get(
+            str(row.get("reason") or ""),
+            "模型引用了未提供的证据，该事件已单独拒绝并保留其他合法结果",
+        )
+        detail = str(row.get("detail") or "").strip()
+        warnings.append({
+            "code": "rejected_model_event",
+            "window_id": str(row.get("window_id") or ""),
+            "event_number": row.get("event_number"),
+            "reason": f"{text}（{detail}）" if detail else text,
+        })
+    return warnings
+
+
+_CLOUD_ASR_LABELS = {
+    "doubao": {
+        "flash": ("doubao-asr-1.0-flash", "正在直传提取后的音轨并等待豆包极速版返回", "豆包语音识别已受理，正在查询分句与时间戳"),
+        "media": ("doubao-asr-2.0", "正在直传提取后的音轨并等待豆包录音文件识别返回", "豆包语音识别已受理，正在查询分句与时间戳"),
+    },
+    "tencent": {
+        "flash": ("tencent-asr", "正在提取并分片上传音轨，等待腾讯云语音识别返回", "腾讯云语音识别已受理，正在查询分句与时间戳"),
+        "media": ("tencent-asr", "正在提取并分片上传音轨，等待腾讯云语音识别返回", "腾讯云语音识别已受理，正在查询分句与时间戳"),
+    },
+}
+
+
+def _cloud_asr_checkpoint_fields(provider_name: str, mode: str) -> tuple[str, str, str]:
+    """Map the selected transcript engine to its record label and progress copy.
+
+    The checkpoint used to be written for every engine while always claiming
+    豆包极速版, which mislabelled 腾讯云 runs in both the job record and the UI.
+    """
+    table = _CLOUD_ASR_LABELS.get(str(provider_name or "").strip().lower())
+    if not table:
+        return f"{provider_name}-asr", "正在上传音轨并等待语音识别返回", "语音识别已受理，正在查询分句与时间戳"
+    return table.get(mode) or table["media"]
+
+
+def _persist_doubao_asr_acceptance(project_dir: Path, expected_job_id: str, request_id: str,
+                                    *, provider_name: str = "doubao") -> None:
     """Checkpoint a confirmed cloud task so a restart only resumes polling."""
     state = _load_for_write(project_dir)
     job = _automation(state)["media_index"]
     if str(job.get("job_id") or "") != str(expected_job_id) or job.get("status") not in {"queued", "generating"}:
         raise WorkbenchError("素材分析任务已经被更新的任务替代")
     request = job.get("request") if isinstance(job.get("request"), dict) else {}
-    request["doubao_asr"] = {
+    label, _submitting, accepted_message = _cloud_asr_checkpoint_fields(provider_name, "media")
+    request["cloud_asr"] = {
         "request_id": str(request_id),
         "status": "accepted",
         "accepted_at": _now(),
-        "provider": "doubao-asr-2.0",
-        "resource_id": "volc.seedasr.auc",
+        "provider": label,
+        "engine": str(provider_name),
     }
+    if str(provider_name).strip().lower() == "doubao":
+        # 保留旧字段：豆包续跑逻辑（resume_asr_id / 受理不明拦截）只认这个键。
+        request["doubao_asr"] = {
+            "request_id": str(request_id),
+            "status": "accepted",
+            "accepted_at": _now(),
+            "provider": "doubao-asr-2.0",
+            "resource_id": "volc.seedasr.auc",
+        }
     job["request"] = request
-    job["progress"] = {"stage": "asr_polling", "message": "豆包语音识别已受理，正在查询分句与时间戳"}
+    job["progress"] = {"stage": "asr_polling", "message": accepted_message}
     _save(project_dir, state)
 
 
-def _persist_doubao_asr_submission(project_dir: Path, expected_job_id: str, request_id: str) -> None:
+def _persist_doubao_asr_submission(project_dir: Path, expected_job_id: str, request_id: str,
+                                   *, provider_name: str = "doubao") -> None:
     """Checkpoint a flash UUID before its single paid HTTP request starts."""
     state = _load_for_write(project_dir)
     job = _automation(state)["media_index"]
     if str(job.get("job_id") or "") != str(expected_job_id) or job.get("status") not in {"queued", "generating"}:
         raise WorkbenchError("素材分析任务已经被更新的任务替代")
     request = job.get("request") if isinstance(job.get("request"), dict) else {}
-    request["doubao_asr"] = {
+    mode = "flash" if str(provider_name).strip().lower() == "doubao" else "media"
+    label, submitting_message, _accepted = _cloud_asr_checkpoint_fields(provider_name, mode)
+    request["cloud_asr"] = {
         "request_id": str(request_id),
         "status": "submitting",
         "submitted_at": _now(),
-        "provider": "doubao-asr-1.0-flash",
-        "resource_id": "volc.bigasr.auc_turbo",
+        "provider": label,
+        "engine": str(provider_name),
     }
+    if str(provider_name).strip().lower() == "doubao":
+        request["doubao_asr"] = {
+            "request_id": str(request_id),
+            "status": "submitting",
+            "submitted_at": _now(),
+            "provider": "doubao-asr-1.0-flash",
+            "resource_id": "volc.bigasr.auc_turbo",
+        }
     job["request"] = request
-    job["progress"] = {"stage": "asr_uploading", "message": "正在直传提取后的音轨并等待豆包极速版返回"}
+    job["progress"] = {"stage": "asr_uploading", "message": submitting_message}
     _save(project_dir, state)
 
 
@@ -14694,6 +15272,7 @@ def generate_asset_media_index(project_dir: Path, expected_job_id: str) -> dict:
     request = job.get("request") if isinstance(job.get("request"), dict) else {}
     transcript_provider_name = str(request.get("transcript_provider") or ("local" if request.get("transcribe") else "none")).lower()
     asr_checkpoint = request.get("doubao_asr") if isinstance(request.get("doubao_asr"), dict) else {}
+    cloud_asr = request.get("cloud_asr") if isinstance(request.get("cloud_asr"), dict) else {}
     if (
         transcript_provider_name == "doubao"
         and job.get("stage") != "interaction"
@@ -14701,6 +15280,17 @@ def generate_asset_media_index(project_dir: Path, expected_job_id: str) -> dict:
         and asr_checkpoint.get("status") == "submitting"
     ):
         raise DoubaoASRAmbiguous("上一次豆包极速版直传在返回前中断，是否计费和完成尚不明确；系统不会自动重提，请人工确认后新建任务")
+    # 腾讯云同样要挡住「提交已发出、受理不明」的重跑：`cloud_asr` 由 on_submitting 写成
+    # submitting、由 on_accepted 改写成 accepted；仍停在 submitting 就说明上一次没拿到确定应答。
+    if (
+        job.get("stage") != "interaction"
+        and cloud_asr.get("status") == "submitting"
+        and (transcript_provider_name == "tencent"
+             or str(cloud_asr.get("engine") or "").strip().lower() == "tencent")
+    ):
+        raise TencentASRAmbiguous(
+            "上一次腾讯云语音识别在返回前中断，可能已受理并计费；系统不会自动重提，"
+            "请先到腾讯云识别记录人工核对，确认未受理后再续跑")
     resume_asr_id = (
         str(asr_checkpoint.get("request_id") or "")
         if asr_checkpoint.get("provider") == "doubao-asr-2.0" and asr_checkpoint.get("status") == "accepted"
@@ -14710,7 +15300,7 @@ def generate_asset_media_index(project_dir: Path, expected_job_id: str) -> dict:
         request.get("interaction_asr_identity")
         if job.get("stage") == "interaction"
         else request.get("overview_asr_identity") if job.get("stage") == "overview"
-        else doubao_asr_runtime_identity() if transcript_provider_name == "doubao" else transcript_provider_name
+        else transcript_provider_identity(transcript_provider_name) if transcript_provider_name != "none" else "none"
     )
     provider = _media_transcript_provider(
         transcript_provider_name,
@@ -14720,8 +15310,11 @@ def generate_asset_media_index(project_dir: Path, expected_job_id: str) -> dict:
         asset_id=asset_id,
         ffmpeg=ffmpeg,
         resume_request_id=resume_asr_id,
-        on_doubao_accepted=lambda request_id: _persist_doubao_asr_acceptance(project_dir, expected_job_id, request_id),
-        on_doubao_submitting=lambda request_id: _persist_doubao_asr_submission(project_dir, expected_job_id, request_id),
+        on_doubao_accepted=lambda request_id: _persist_doubao_asr_acceptance(
+            project_dir, expected_job_id, request_id, provider_name=transcript_provider_name),
+        on_doubao_submitting=lambda request_id: _persist_doubao_asr_submission(
+            project_dir, expected_job_id, request_id, provider_name=transcript_provider_name),
+        asr_concurrency=request.get("asr_concurrency"),
     ) if request.get("transcribe") else None
     output_dir = project_dir / "artifacts" / "media-index" / re.sub(r"[^A-Za-z0-9_-]", "-", asset_id)
     if job.get("stage") == "interaction":
@@ -14741,6 +15334,9 @@ def generate_asset_media_index(project_dir: Path, expected_job_id: str) -> dict:
                 identity=identity, asr_identity=transcript_identity, transcript_provider=provider,
                 recognize_audio=bool(request.get("recognize_audio", True)),
                 profile=request.get("profile") or "efficient",
+                transcript_provider_id=transcript_provider_name,
+                window_context_policy=str(request.get("window_context_policy") or "serial_equivalent"),
+                interaction_concurrency=request.get("interaction_concurrency"),
                 progress=lambda stage, message: _set_media_index_progress(project_dir, expected_job_id, stage, message))
         except InteractionError:
             raise
@@ -14775,6 +15371,17 @@ def generate_asset_media_index(project_dir: Path, expected_job_id: str) -> dict:
         if request.get("generate_candidates") is True:
             _set_media_index_progress(project_dir, expected_job_id, "interaction_candidates", "正在生成最多 3 条待审互动片段")
             candidate_root = output_dir / "interaction-candidates"
+            # Build the reusable evidence document once, before the per-event
+            # loop: every candidate then reads it instead of re-measuring the
+            # same material.  This entry point already needs FFmpeg and numpy.
+            audio = result.get("audio") if isinstance(result.get("audio"), dict) else {}
+            _ensure_material_evidence(
+                project_dir, asset_id, source, ffmpeg=ffmpeg,
+                duration=float(result.get("duration") or 0),
+                transcript={"policy": str(audio.get("policy") or "none"),
+                            "identity": str(audio.get("provider") or audio.get("policy") or "none"),
+                            "utterances": audio.get("utterances") or []},
+            )
             ordered_review_events = sorted(
                 (row for row in review.get("events") or [] if row.get("status") != "discarded"),
                 key=lambda row: (
@@ -14884,12 +15491,14 @@ def generate_asset_media_index(project_dir: Path, expected_job_id: str) -> dict:
                         recognize_audio=True,
                         asr_identity=str(request.get("overview_asr_identity") or ""),
                         transcript_provider=provider,
+                        provider=transcript_provider_name,
                     )
-                except DoubaoASRAmbiguous:
+                except (DoubaoASRAmbiguous, TencentASRAmbiguous):
                     raise
                 except Exception as exc:
                     audio = {
-                        "policy": "doubao_transcript", "status": "failed", "provider": request.get("overview_asr_identity"),
+                        "policy": audio_policy(True, transcript_provider_name), "status": "failed",
+                        "provider": request.get("overview_asr_identity"),
                         "utterances": [], "error": str(exc)[:300],
                     }
                 result["audio"] = audio
@@ -15099,6 +15708,9 @@ def resolve_asset_material_interaction_ambiguity(project_dir: Path, asset_id: st
             "interaction_asr_identity": recovery.get("asr_identity"),
             "interaction_source": recovery.get("source"),
             "interaction_preflight_signature": recovery.get("preflight_signature"),
+            "window_context_policy": recovery.get("window_context_policy", "serial_equivalent"),
+            "interaction_concurrency": recovery.get("interaction_concurrency"),
+            "asr_concurrency": recovery.get("asr_concurrency"),
         }
     if not request.get("interaction_identity") or not request.get("interaction_source"):
         raise WorkbenchError("该受理不明任务缺少安全恢复快照，请保留现场人工排查")
@@ -15106,7 +15718,9 @@ def resolve_asset_material_interaction_ambiguity(project_dir: Path, asset_id: st
     recognize_audio = request.get("recognize_audio", True)
     if not isinstance(recognize_audio, bool):
         raise WorkbenchError("安全恢复快照中的音频开关无效")
-    preflight = preflight_asset_material_interactions(project_dir, asset_id, profile, recognize_audio)
+    preflight = preflight_asset_material_interactions(
+        project_dir, asset_id, profile, recognize_audio, request.get("transcript_provider")
+    )
     if str(payload.get("preflight_signature") or "") != preflight["signature"]:
         raise WorkbenchError("素材、模型、语音服务或预算已变化，请重新预检并确认")
     if (
@@ -15167,7 +15781,8 @@ def resolve_asset_material_interaction_ambiguity(project_dir: Path, asset_id: st
         "profile": profile,
         "recognize_audio": recognize_audio,
         "generate_candidates": bool(request.get("generate_candidates", False)),
-        "transcript_provider": "doubao" if preflight.get("effective_recognize_audio") else "none",
+        "transcript_provider": (str(preflight.get("transcript_provider") or "none")
+                                if preflight.get("effective_recognize_audio") else "none"),
         "remote_vision_confirmed": True,
         "remote_asr_confirmed": bool(preflight.get("effective_recognize_audio")),
         "preflight_signature": preflight["signature"],
@@ -15755,7 +16370,7 @@ def update_asset_material_interaction_review(project_dir: Path, asset_id: str, p
     _activity(state, "interaction_review_updated", f"已更新 {asset_id} 的互动人工目录",
               asset_id=asset_id, review_revision=updated["revision"], action=str(payload.get("action") or ""))
     _save(project_dir, state)
-    return read_asset_material_interactions(project_dir, asset_id)
+    return read_asset_material_interactions(project_dir, asset_id, include_dependencies=False)
 
 
 def _interaction_candidate_root(project_dir: Path, asset_id: str) -> Path:
@@ -15817,6 +16432,29 @@ def _sync_interaction_candidate_summary(project_dir: Path, asset: dict[str, Any]
 
 
 @_project_transactional
+def _interaction_render_source(project_dir: Path, asset: dict) -> Path | None:
+    """渲染候选时真正交给 FFmpeg 取帧的媒体：优先用时间戳连续的审核代理。
+
+    长直播回放的原片是 TS 转封装录制的 HEVC，时间戳在部分区间断裂。直接对原片
+    `trim` 会少取数据（实测 46.042 秒的区间只取到 21.8 秒视频 / 25.0 秒音频），
+    候选比保留清单短几秒到几十秒，被 QA 判为不合格；改成逐段输入 seek 虽能取对，
+    但每段一次 seek 在 1.7 GB 的 HEVC 上要付出分钟级代价（三段事件跑满 900 秒超时）。
+    代理由原片完整重编码而来、时间戳连续，分辨率又与渲染契约一致，所以输出规格不变。
+    代理缺失时返回 None，渲染退回原片（短素材通常没有断裂问题）。
+    """
+    media_state = asset.get("media_index") if isinstance(asset.get("media_index"), dict) else {}
+    proxy = media_state.get("interaction_proxy") if isinstance(media_state.get("interaction_proxy"), dict) else {}
+    relative = str(proxy.get("path") or "")
+    if not relative:
+        return None
+    try:
+        path = (project_dir / relative).resolve()
+        path.relative_to((project_dir / "artifacts" / "media-index").resolve())
+    except (OSError, ValueError):
+        return None
+    return path if path.is_file() else None
+
+
 def generate_asset_material_interaction_candidate(project_dir: Path, asset_id: str, payload: dict) -> dict:
     if not isinstance(payload, dict):
         raise WorkbenchError("互动候选生成请求格式无效")
@@ -15842,6 +16480,7 @@ def generate_asset_material_interaction_candidate(project_dir: Path, asset_id: s
             project_dir=project_dir, source=source, index=index, review=review,
             event_id=event_id, output_root=_interaction_candidate_root(project_dir, asset_id),
             ffmpeg=ffmpeg, ffprobe=ffprobe,
+            render_source=_interaction_render_source(project_dir, asset),
             target_gap=payload.get("target_gap", .3),
         )
         if float(plan.get("source_duration") or 0) > 180:
@@ -15890,6 +16529,7 @@ def update_asset_material_interaction_candidate(project_dir: Path, asset_id: str
             removal_id=str(payload.get("removal_id") or "") or None,
             removal_states=payload.get("removal_states") if isinstance(payload.get("removal_states"), dict) else None,
             ffmpeg=ffmpeg, ffprobe=ffprobe,
+            render_source=_interaction_render_source(project_dir, parent),
         )
     except InteractionCandidateConflict as exc:
         raise WorkbenchConflict(str(exc)) from exc
@@ -15930,10 +16570,93 @@ def update_asset_material_interaction_candidate(project_dir: Path, asset_id: str
     _activity(state, "interaction_candidate_updated", f"已更新 {asset_id} 的互动候选", asset_id=asset_id, plan_id=plan_id, action=action)
     _sync_interaction_candidate_summary(project_dir, parent)
     _save(project_dir, state)
-    return read_asset_material_interactions(project_dir, asset_id)
+    return read_asset_material_interactions(project_dir, asset_id, include_dependencies=False)
 
 
-def read_asset_material_interactions(project_dir: Path, asset_id: str) -> dict:
+def interaction_rank_preferences(*, order_mode: Any = None, weights: Any = None) -> dict[str, Any]:
+    """Read the requested ranking view from two plain query values.
+
+    ``weights`` is ``key:value`` pairs joined by commas
+    (``duration:0.5,high_emotion:0.5``).  Naming each weight keeps the request
+    readable and order-independent; a positional list would silently re-map if
+    the factor order ever changed.
+    """
+    result: dict[str, Any] = {}
+    mode = str(order_mode or "").strip()
+    if mode:
+        try:
+            result["order_mode"] = resolve_order_mode(mode)
+        except InteractionRecommendError as exc:
+            raise WorkbenchError(str(exc)) from exc
+    parsed: dict[str, float] = {}
+    for chunk in str(weights or "").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        key, _, value = chunk.partition(":")
+        key = key.strip()
+        if key not in SCORED_FACTORS:
+            raise WorkbenchError(f"未知的推荐权重项：{key or chunk}")
+        try:
+            parsed[key] = float(value)
+        except ValueError as exc:
+            raise WorkbenchError(f"推荐权重“{key}”必须是数值") from exc
+    if parsed:
+        result["weights"] = parsed
+    return result
+
+
+def _interaction_recommendations(project_dir: Path, asset_id: str, index: dict[str, Any], *,
+                                 weights: dict[str, float] | None = None,
+                                 sort_mode: str | None = None) -> dict[str, Any]:
+    """Explainable four-criteria ranking for the first-pass candidates.
+
+    Entirely local: it reads an index the vision pass already paid for and never
+    writes to it, so the paid analysis cache signature cannot change and no new
+    model call is ever triggered.  The result is cached beside the candidates and
+    keyed by the index signature, so re-running the analysis refreshes it.
+
+    ``weights`` / ``sort_mode`` are *views* over the same cached factors: a
+    preference request is recomputed in memory and never overwrites the canonical
+    cache, so flicking the weight sliders cannot make the stored side-car drift
+    away from the shipped default.  The ranking itself lives in one place
+    (``material_interaction_recommend``) instead of being reimplemented in the
+    browser, which is how two orderings of the same material would start to
+    disagree.
+    """
+    path = _interaction_candidate_root(project_dir, asset_id) / "recommendations.json"
+    signature = str(index.get("signature") or "")
+    cached = read_interaction_recommendations(path)
+    canonical = (isinstance(cached, dict)
+                 and str(cached.get("version") or "") == INTERACTION_RECOMMEND_VERSION
+                 and str(cached.get("index_signature") or "") == signature
+                 and bool(cached.get("events")))
+    if not canonical:
+        try:
+            cached = build_interaction_recommendations(index)
+        except InteractionRecommendError as exc:
+            return {"version": "", "index_signature": signature, "events": [], "weights": {},
+                    "criteria": {}, "notes": [], "error": str(exc)[:200]}
+        write_interaction_recommendations(path, cached)
+    if not weights and not sort_mode:
+        return cached
+    try:
+        return build_interaction_recommendations(
+            index,
+            weights=weights or cached.get("weights"),
+            sort_mode=sort_mode or cached.get("order_mode"),
+        )
+    except InteractionRecommendError as exc:
+        return {**deepcopy(cached), "error": str(exc)[:200]}
+
+
+def read_asset_material_interactions(project_dir: Path, asset_id: str, *,
+                                     include_dependencies: bool = True,
+                                     preferences: dict[str, Any] | None = None) -> dict:
+    preferences = preferences if isinstance(preferences, dict) else {}
+    weights = preferences.get("weights")
+    weights = weights if isinstance(weights, dict) and weights else None
+    sort_mode = str(preferences.get("order_mode") or "") or None
     state, asset, _, index, review_path = _interaction_review_context(project_dir, asset_id)
     result = {key: deepcopy(index[key]) for key in ("version", "signature", "status", "duration", "profile", "identity", "audio", "events", "ranked_event_ids", "usage", "notice")}
     # Raw journals, frame paths and FFprobe metadata never leave the project.
@@ -15962,12 +16685,7 @@ def read_asset_material_interactions(project_dir: Path, asset_id: str) -> dict:
         except InteractionReviewError as exc:
             raise WorkbenchError(str(exc)) from exc
     rejected = index.get("rejected_model_events") if isinstance(index.get("rejected_model_events"), list) else []
-    analysis_warnings = [{
-        "code": "rejected_model_event",
-        "window_id": str(row.get("window_id") or ""),
-        "event_number": row.get("event_number"),
-        "reason": "模型引用了未提供的证据，该事件已单独拒绝并保留其他合法结果",
-    } for row in rejected if isinstance(row, dict)]
+    analysis_warnings = _interaction_analysis_warnings(rejected)
     public_candidates = _public_interaction_candidates(project_dir, asset_id)
     result.update({
         "asset_id": asset_id,
@@ -15982,7 +16700,13 @@ def read_asset_material_interactions(project_dir: Path, asset_id: str) -> dict:
             "active": sum(1 for row in public_candidates if row.get("is_active") is True),
             "history": sum(1 for row in public_candidates if row.get("is_active") is not True),
         },
-        "second_pass_preflight": _second_pass_preflight(),
+        # Read-only snapshot: this payload is served on mutation paths too, and a
+        # status line must never make them start requiring FFmpeg.
+        "material_evidence": _material_evidence_snapshot(project_dir, asset_id, proxy_path or asset["path"]),
+        "second_pass_preflight": _interaction_dependency_preflight(project_dir, asset_id,
+                                                                   refresh=include_dependencies),
+        "recommendations": _interaction_recommendations(project_dir, asset_id, index,
+                                                        weights=weights, sort_mode=sort_mode),
         "second_pass_candidates": _public_interaction_second_pass_candidates(project_dir, asset_id),
         "analysis_warnings": analysis_warnings,
         "candidate_job": deepcopy((_automation(state).get("interaction_candidate") or {}))
@@ -16146,7 +16870,128 @@ def _interaction_second_pass_root(project_dir: Path, asset_id: str) -> Path:
     return project_dir / "artifacts" / "media-index" / safe_asset_id / "interaction-second-pass"
 
 
+def _dependency_check(key: str, ok: bool, label: str, remediation: str) -> dict[str, Any]:
+    return {"key": key, "ok": bool(ok), "label": label, "remediation": "" if ok else remediation}
+
+
+def _module_available(name: str) -> bool:
+    import importlib.util
+
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, ValueError):
+        return False
+
+
+def _vad_runtime_available() -> bool:
+    """Presence is not enough: on this machine the native DLLs can be unusable.
+
+    Importing is the only honest test, and a broken VC++ runtime raises
+    ``OSError`` (WinError 1114) rather than ``ImportError``, so both are caught.
+    """
+    try:
+        import onnxruntime  # noqa: F401
+        from faster_whisper.vad import get_speech_timestamps  # noqa: F401
+    except (ImportError, OSError, RuntimeError, ValueError):
+        return False
+    return True
+
+
+def _interaction_pause_evidence(media: Path | None, ranges: list[dict[str, Any]], *, ffmpeg: str,
+                                output_root: Path, envelope_provider: Any = None,
+                                min_silence: float | None = None,
+                                bridge_seconds: float | None = None,
+                                ) -> tuple[dict[str, Any] | None, str]:
+    """Measure the dead air the second pass may remove.
+
+    Probing the very file the renderer will read keeps probe and render on one
+    timeline, so no assumption about a proxy matching the original is needed.
+    A failure returns ``None`` plus a reason; it never aborts the edit, because
+    "no pause compression" is a legitimate, reportable outcome.
+    """
+    if media is None:
+        return None, "没有可用的媒体文件，已跳过停顿探测"
+    if not ranges:
+        return None, "所选互动没有保留范围，已跳过停顿探测"
+    extra: dict[str, Any] = {}
+    if min_silence is not None:
+        extra["min_silence"] = min_silence
+    if bridge_seconds is not None:
+        extra["bridge_seconds"] = bridge_seconds
+    try:
+        evidence = detect_interaction_pause_evidence(
+            media, ranges, ffmpeg=ffmpeg, output_root=output_root,
+            envelope_provider=envelope_provider, **extra,
+        )
+    except InteractionPauseEvidenceError as exc:
+        return None, f"停顿探测失败：{exc}"
+    return evidence, ""
+
+
+def _material_evidence_root(project_dir: Path, asset_id: str) -> Path:
+    """The asset artifact directory that owns the bypass evidence document."""
+    return _interaction_candidate_root(project_dir, asset_id).parent
+
+
+def _material_evidence_envelope_provider(project_dir: Path, asset_id: str, media: Path | None,
+                                         ) -> Any:
+    """Read-only provider so the pause probe reuses the shared envelope.
+
+    Snapshot only: it never decodes, so a mutation path that happens to consult
+    the evidence cannot start needing FFmpeg.
+    """
+    if media is None:
+        return None
+
+    def provider() -> dict[str, Any] | None:
+        try:
+            payload = read_material_evidence(media, output_root=_material_evidence_root(project_dir, asset_id),
+                                             with_arrays=True)
+        except (OSError, ValueError):
+            return None
+        return (payload or {}).get("envelope")
+
+    return provider
+
+
+def _material_evidence_snapshot(project_dir: Path, asset_id: str, media: Path | None) -> dict[str, Any]:
+    """UI/preflight view of the evidence document.  Pure read, never builds."""
+    if media is None:
+        return summarize_material_evidence(None)
+    try:
+        payload = read_material_evidence(media, output_root=_material_evidence_root(project_dir, asset_id))
+    except (OSError, ValueError):
+        payload = None
+    return summarize_material_evidence(payload)
+
+
+def _ensure_material_evidence(project_dir: Path, asset_id: str, media: Path | None, *,
+                             ffmpeg: str, duration: float, transcript: dict[str, Any] | None = None,
+                             speech_ranges_by_range: list[dict[str, Any]] | None = None,
+                             ) -> dict[str, Any]:
+    """Build the evidence document once, on an entry point that already needs FFmpeg.
+
+    Never raises: a failure becomes a recorded degradation so the surrounding
+    pipeline keeps working without the evidence layer.
+    """
+    if media is None or not ffmpeg:
+        return {"status": "unavailable", "degradations": ["素材证据：缺少媒体文件或 FFmpeg"],
+                "sections": {}, "metadata": {}}
+    try:
+        payload = build_material_evidence(
+            media, output_root=_material_evidence_root(project_dir, asset_id), ffmpeg=ffmpeg,
+            duration=max(0.001, float(duration or 0.001)), speech_ranges_by_range=speech_ranges_by_range,
+            transcript=transcript,
+        )
+    except (MaterialEvidenceError, OSError, ValueError) as exc:
+        return {"status": "unavailable", "degradations": [f"material_evidence_unavailable:{str(exc)[:200]}"],
+                "sections": {}, "metadata": {}}
+    return payload
+
+
 def _second_pass_preflight() -> dict[str, Any]:
+    """Which text model will pay for the semantic pass.  Kept zero-argument: it
+    is the contract the job gate and the existing tests stub against."""
     config = read_text_ai_config()
     endpoint = str(config.get("base_url") or "https://api.openai.com/v1").rstrip("/")
     return {
@@ -16158,6 +17003,75 @@ def _second_pass_preflight() -> dict[str, Any]:
         "confirmation_required": True,
         "message": "确认后最多调用一次当前文本模型完成语义分组；转写与本地渲染不会再次收费。",
     }
+
+
+_INTERACTION_DEPENDENCY_STATE: dict[str, dict[str, Any]] = {}
+
+
+def _interaction_dependency_preflight(project_dir: Path | None = None, asset_id: str = "",
+                                      *, refresh: bool = True) -> dict[str, Any]:
+    """Report every dependency the interaction pipeline needs *before* work starts.
+
+    The text-model preflight only answered "will the semantic pass be billed",
+    so a missing VAD runtime, a missing review proxy or an unusable FFmpeg
+    surfaced minutes later as an unexplained render failure.  Each check now
+    carries the fix, and the caller can see the chain is degraded before
+    spending a model call.
+
+    ``refresh=False`` serves the last snapshot without probing.  Mutation
+    endpoints use it, because confirming a candidate must not suddenly start
+    requiring FFmpeg — a diagnostic is not allowed to add a dependency to a path
+    that never had one.
+    """
+    key = f"{project_dir}|{asset_id}"
+    if not refresh:
+        cached = _INTERACTION_DEPENDENCY_STATE.get(key)
+        if cached is not None:
+            return deepcopy(cached)
+        return {**_second_pass_preflight(), "checks": [], "degraded": [], "ready": True, "checked": False}
+    base = _second_pass_preflight()
+    ffmpeg = _ffmpeg_available()
+    checks = [
+        _dependency_check("text_model", bool(base["configured"]),
+                          "文本模型：对话语义分组与精彩前置",
+                          "在本地密钥文件中配置文本模型 base_url 与 api key，然后重启工作台"),
+        _dependency_check("vad_runtime", _vad_runtime_available(),
+                          "本地 VAD：停顿压缩的语音保护证据",
+                          "按项目记忆把成套 VC++ 运行库放到 onnxruntime/capi 后重启工作台"),
+        _dependency_check("numpy", _module_available("numpy"),
+                          "numpy：本地静音与画面运动分析", "pip install --no-cache-dir numpy"),
+        _dependency_check("ffmpeg", bool(ffmpeg), "FFmpeg/ffprobe：生成待审预览",
+                          "确认 static-ffmpeg 已解压且可执行"),
+    ]
+    if project_dir is not None and asset_id:
+        try:
+            _, asset, _, _, _ = _interaction_review_context(project_dir, str(asset_id))
+            proxy = _interaction_render_source(project_dir, asset)
+            checks.append(_dependency_check(
+                "review_proxy", proxy is not None, "审核代理：长素材渲染的时间戳连续性",
+                "重新运行互动分析以生成 browser-proxy；缺失时会退回原片并记录降级",
+            ))
+            # Evidence layer: numpy plus either an existing document or a usable
+            # decoder.  Read-only — the preflight must not build anything.
+            envelope_ok = _module_available("numpy") and bool(ffmpeg or _material_evidence_snapshot(
+                project_dir, str(asset_id), proxy).get("sections", {}).get("audio_envelope") == "available")
+            checks.append(_dependency_check(
+                "audio_envelope", envelope_ok, "音频包络：一次解码、阈值可反复调",
+                "安装 numpy 并确认 FFmpeg 可用；缺失时停顿探测退回逐段 silencedetect",
+            ))
+            motion_ok = _module_available("numpy") and bool(ffmpeg or _material_evidence_snapshot(
+                project_dir, str(asset_id), proxy).get("sections", {}).get("motion") == "available")
+            checks.append(_dependency_check(
+                "motion_timeline", motion_ok, "运动时间线：全片连续画面运动分",
+                "安装 numpy 并确认 FFmpeg 可用；缺失时画面许可退回逐窗抽帧",
+            ))
+        except (WorkbenchError, OSError, ValueError, KeyError) as exc:
+            checks.append(_dependency_check("review_proxy", False,
+                                            "审核代理：长素材渲染的时间戳连续性", str(exc)[:200]))
+    degraded = [row["key"] for row in checks if not row["ok"]]
+    payload = {**base, "checks": checks, "degraded": degraded, "ready": not degraded, "checked": True}
+    _INTERACTION_DEPENDENCY_STATE[key] = payload
+    return deepcopy(payload)
 
 
 def _public_interaction_second_pass_candidates(project_dir: Path, asset_id: str) -> list[dict[str, Any]]:
@@ -16195,6 +17109,13 @@ def _public_interaction_second_pass_candidates(project_dir: Path, asset_id: str)
         elif not parent_current:
             parent_stale_reason = "第一次切片内容或预览已更新"
         utterances = {str(row.get("id") or ""): row for row in plan.get("utterances") or [] if isinstance(row, dict)}
+        # v6 groups *spoken units*, so the reviewer's per-group dialogue lines must
+        # be resolved from either id space; otherwise a v6 plan would render its
+        # groups with no text at all.
+        atoms = {
+            **utterances,
+            **{str(row.get("id") or ""): row for row in plan.get("spoken_units") or [] if isinstance(row, dict)},
+        }
         groups = []
         for group in (plan.get("story") or {}).get("groups") or []:
             groups.append({
@@ -16204,7 +17125,7 @@ def _public_interaction_second_pass_candidates(project_dir: Path, asset_id: str)
                     "source_range", "source_ranges",
                 )
             } | {
-                "utterances": [deepcopy(utterances[identifier]) for identifier in group.get("utterance_ids") or [] if identifier in utterances],
+                "utterances": [deepcopy(atoms[identifier]) for identifier in group.get("utterance_ids") or [] if identifier in atoms],
             })
         rows.append({
             "version": plan.get("version"), "plan_id": plan.get("plan_id"),
@@ -16224,14 +17145,35 @@ def _public_interaction_second_pass_candidates(project_dir: Path, asset_id: str)
             "hook_source_duration": plan.get("hook_source_duration"),
             "output_duration": plan.get("output_duration"),
             "removed_source_seconds": plan.get("removed_source_seconds"),
+            # The plan has always carried this; the public projection dropped it,
+            # so the browser's "压缩停顿 X 秒" line silently read 0.0 for every
+            # candidate and the acceptance harness crashed on the missing key.
+            "removed_by_pause_seconds": plan.get("removed_by_pause_seconds"),
+            "played_source_seconds": plan.get("played_source_seconds"),
+            # The gap that actually survives between two adjacent lines.  The UI
+            # shows it, so "相邻对话间隙 0.30 秒" is a promise the user can verify
+            # against the rendered file instead of a hidden parameter.
+            "pause_survivor_seconds": pause_survivor_seconds(plan.get("options")),
             "target_duration_status": plan.get("target_duration_status"),
             "repeated_source_seconds": plan.get("repeated_source_seconds"),
             "content_qa": deepcopy(plan.get("content_qa") or {}),
+            # Everything the reviewer needs to see *why* a clip is as short as it
+            # is, and whether anything was silently downgraded.
+            "compression": deepcopy(plan.get("compression") or {}),
+            "pause_trims": deepcopy(plan.get("pause_trims") or []),
+            "degradations": deepcopy(plan.get("degradations") or []),
+            "render_degradations": deepcopy(plan.get("render_degradations") or []),
+            "subtitles": deepcopy(plan.get("subtitles") or {}),
             "occurrences": deepcopy(plan.get("occurrences") or []),
             "timeline_mapping": deepcopy(plan.get("timeline_mapping") or []),
             "subtitle_cues": deepcopy(plan.get("subtitle_cues") or []),
             "warnings": deepcopy(plan.get("warnings") or []),
             "story_identity": deepcopy(plan.get("story_identity") or {}),
+            # How the atoms were derived.  ``asr_utterance`` means the VAD
+            # evidence was missing and the edit fell back to block granularity —
+            # the reviewer has to see that instead of guessing.
+            "unit_source": plan.get("unit_source"),
+            "unit_count": len(plan.get("spoken_units") or []),
             "usage": deepcopy(plan.get("usage") or {}),
             "preview": {**(deepcopy(preview) if preview else {}), "path": preview_path or None} if preview else None,
             "qa": deepcopy(plan.get("qa") or {}), "can_undo": bool(plan.get("history")),
@@ -16291,12 +17233,30 @@ def generate_asset_material_interaction_second_pass(project_dir: Path, asset_id:
         "endpoint_hash": preflight["endpoint_hash"], "maximum_model_calls": 1,
         "confirmed": True,
     }
+    # Probe the same file the renderer will read, so a cut is measured on the
+    # very timeline it will be executed on.  A failure is recorded, not fatal.
+    #
+    # The probe floor follows the requested pause strength: a 0.45 s floor can
+    # never produce a cut that also survives the plan layer's fixed overhead, so
+    # tuning one without the other is what made "压缩对话间停顿" remove nothing.
+    # The floor is part of the evidence identity, so both probes can coexist in
+    # the cache instead of overwriting each other.
+    render_source = _interaction_render_source(project_dir, asset)
+    pause_evidence, pause_note = _interaction_pause_evidence(
+        render_source or source, parent.get("keep_ranges") or [], ffmpeg=ffmpeg,
+        output_root=_interaction_second_pass_root(project_dir, asset_id),
+        envelope_provider=_material_evidence_envelope_provider(
+            project_dir, asset_id, render_source or source),
+        min_silence=pause_probe_min_silence(options),
+        bridge_seconds=pause_probe_bridge_seconds(options),
+    )
     try:
         plan = generate_second_pass_candidate(
             project_dir=project_dir, source=source, index=index, parent_plan=parent,
             output_root=_interaction_second_pass_root(project_dir, asset_id),
             options=options, runtime_identity=runtime_identity,
             ffmpeg=ffmpeg, ffprobe=ffprobe,
+            pause_evidence=pause_evidence, render_source=render_source,
         )
     except InteractionSecondPassCandidateConflict as exc:
         raise WorkbenchConflict(str(exc)) from exc
@@ -16307,7 +17267,11 @@ def generate_asset_material_interaction_second_pass(project_dir: Path, asset_id:
         project_dir, str(_interaction_second_pass_root(project_dir, asset_id))
     )
     asset["media_index"] = media_state
-    _activity(state, "interaction_second_pass_generated", f"已生成 {asset_id} 的二次剪辑候选",
+    _activity(state, "interaction_second_pass_generated",
+              f"已生成 {asset_id} 的二次剪辑候选"
+              + (f"（压缩停顿 {plan['removed_by_pause_seconds']:.1f} 秒）"
+                 if plan.get("removed_by_pause_seconds") else "")
+              + (f"；{pause_note}" if pause_note else ""),
               asset_id=asset_id, plan_id=plan["plan_id"], parent_plan_id=parent["plan_id"])
     _save(project_dir, state)
     return read_asset_material_interactions(project_dir, asset_id)
@@ -16349,6 +17313,7 @@ def update_asset_material_interaction_second_pass(project_dir: Path, asset_id: s
             speed=payload.get("speed"), hook_candidate_id=payload.get("hook_candidate_id"),
             hook_mode=payload.get("hook_mode"),
             ffmpeg=ffmpeg, ffprobe=ffprobe,
+            render_source=_interaction_render_source(project_dir, parent_asset),
         )
     except InteractionSecondPassCandidateConflict as exc:
         raise WorkbenchConflict(str(exc)) from exc
@@ -16390,12 +17355,171 @@ def update_asset_material_interaction_second_pass(project_dir: Path, asset_id: s
     _activity(state, "interaction_second_pass_updated", f"已更新 {asset_id} 的二次剪辑候选",
               asset_id=asset_id, plan_id=plan_id, action=action)
     _save(project_dir, state)
-    return read_asset_material_interactions(project_dir, asset_id)
+    return read_asset_material_interactions(project_dir, asset_id, include_dependencies=False)
+
+
+def export_asset_material_interaction_second_pass(project_dir: Path, asset_id: str, plan_id: str,
+                                                  payload: dict) -> dict:
+    """P0-5：把已冻结的二次精剪计划导出为中立剪辑清单。
+
+    只读取计划文件与原片的渲染契约，**不发起任何付费调用、不修改计划**；落盘位置
+    ``interaction-second-pass/<plan_id>/export/`` 且绝不覆盖内容不同的既有产物。
+    """
+    from backlot.material_interaction_export import (
+        DEFAULT_FCP7_SPEED_MODE,
+        FCP7_SPEED_MODES,
+        InteractionExportError,
+        export_plan,
+    )
+    from backlot.material_interaction_render import InteractionRenderError, _render_contract
+    from backlot.media_index import media_content_fingerprint, probe_media
+
+    if not isinstance(payload, dict):
+        raise WorkbenchError("导出请求格式无效")
+    _, asset, source, _, _ = _interaction_review_context(project_dir, asset_id)
+    root = _interaction_second_pass_root(project_dir, asset_id)
+    try:
+        plan = read_second_pass_plan(interaction_second_pass_plan_path(root, plan_id))
+    except InteractionSecondPassError as exc:
+        if not str(plan_id).startswith("ISP-"):
+            raise WorkbenchError("二次剪辑编号无效") from exc
+        raise WorkbenchError(str(exc)) from exc
+
+    media_reference = str(payload.get("media_reference") or "review_proxy")
+    speed_mode = str(payload.get("fcp7_speed_mode") or DEFAULT_FCP7_SPEED_MODE)
+    if speed_mode not in FCP7_SPEED_MODES:
+        raise WorkbenchError("FCP7 变速模式无效，请选择「时间重映射」或「等长片段」后重试")
+    formats = payload.get("formats") if isinstance(payload.get("formats"), list) else ["json", "fcp7_xml"]
+
+    ffmpeg = _ffmpeg_available()
+    ffprobe = _ffprobe_available(ffmpeg) if ffmpeg else None
+    if not ffmpeg or not ffprobe:
+        raise WorkbenchError("本机缺少 FFmpeg/ffprobe，无法读取渲染契约；请修复环境后重新导出")
+    try:
+        probe = probe_media(source, ffprobe)
+        contract = {**_render_contract(probe, 1280), "duration": probe.get("duration_seconds")}
+    except (InteractionRenderError, WorkbenchError) as exc:
+        raise WorkbenchError(f"导出失败：{exc}") from exc
+
+    video = next((row for row in probe.get("streams") or [] if row.get("codec_type") == "video"), {})
+    original_fingerprint = media_content_fingerprint(source)
+    proxy = _interaction_render_source(project_dir, asset)
+    reference_media = proxy or source
+    source_block = {
+        "fingerprint": original_fingerprint,
+        "original": {
+            "path": _export_relative(project_dir, source),
+            "codec": video.get("codec_name"),
+            "container": (source.suffix.lstrip(".") or None),
+            "r_frame_rate": video.get("r_frame_rate"),
+            "note": ("Premiere 很可能无法直接打开（HEVC + TS，时间戳可能断裂）"
+                     if str(video.get("codec_name") or "").lower() == "hevc" else ""),
+        },
+        "reference": {
+            "kind": "review_proxy" if proxy else "original",
+            "path": _export_relative(project_dir, reference_media),
+            "fingerprint": media_content_fingerprint(reference_media) if proxy else original_fingerprint,
+        },
+    }
+    try:
+        return export_plan(
+            plan, output_dir=root / str(plan["plan_id"]) / "export", formats=[str(row) for row in formats],
+            media_reference=media_reference, include_srt=bool(payload.get("include_srt")),
+            include_clips=bool(payload.get("include_clips")), source=source_block, contract=contract,
+            speed_mode=speed_mode,
+        )
+    except InteractionExportError as exc:
+        raise WorkbenchError(f"导出失败：{exc}") from exc
+
+
+def _export_relative(project_dir: Path, path: Path) -> str:
+    """导出清单里只写项目内相对路径；越界时回落到文件名，绝不泄露本机绝对路径。"""
+    try:
+        return path.resolve().relative_to(project_dir.resolve()).as_posix()
+    except (OSError, ValueError):
+        return path.name
+
+
+def export_asset_material_interaction_second_pass_deliverables(project_dir: Path, asset_id: str,
+                                                               plan_id: str, payload: dict) -> dict:
+    """导出一条二次精剪的**交付物**：无字幕成片 + 带时间码的字幕文件。
+
+    烧进画面的字幕是**审看工具**，不是交付形态：用户满意后要带走的是干净成片和一份可以
+    再编辑、再排版、再决定要不要的字幕文件。 本操作**本地渲染、零付费**，干净成片落在
+    自己的签名目录里（字幕决策本身就在渲染签名中），因此**绝不会覆盖**已经人工审看过的
+    那份预览；计划文件只读，也不发起任何模型调用。
+
+    不加项目事务锁：渲染要跑几分钟，锁住整个项目会让界面卡住，而本操作只写
+    ``interaction-second-pass/<plan_id>/`` 下自己的产物。
+    """
+    from backlot.material_interaction_export import build_srt
+    from backlot.material_interaction_second_pass_render import (
+        InteractionSecondPassRenderError,
+        render_second_pass_candidate,
+    )
+
+    if not isinstance(payload, dict):
+        raise WorkbenchError("交付物导出请求格式无效")
+    _, asset, source, _, _ = _interaction_review_context(project_dir, asset_id)
+    root = _interaction_second_pass_root(project_dir, asset_id)
+    try:
+        plan = read_second_pass_plan(interaction_second_pass_plan_path(root, plan_id))
+    except InteractionSecondPassError as exc:
+        if not str(plan_id).startswith("ISP-"):
+            raise WorkbenchError("二次剪辑编号无效") from exc
+        raise WorkbenchError(str(exc)) from exc
+    if str((plan.get("qa") or {}).get("status") or "") != "passed":
+        raise WorkbenchError("该二次剪辑还没有通过预览 QA；请先生成并检查预览后再导出")
+    ffmpeg = _ffmpeg_available()
+    ffprobe = _ffprobe_available(ffmpeg) if ffmpeg else None
+    if not ffmpeg or not ffprobe:
+        raise WorkbenchError("本机缺少 FFmpeg/ffprobe，无法导出成片")
+    export_dir = root / str(plan["plan_id"]) / "export"
+    export_dir.mkdir(parents=True, exist_ok=True)
+    cue_rows = [row for row in (plan.get("subtitle_cues") or []) if str(row.get("text") or "").strip()]
+    srt_path = export_dir / f"{plan['plan_id']}.srt"
+    srt_path.write_text(build_srt({"subtitles": cue_rows}), encoding="utf-8")
+    # A caption-free render is simply the same plan with the caption decision
+    # flipped: the burn flag is part of the render signature, so this lands in its
+    # own directory and the reviewed preview stays exactly as it was.
+    clean = deepcopy(plan)
+    clean["options"] = {**(plan.get("options") or {}), "burn_subtitles": False}
+    try:
+        manifest = render_second_pass_candidate(
+            source, clean, root / "renders", ffmpeg=ffmpeg, ffprobe=ffprobe,
+            render_source=_interaction_render_source(project_dir, asset),
+            timeout=float(payload.get("timeout_seconds") or 900),
+        )
+    except InteractionSecondPassRenderError as exc:
+        raise WorkbenchError(f"无字幕成片渲染失败：{exc}") from exc
+    return {
+        "plan_id": plan["plan_id"], "revision": plan.get("revision"),
+        "video_path": _safe_relpath(project_dir, str(manifest["path"])),
+        "video_seconds": float(manifest.get("output_duration") or 0.0),
+        "srt_path": _safe_relpath(project_dir, str(srt_path)),
+        "cue_count": len(cue_rows),
+        "subtitles_burned": False,
+        "notice": "已导出：无字幕成片 + 字幕文件（SRT，输出时间轴）。成片为本地渲染，未发起任何付费调用。",
+    }
 
 
 def _interaction_second_pass_job_signature(asset_id: str, request: dict[str, Any]) -> str:
+    """Idempotency key for one manual second-pass edit.
+
+    The derivation identity is part of the key on purpose.  Keyed on the request
+    alone, a *completed* job is returned as-is for the same parent and options
+    (line below), so improving the story normalizer or the spoken-unit derivation
+    would keep serving a plan this build no longer generates — the acceptance run
+    hit exactly that: the first material silently reused an old, wrongly anchored
+    plan while the other two were rebuilt.
+    """
     return hashlib.sha256(json.dumps({
-        "version": "interaction-second-pass-job-v1", "asset_id": str(asset_id), "request": request,
+        "version": "interaction-second-pass-job-v2", "asset_id": str(asset_id), "request": request,
+        "derivation": {
+            "story": INTERACTION_STORY_VERSION,
+            "units": INTERACTION_UNITS_VERSION,
+            "plan": INTERACTION_SECOND_PASS_VERSION,
+        },
     }, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 

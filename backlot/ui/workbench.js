@@ -22,14 +22,27 @@ const doubaoConfigTest = document.getElementById("doubaoConfigTest");
 const THEME_KEY = "backlot.theme";
 let currentTheme = document.documentElement.dataset.theme === "light" ? "light" : "dark";
 let uiRevisionStale = false;
+const UI_REVISION_RELOAD_KEY = "backlot.uiRevisionAutoReload";
 
 function assertCurrentUIRevision(response) {
   const serverRevision = response.headers.get("X-Backlot-UI-Revision");
   const loadedRevision = window.__BACKLOT_UI_REVISION__;
-  if (serverRevision && loadedRevision && serverRevision !== loadedRevision) {
-    uiRevisionStale = true;
-    throw new Error("工作台页面已有新版本，请刷新页面后继续操作");
+  if (!serverRevision || !loadedRevision || serverRevision === loadedRevision) return;
+  uiRevisionStale = true;
+  // 这个闸门是为了防止"旧页面按旧契约发写请求"。但工作台的 UI 资源是改完即生效的，
+  // 一个长期开着的标签页会一直拿着旧版本号：以前这里只把 uiRevisionStale 永久置真，
+  // 于是此后**所有**写操作（保存本段微调、合成片段、声音样板…）都在发请求前被拦掉，
+  // 页面只能靠人自己猜"要不要刷新"。现在改成自动刷新一次：同一个服务端版本号只刷一次，
+  // 刷新后版本号对齐，写操作自然恢复；如果刷新也修不好（例如 HTML 被缓存），
+  // 保留原来的硬阻断，避免拿旧契约继续写。
+  let alreadyReloadedFor = "";
+  try { alreadyReloadedFor = sessionStorage.getItem(UI_REVISION_RELOAD_KEY) || ""; } catch (_) { /* 隐私模式 */ }
+  if (alreadyReloadedFor !== serverRevision) {
+    try { sessionStorage.setItem(UI_REVISION_RELOAD_KEY, serverRevision); } catch (_) { /* 隐私模式 */ }
+    window.setTimeout(() => window.location.reload(), 600);
+    throw new Error("工作台页面已更新，正在自动刷新；若页面未刷新请按 Ctrl+F5");
   }
+  throw new Error("工作台页面已有新版本，请按 Ctrl+F5 强制刷新页面后继续操作");
 }
 
 function applyTheme(theme) {
@@ -71,6 +84,7 @@ document.querySelectorAll("[data-dialog-close]").forEach((control) => {
 let state = null;
 let voiceCatalog = { provider: { status: "unknown" }, profiles: [], default_voice: null };
 let musicCatalog = { version: 1, category: "news", tracks: [], errors: [], policy: null, narration_policy: null, narration_defaults: null };
+let transcriptProviders = { providers: {}, default: "none" };
 let musicUploadState = { status: "idle", progress: 0, filename: "", error: "" };
 let uploadedMusicTrackId = "";
 let avatarRoles = null;
@@ -126,6 +140,169 @@ let materialInteractionMergeSelection = new Set();
 let materialInteractionPendingEdits = new Map();
 let materialInteractionSecondPassDrafts = new Map();
 let materialInteractionCandidateFilter = "all";
+// The ranked first-pass list is the panel's main view now: material on the left,
+// score on the right.  The browser only ever *asks* for a ranking view; the
+// ordering rule itself lives in `material_interaction_recommend` so the page and
+// the acceptance script can never disagree about what "第 3 名" means.
+let materialInteractionRankBusy = false;
+let materialInteractionCurrentEventId = "";
+let materialInteractionResumeSeconds = 0;
+// 已导出的交付物（无字幕成片 + 字幕文件），按 plan_id 记着，刷新后重新导出即可。
+const materialInteractionDeliverables = new Map();
+const MATERIAL_INTERACTION_RANK_KEY = "haike.interactionRank";
+const MATERIAL_INTERACTION_DEFAULT_WEIGHTS = {
+  duration: 0.40, foreign_speech: 0.25, high_emotion: 0.20, performance: 0.15,
+};
+const MATERIAL_INTERACTION_FACTOR_LABELS = {
+  duration: "时间长度", foreign_speech: "讲外语", high_emotion: "高情绪", performance: "歌舞/互动",
+};
+const MATERIAL_INTERACTION_ORDER_MODES = [
+  ["duration_desc", "优先时间长（默认）"],
+  ["duration_asc", "优先时间短"],
+  ["score_desc", "优先综合分"],
+  ["emotion_desc", "优先情绪值"],
+  ["source_asc", "按原片时间顺序"],
+];
+
+function loadMaterialInteractionRankPreferences() {
+  const fallback = {
+    order_mode: "duration_desc",
+    weights: { ...MATERIAL_INTERACTION_DEFAULT_WEIGHTS },
+    requirement_only: true,
+    weights_touched: false,
+  };
+  try {
+    const raw = JSON.parse(localStorage.getItem(MATERIAL_INTERACTION_RANK_KEY) || "null");
+    if (!raw || typeof raw !== "object") return fallback;
+    const weights = {};
+    Object.keys(MATERIAL_INTERACTION_DEFAULT_WEIGHTS).forEach((key) => {
+      const value = Number((raw.weights || {})[key]);
+      weights[key] = Number.isFinite(value) && value >= 0 ? value : MATERIAL_INTERACTION_DEFAULT_WEIGHTS[key];
+    });
+    return {
+      order_mode: MATERIAL_INTERACTION_ORDER_MODES.some(([id]) => id === raw.order_mode)
+        ? raw.order_mode : "duration_desc",
+      weights,
+      requirement_only: raw.requirement_only !== false,
+      weights_touched: raw.weights_touched === true,
+    };
+  } catch (_) {
+    return fallback;
+  }
+}
+
+let materialInteractionRankPreferences = loadMaterialInteractionRankPreferences();
+
+function saveMaterialInteractionRankPreferences() {
+  try {
+    localStorage.setItem(MATERIAL_INTERACTION_RANK_KEY, JSON.stringify(materialInteractionRankPreferences));
+  } catch (_) { /* 浏览器禁用本地存储时本次选择仍然生效。 */ }
+}
+
+function materialInteractionWeightQuery() {
+  return Object.keys(MATERIAL_INTERACTION_DEFAULT_WEIGHTS)
+    .map((key) => `${key}:${materialInteractionRankPreferences.weights[key]}`)
+    .join(",");
+}
+
+function materialInteractionOrderLabel(mode) {
+  const hit = MATERIAL_INTERACTION_ORDER_MODES.find(([id]) => id === mode);
+  return hit ? hit[1] : mode;
+}
+
+async function reloadMaterialInteractionRanking(notice) {
+  const data = materialInteractionDetails;
+  if (!data?.asset_id || materialInteractionRankBusy) return;
+  materialInteractionRankBusy = true;
+  try {
+    const query = new URLSearchParams({
+      order_mode: materialInteractionRankPreferences.order_mode,
+      w: materialInteractionWeightQuery(),
+    });
+    materialInteractionDetails = await api(
+      `/assets/${encodeURIComponent(data.asset_id)}/media-index/interactions?${query.toString()}`);
+    materialInteractionPanel = null;
+    if (notice) showToast(notice);
+  } catch (error) {
+    showToast(error.message || "推荐排序更新失败", true);
+  } finally {
+    materialInteractionRankBusy = false;
+    render();
+  }
+}
+
+function materialInteractionAdoptServerWeights(recommendations) {
+  const weights = recommendations?.weights;
+  if (!weights || typeof weights !== "object" || materialInteractionRankPreferences.weights_touched) return;
+  const next = {};
+  Object.keys(MATERIAL_INTERACTION_DEFAULT_WEIGHTS).forEach((key) => {
+    const value = Number(weights[key]);
+    next[key] = Number.isFinite(value) ? value : MATERIAL_INTERACTION_DEFAULT_WEIGHTS[key];
+  });
+  materialInteractionRankPreferences = { ...materialInteractionRankPreferences, weights: next };
+  saveMaterialInteractionRankPreferences();
+}
+
+function materialInteractionReviewEventFor(data, row) {
+  const events = data?.review?.events || [];
+  const direct = events.find((event) => String(event.review_event_id) === String(row.event_id));
+  if (direct) return direct;
+  return events.find((event) => (event.source_event_ids || []).some(
+    (identifier) => String(identifier) === String(row.event_id))) || null;
+}
+
+function materialInteractionScoreBar(value) {
+  const percent = Math.max(0, Math.min(100, Math.round(Number(value || 0) * 100)));
+  return el("span", { class: "interaction-score-bar" },
+    el("span", { class: "interaction-score-track" }, el("i", { style: `width:${percent}%` })),
+    el("em", {}, `${percent}`));
+}
+
+function renderMaterialInteractionWeightPanel() {
+  const inputs = {};
+  const rows = Object.keys(MATERIAL_INTERACTION_FACTOR_LABELS).map((key) => {
+    const input = el("input", { type: "number", min: "0", max: "100", step: "5",
+      value: String(Math.round(materialInteractionRankPreferences.weights[key] * 100)),
+      "aria-label": `${MATERIAL_INTERACTION_FACTOR_LABELS[key]}权重百分比` });
+    inputs[key] = input;
+    return el("label", { class: "interaction-weight-row" },
+      el("span", {}, MATERIAL_INTERACTION_FACTOR_LABELS[key]), input, el("span", { class: "minor" }, "%"));
+  });
+  const apply = (next) => {
+    materialInteractionRankPreferences = {
+      ...materialInteractionRankPreferences,
+      weights: next,
+      weights_touched: true,
+    };
+    saveMaterialInteractionRankPreferences();
+    reloadMaterialInteractionRanking("已按新权重重算推荐排序");
+  };
+  const commit = el("button", { class: "quiet small", onclick: () => {
+    const next = { ...materialInteractionRankPreferences.weights };
+    let total = 0;
+    Object.keys(inputs).forEach((key) => {
+      const value = Number(inputs[key].value);
+      next[key] = Number.isFinite(value) && value >= 0 ? value / 100 : 0;
+      total += next[key];
+    });
+    if (total <= 0) {
+      showToast("权重之和必须大于零", true);
+      return;
+    }
+    apply(next);
+  } }, "应用权重");
+  const reset = el("button", { class: "quiet small", onclick: () => {
+    Object.keys(inputs).forEach((key) => {
+      inputs[key].value = String(Math.round(MATERIAL_INTERACTION_DEFAULT_WEIGHTS[key] * 100));
+    });
+    apply({ ...MATERIAL_INTERACTION_DEFAULT_WEIGHTS });
+  } }, "恢复默认 40/25/20/15");
+  return el("div", { class: "interaction-weight-panel" },
+    el("p", { class: "minor" }, "评分权重（时长 > 老外 > 情绪 > 互动/歌舞）；“同一主体”是选材要求，不计入综合分。"),
+    el("div", { class: "interaction-weight-rows" }, ...rows),
+    el("div", { class: "inline-actions" }, commit, reset));
+}
+
 const materialAnalysisChoices = new Map();
 // New-project local material preparation stays independent from the script
 // form.  File handles live only in the browser until the user explicitly
@@ -3976,16 +4153,19 @@ async function refresh({ force = false } = {}) {
   refreshInFlight = (async () => {
   try {
     const initialLoad = !state;
-    const [response, voicesResponse, musicResponse] = await Promise.all([
+    const [response, voicesResponse, musicResponse, transcriptResponse] = await Promise.all([
       fetch(`/api/project/${encodedProjectId}/workbench`),
       fetch(`/api/project/${encodedProjectId}/workbench/voices`).catch(() => null),
       fetch(`/api/project/${encodedProjectId}/workbench/music`).catch(() => null),
+      fetch(`/api/project/${encodedProjectId}/workbench/transcript-providers`).catch(() => null),
     ]);
     assertCurrentUIRevision(response);
     if (!response.ok) throw new Error("无法读取工作台数据");
     const nextState = await response.json();
     const nextVoiceCatalog = voicesResponse && voicesResponse.ok ? await voicesResponse.json() : voiceCatalog;
     const nextMusicCatalog = musicResponse && musicResponse.ok ? await musicResponse.json() : musicCatalog;
+    const nextTranscriptProviders = transcriptResponse && transcriptResponse.ok
+      ? await transcriptResponse.json() : transcriptProviders;
     const nextStateFingerprint = JSON.stringify(nextState);
     const nextVoiceCatalogFingerprint = JSON.stringify(nextVoiceCatalog);
     const nextMusicCatalogFingerprint = JSON.stringify(nextMusicCatalog);
@@ -4039,6 +4219,7 @@ async function refresh({ force = false } = {}) {
       state = nextState;
       voiceCatalog = nextVoiceCatalog;
       musicCatalog = nextMusicCatalog;
+      transcriptProviders = nextTranscriptProviders;
       stateFingerprint = nextStateFingerprint;
       voiceCatalogFingerprint = nextVoiceCatalogFingerprint;
       musicCatalogFingerprint = nextMusicCatalogFingerprint;
@@ -4788,7 +4969,7 @@ async function startLocalMaterialOverviewBatch(assetIds, profile = "efficient", 
   const detailed = profile === "detailed";
   const workflowLabel = detailed ? "批量精细化内容处理" : "批量高效率内容处理";
   const confirmed = window.confirm(
-    `将按顺序完成 ${assetIds.length} 个本地视频的${workflowLabel}。每个视频会先在本机抽帧、去重并生成联系表，再把联系表发送给当前 AI 视觉服务生成画面概览${detailed ? "；仅对模型标记位置追加最多 12 张原帧复核" : ""}。\n\n不会上传整条视频；${recognizeAudio ? "会提取音轨并发送给豆包取得分句时间线" : "音频识别关闭，不会上传音轨"}；可能产生模型费用。已完成且选项相同的视频不会重复提交。确认开始吗？`,
+    `将按顺序完成 ${assetIds.length} 个本地视频的${workflowLabel}。每个视频会先在本机抽帧、去重并生成联系表，再把联系表发送给当前 AI 视觉服务生成画面概览${detailed ? "；仅对模型标记位置追加最多 12 张原帧复核" : ""}。\n\n不会上传整条视频；${recognizeAudio ? `会提取音轨并发送给${transcriptProviderLabel(defaultTranscriptProvider())}取得分句时间线` : "音频识别关闭，不会上传音轨"}；可能产生模型费用。已完成且选项相同的视频不会重复提交。确认开始吗？`,
   );
   if (!confirmed) return;
   try {
@@ -4826,10 +5007,10 @@ async function startLocalMaterialInteractionBatch(assetIds, profile, recognizeAu
     });
     const budget = preflight.budget || {};
     const models = [...new Set((preflight.items || []).map((item) => item.identity?.model).filter(Boolean))].join("、") || "当前视觉模型";
-    const asr = [...new Set((preflight.items || []).map((item) => item.asr_identity).filter((item) => item && !["disabled", "no_audio"].includes(item)))].join("、") || "豆包语音识别";
+    const asr = [...new Set((preflight.items || []).map((item) => item.asr_identity).filter((item) => item && !["disabled", "no_audio"].includes(item)))].join("、") || "云端语音识别";
     const audioNotice = recognizeAudio
       ? `只发送提取后的音轨给 ${asr}；最多 ${Math.ceil(budget.audio_seconds_max || 0)} 秒语音识别。`
-      : "音频识别已关闭：不会校验豆包配置，也不会上传音轨；候选保留原声，但不压缩内部停顿。";
+      : "音频识别已关闭：不会校验云端语音配置，也不会上传音轨；候选保留原声，但不压缩内部停顿。";
     const confirmed = window.confirm(
       `将分析 ${preflight.asset_count || assetIds.length} 个户外直播视频。只发送联系表和边界原帧给 ${models}。${audioNotice}\n\n最多 ${budget.model_calls_max || 0} 次视觉请求、${budget.detail_frames_max || 0} 张边界原帧。${generateCandidates ? "每个素材最多生成 3 条本地待审候选预览。" : "仅生成互动目录。"}任务严格串行，可能消耗额度；不会自动批准、采用或发布。一次确认后自动完成，确认开始吗？`,
     );
@@ -4841,7 +5022,7 @@ async function startLocalMaterialInteractionBatch(assetIds, profile, recognizeAu
         profile,
         recognize_audio: Boolean(recognizeAudio),
         generate_candidates: Boolean(generateCandidates),
-        transcript_provider: recognizeAudio ? "doubao" : "none",
+        transcript_provider: recognizeAudio ? String(preflight.transcript_provider || "none") : "none",
         remote_vision_confirmed: true,
         remote_asr_confirmed: Boolean(recognizeAudio && Number(budget.audio_seconds_max || 0) > 0),
         preflight_signature: preflight.signature,
@@ -4933,11 +5114,11 @@ function renderLocalMaterialPreparationCard() {
       el("div", { class: "local-material-analysis-options" },
         el("label", { class: "local-material-option" },
           (() => {
-            const input = el("input", { type: "checkbox", checked: localMaterialRecognizeAudio ? "" : null, "aria-label": "识别音频（豆包语音转文字）" });
+            const input = el("input", { type: "checkbox", checked: localMaterialRecognizeAudio ? "" : null, "aria-label": "识别音频（云端语音转文字）" });
             input.addEventListener("change", () => { localMaterialRecognizeAudio = input.checked; render(); });
             return input;
           })(),
-          el("span", {}, "识别音频（豆包语音转文字）"),
+          el("span", {}, "识别音频（云端语音转文字）"),
           el("small", {}, "适用于对白、访谈、解说；关闭时不上传音轨，候选仍保留原声。"),
         ),
         localMaterialAnalysisScene === "outdoor_interaction" ? el("label", { class: "local-material-option" },
@@ -4967,8 +5148,8 @@ function renderLocalMaterialPreparationCard() {
         ? `有 ${failed.length} 个视频未完成，其中 ${ambiguousCount} 个请求受理状态待核对；系统没有自动重投，请到素材库处理。`
         : `有 ${failed.length} 个视频明确失败，可在素材库查看原因并单独重试。`) : null,
       el("p", { class: "form-note" }, localMaterialAnalysisScene === "outdoor_interaction"
-        ? `户外直播互动会在一次确认中冻结视觉模型${localMaterialRecognizeAudio ? "、豆包音频服务" : "（音频识别关闭）"}和总预算；${localMaterialGenerateCandidates ? "完成后生成可播放、可恢复删减的待审片段" : "仅生成可调整的互动时间目录"}，不会自动采用或发布。`
-        : "通用画面概览只需一次费用确认：本地联系表与模型概览在同一任务中完成；默认不会转写原声音频，勾选后才会在同一次任务中调用豆包，也不会自动采用到成片。"),
+        ? `户外直播互动会在一次确认中冻结视觉模型${localMaterialRecognizeAudio ? "、云端音频服务" : "（音频识别关闭）"}和总预算；${localMaterialGenerateCandidates ? "完成后生成可播放、可恢复删减的待审片段" : "仅生成可调整的互动时间目录"}，不会自动采用或发布。`
+        : "通用画面概览只需一次费用确认：本地联系表与模型概览在同一任务中完成；默认不会转写原声音频，勾选后才会在同一次任务中调用云端语音识别，也不会自动采用到成片。"),
     ),
   );
 }
@@ -7261,9 +7442,25 @@ async function restoreAssetFromRecycleBin(assetId) {
   render();
 }
 
+function transcriptProviderLabel(providerId) {
+  const id = String(providerId || "").trim().toLowerCase();
+  if (!id || id === "none") return "不识别";
+  const entry = ((transcriptProviders || {}).providers || {})[id];
+  return (entry && entry.label) || id;
+}
+
+function defaultTranscriptProvider() {
+  return String(((transcriptProviders || {}).default) || "none");
+}
+
+function isCloudTranscriptProvider(providerId) {
+  const id = String(providerId || "").trim().toLowerCase();
+  return id === "doubao" || id === "tencent";
+}
+
 async function startAssetMediaCoarseIndex(asset, transcriptProvider = "none") {
   const transcribe = transcriptProvider !== "none";
-  const isDoubao = transcriptProvider === "doubao";
+  const isCloud = isCloudTranscriptProvider(transcriptProvider);
   try {
     state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/jobs`, {
       method: "POST",
@@ -7271,11 +7468,11 @@ async function startAssetMediaCoarseIndex(asset, transcriptProvider = "none") {
         stage: "coarse",
         transcribe,
         transcript_provider: transcriptProvider,
-        remote_asr_confirmed: isDoubao,
+        remote_asr_confirmed: isCloud,
       },
     });
-    showToast(isDoubao
-      ? "素材粗筛与豆包极速语音识别已开始；只上传提取后的音轨，结果不明时不会自动重提"
+    showToast(isCloud
+      ? `素材粗筛与${transcriptProviderLabel(transcriptProvider)}语音识别已开始；只上传提取后的音轨，结果不明时不会自动重提`
       : transcribe
         ? "素材粗筛与本地语音识别已开始；长视频会在后台持续处理"
         : "素材粗筛已开始；只运行本地镜头检测与代表帧提取");
@@ -7285,12 +7482,23 @@ async function startAssetMediaCoarseIndex(asset, transcriptProvider = "none") {
   render();
 }
 
-async function startAssetDoubaoTranscript(asset) {
+function transcriptProviderDetail(providerId) {
+  const id = String(providerId || "").trim().toLowerCase();
+  const entry = ((transcriptProviders || {}).providers || {})[id];
+  return (entry && entry.detail) || "";
+}
+
+async function startAssetCloudTranscript(asset, providerId) {
+  const provider = String(providerId || defaultTranscriptProvider()).trim().toLowerCase();
+  if (!isCloudTranscriptProvider(provider)) {
+    return showToast("当前没有已配置的云端语音识别服务，请先在配音中心配置腾讯云密钥", true);
+  }
+  const detail = transcriptProviderDetail(provider);
   const confirmed = window.confirm(
-    "将从该项目视频提取 16 kHz 单声道 MP3，并以 Base64 直接发送给豆包录音文件识别 1.0 极速版（volc.bigasr.auc_turbo）。不会上传视频画面。\n\n会消耗云端音频时长额度；不会静默改用本地 Whisper。若提交连接中断，系统不会自动重复提交。确认开始吗？",
+    `将从该项目视频提取 16 kHz 单声道 MP3，并以 Base64 直接发送给${transcriptProviderLabel(provider)}。不会上传视频画面。\n\n${detail ? `${detail}\n` : ""}会消耗云端音频时长额度；不会静默改用本地 Whisper。若提交连接中断，系统不会自动重复提交。确认开始吗？`,
   );
   if (!confirmed) return;
-  await startAssetMediaCoarseIndex(asset, "doubao");
+  await startAssetMediaCoarseIndex(asset, provider);
 }
 
 async function startAssetMediaFineIndex(asset) {
@@ -7303,16 +7511,16 @@ async function startAssetMediaFineIndex(asset) {
   const end = Number(endRaw);
   if (!Number.isFinite(start) || !Number.isFinite(end) || end - start < .4) return showToast("精筛区间无效，结束时间至少比开始时间晚 0.4 秒", true);
   const choice = window.prompt(
-    "本次精筛是否识别人声？输入 local（本地 Whisper）、doubao（豆包 ASR）或 none（不识别）。",
+    "本次精筛是否识别人声？输入 local（本地 Whisper）、tencent（腾讯云 ASR）、doubao（豆包 ASR）或 none（不识别）。",
     "none",
   );
   if (choice === null) return;
   const transcriptProvider = String(choice).trim().toLowerCase();
-  if (!["none", "local", "doubao"].includes(transcriptProvider)) {
-    return showToast("请输入 local、doubao 或 none", true);
+  if (!["none", "local", "doubao", "tencent"].includes(transcriptProvider)) {
+    return showToast("请输入 local、tencent、doubao 或 none", true);
   }
-  if (transcriptProvider === "doubao" && !window.confirm(
-    "豆包 ASR 会提取候选区间的 16 kHz 单声道 MP3，并直传录音文件识别 1.0 极速版；不会上传视频画面。会消耗音频时长额度，且不会自动降级或重复提交。确认继续吗？",
+  if (isCloudTranscriptProvider(transcriptProvider) && !window.confirm(
+    `${transcriptProviderLabel(transcriptProvider)}会提取候选区间的 16 kHz 单声道 MP3 并直传云端；不会上传视频画面。会消耗音频时长额度，且不会自动降级或重复提交。确认继续吗？`,
   )) return;
   try {
     state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/jobs`, {
@@ -7323,7 +7531,7 @@ async function startAssetMediaFineIndex(asset) {
         end_seconds: end,
         transcribe: transcriptProvider !== "none",
         transcript_provider: transcriptProvider,
-        remote_asr_confirmed: transcriptProvider === "doubao",
+        remote_asr_confirmed: isCloudTranscriptProvider(transcriptProvider),
       },
     });
     showToast("候选区间精筛已开始");
@@ -7399,14 +7607,14 @@ function materialAnalysisControls(asset, disabled) {
         const budget = preflight.budget;
         const audioCopy = audio.checked && preflight.effective_recognize_audio
           ? `音轨使用 ${preflight.asr_identity}，最多约${Math.ceil(budget.audio_seconds_max)}秒语音识别。`
-          : audio.checked ? "原片没有音轨，本次会自动跳过豆包。" : "音频识别关闭，不会上传音轨；候选仍保留原声。";
+          : audio.checked ? "原片没有音轨，本次会自动跳过语音识别。" : "音频识别关闭，不会上传音轨；候选仍保留原声。";
         if (!window.confirm(`户外直播互动分析：将联系表和最多${budget.detail_frames_max}张边界帧发送给 ${preflight.identity.model}；${audioCopy}\n最多${budget.model_calls_max}次视觉请求，可能消耗额度。${candidates.checked ? "完成后最多生成3条本地待审片段。" : "本次仅建立互动目录。"}\n一次确认后自动完成；不会自动批准、采用或发布。确认开始吗？`)) return;
         materialInteractionDetails = null;
         materialInteractionPanel = null;
         state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/jobs`, { method: "POST", body: {
           stage: "interaction", profile: depth.value,
           recognize_audio: audio.checked, generate_candidates: candidates.checked,
-          transcript_provider: preflight.effective_recognize_audio ? "doubao" : "none",
+          transcript_provider: preflight.effective_recognize_audio ? preflight.transcript_provider : "none",
           remote_vision_confirmed: true, remote_asr_confirmed: Boolean(preflight.effective_recognize_audio),
           preflight_signature: preflight.signature,
         } });
@@ -7438,7 +7646,7 @@ async function resolveAmbiguousMaterialInteraction(asset) {
     const preflight = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/interaction-preflight?profile=${encodeURIComponent(profile)}&recognize_audio=${recognizeAudio ? "true" : "false"}`);
     const budget = preflight.budget || {};
     const confirmed = window.confirm(
-      `只有在你已经查看供应商或中转站记录，并确认上一次请求“没有受理、没有生成、不会计费”时才能继续。\n\n重新提交仍可能产生费用：${preflight.identity?.model || "当前视觉模型"} 最多 ${budget.model_calls_max || 0} 次视觉请求${preflight.effective_recognize_audio ? `，${preflight.asr_identity || "豆包语音识别"} 最多约 ${Math.ceil(budget.audio_seconds_max || 0)} 秒` : "；本次音频识别关闭"}。已完成的 ASR、抽帧和联系表会复用。\n\n我已核实上次请求未受理，重新确认并续跑吗？`,
+      `只有在你已经查看供应商或中转站记录，并确认上一次请求“没有受理、没有生成、不会计费”时才能继续。\n\n重新提交仍可能产生费用：${preflight.identity?.model || "当前视觉模型"} 最多 ${budget.model_calls_max || 0} 次视觉请求${preflight.effective_recognize_audio ? `，${preflight.asr_identity || "云端语音识别"} 最多约 ${Math.ceil(budget.audio_seconds_max || 0)} 秒` : "；本次音频识别关闭"}。已完成的 ASR、抽帧和联系表会复用。\n\n我已核实上次请求未受理，重新确认并续跑吗？`,
     );
     if (!confirmed) return;
     state = await api(`/assets/${encodeURIComponent(asset.id)}/media-index/interactions/resolve-ambiguous`, {
@@ -7673,66 +7881,330 @@ async function updateMaterialInteractionSecondPass(candidate, action) {
   }
 }
 
+async function exportMaterialInteractionSecondPass(candidate) {
+  const data = materialInteractionDetails;
+  if (!data?.asset_id || !candidate?.plan_id) return;
+  const wantXml = window.confirm(
+    "导出剪辑决策（JSON cut-list-v1 清单）。\n\n确定 = 同时导出 FCP7 XML（供 Premiere / 达芬奇导入）；取消 = 只导出 JSON 清单。");
+  const useOriginal = window.confirm(
+    "媒体引用方式：\n\n确定 = 引用原片（HEVC / TS 可能无法直接导入）；取消 = 引用审核代理（推荐）。");
+  if (!window.confirm("导出只读取已冻结的剪辑计划：不发起付费调用、不修改计划。\n\n导出会生成新文件（按内容哈希命名），不会覆盖既有产物；除生成时间字段外，内容一致。\n\n确认导出吗？")) return;
+  const formats = wantXml ? ["json", "fcp7_xml"] : ["json"];
+  try {
+    const result = await api(`/assets/${encodeURIComponent(data.asset_id)}/media-index/interactions/second-pass/${encodeURIComponent(candidate.plan_id)}/export`, {
+      method: "POST",
+      body: {
+        formats,
+        media_reference: useOriginal ? "original" : "review_proxy",
+        include_srt: wantXml,
+        confirmed: true,
+      },
+    });
+    const names = (result.files || []).map((row) => `${row.format}: ${String(row.path).split(/[\\/]/).pop()}`).join("、");
+    const frameRateNote = (result.degradations || [])
+      .map((row) => String(row))
+      .find((row) => row.startsWith("fcp7_timebase_rounded:"));
+    const extra = frameRateNote ? `（注意：${frameRateNote.split(":").slice(1).join(":")}）` : "";
+    showToast(`导出完成（${(result.files || []).length} 个文件）：${names}。${result.notice || ""}${extra}`);
+  } catch (error) {
+    showToast(error.message || "导出失败", true);
+  }
+}
+
+function materialInteractionClipSource(data, row, event) {
+  // 「左素材」指的是**这条排名对应的切片**，不是原片：原素材不参与排名，也不该占排名左侧。
+  // 已经出过首次完整切片的条目直接播那份切片；还没出片就播原片里的对应区间
+  // （媒体片段 `#t=start,end`，媒体路由支持 Range 206，浏览器按需取流）。
+  const reviewEventId = event?.review_event_id || "";
+  const candidate = (data.candidates || []).find((item) => item.is_active === true
+    && String(item.event_id) === String(reviewEventId) && (item.preview || {}).path);
+  if (candidate) {
+    return {
+      src: mediaURL(projectId, candidate.preview.path),
+      kind: "cut",
+      label: `对应切片 · 完整切片 ${candidate.plan_id}`,
+      detail: `${Number(candidate.source_duration || 0).toFixed(1)} 秒 → ${Number(candidate.output_duration || 0).toFixed(1)} 秒`,
+    };
+  }
+  const base = mediaURL(projectId, data.playback_video_path || data.source_video_path);
+  const start = Number(row.start) || 0;
+  const end = Number(row.end) || start;
+  return {
+    src: `${base}#t=${start.toFixed(3)},${end.toFixed(3)}`,
+    kind: "range",
+    label: "对应切片 · 原片区间（尚未生成完整切片）",
+    detail: `${start.toFixed(2)}—${end.toFixed(2)} 秒 · ${(end - start).toFixed(1)} 秒`,
+  };
+}
+
+async function exportMaterialInteractionSecondPassDeliverables(candidate) {
+  const data = materialInteractionDetails;
+  if (!data?.asset_id || !candidate?.plan_id) return;
+  if (!window.confirm(
+    "导出交付物：**无字幕成片** + **字幕文件（SRT，输出时间轴）**。\n\n" +
+    "会在本机重渲染一次（本地计算，不花钱、不调用任何模型），生成的文件放在该项目目录里，" +
+    "不会覆盖你已经审看过的那份带字幕预览；计划文件只读。\n\n确认导出吗？")) return;
+  try {
+    const result = await api(
+      `/assets/${encodeURIComponent(data.asset_id)}/media-index/interactions/second-pass/${encodeURIComponent(candidate.plan_id)}/deliverables`,
+      { method: "POST", body: {} });
+    materialInteractionDeliverables.set(candidate.plan_id, result);
+    materialInteractionPanel = null;
+    render();
+    showToast(`已导出：无字幕成片 ${Number(result.video_seconds || 0).toFixed(1)} 秒 + 字幕 ${result.cue_count} 句`);
+  } catch (error) {
+    showToast(error.message || "交付物导出失败", true);
+  }
+}
+
+function renderMaterialInteractionDeliverables(candidate) {
+  const result = materialInteractionDeliverables.get(candidate.plan_id);
+  if (!result) return null;
+  const download = (path, name, label) => el("a", {
+    class: "button quiet small", href: mediaURL(projectId, path), download: name,
+  }, label);
+  return el("div", { class: "interaction-deliverables" },
+    el("span", { class: "minor" },
+      `交付物已就绪：无字幕成片 ${Number(result.video_seconds || 0).toFixed(1)} 秒 · 字幕 ${result.cue_count} 句`),
+    download(result.video_path, `${candidate.plan_id}-无字幕.mp4`, "下载无字幕成片"),
+    download(result.srt_path, `${candidate.plan_id}.srt`, "下载字幕文件"));
+}
+
+function renderMaterialInteractionRankLayout(data, review, player, playbackNotice, seek, labels, audioLabels, statusLabels,
+                                             candidateCardsByEvent, secondPassCardsByParent, rerender) {
+  // ---- 原片回看：可折叠，且**不参与排名**（用户明确要求原素材不要放在排名左边）----
+  const diagnostics = [
+    el("p", { class: "minor" }, data.proxy?.status === "completed" ? "当前播放浏览器审核代理；原片未被修改。" : data.proxy?.status === "source_compatible" ? "原片编码已兼容浏览器，无需额外转码。" : `当前回退播放原片。${data.proxy?.error || "尚无审核代理。"}`),
+    el("p", { class: "minor" }, data.notice),
+    el("p", { class: "minor" }, `模型：${data.identity?.model || "未记录"} · 视觉请求${data.usage?.model_calls ?? 0}次 · 联系表${data.usage?.contact_sheets ?? 0}张 · 边界补证${data.usage?.detail_frames ?? 0}帧 · 初次处理${Math.round(data.usage?.elapsed_seconds || 0)}秒（不是费用账单）`),
+  ];
+  const evidenceRecord = data.material_evidence || {};
+  if (evidenceRecord.status !== "absent") {
+    const names = { audio_envelope: "音频包络", motion: "运动", speech_activity: "语音", transcript: "转写" };
+    const sections = evidenceRecord.sections || {};
+    const parts = Object.keys(names).filter((key) => sections[key]).map((key) =>
+      `${names[key]} ${sections[key] === "available" ? "✓" : "✕"}`);
+    diagnostics.push(el("p", { class: `minor${evidenceRecord.status !== "available" ? " warning" : ""}` },
+      `素材证据：${parts.join(" / ") || "未构建"}${evidenceRecord.built_seconds ? `（耗时 ${evidenceRecord.built_seconds}s）` : ""}`
+      + `${(evidenceRecord.degradations || []).length ? ` · ${evidenceRecord.degradations[0]}` : ""}`));
+  }
+  (data.analysis_warnings || []).forEach((warning) =>
+    diagnostics.push(el("p", { class: "minor warning" }, `${warning.window_id || "分析窗口"}：${warning.reason}`)));
+  if ((data.second_pass_preflight?.degraded || []).length) {
+    diagnostics.push(el("div", { class: "interaction-dependency-check" },
+      el("strong", {}, "出片链路依赖自检未通过"),
+      ...(data.second_pass_preflight.checks || []).filter((check) => !check.ok).map((check) =>
+        el("p", { class: "minor warning" }, `${check.label}：${check.remediation}`))));
+  }
+  const sourceReview = el("details", { class: "interaction-source-review" },
+    el("summary", {}, "原片回看（与排名无关，仅用于核对边界）"),
+    el("div", { class: "interaction-source-body" }, player, playbackNotice, ...diagnostics));
+
+  // ---- 排名工具条 -----------------------------------------------------------
+  const recommendations = data.recommendations || {};
+  const rows = (recommendations.events || []).filter((row) =>
+    !materialInteractionRankPreferences.requirement_only || row.requirement?.ok !== false);
+  const orderSelect = el("select", { "aria-label": "推荐排序方式" },
+    ...MATERIAL_INTERACTION_ORDER_MODES.map(([value, label]) =>
+      el("option", { value, selected: materialInteractionRankPreferences.order_mode === value ? "" : null }, label)));
+  orderSelect.addEventListener("change", () => {
+    materialInteractionRankPreferences = { ...materialInteractionRankPreferences, order_mode: orderSelect.value };
+    saveMaterialInteractionRankPreferences();
+    reloadMaterialInteractionRanking(`已切换排序：${materialInteractionOrderLabel(orderSelect.value)}`);
+  });
+  const requirementOnly = el("input", { type: "checkbox",
+    checked: materialInteractionRankPreferences.requirement_only ? "" : null,
+    "aria-label": "只看满足选材要求的素材" });
+  requirementOnly.addEventListener("change", () => {
+    materialInteractionRankPreferences = {
+      ...materialInteractionRankPreferences, requirement_only: requirementOnly.checked,
+    };
+    saveMaterialInteractionRankPreferences();
+    materialInteractionPanel = null;
+    render();
+  });
+  // 切片详情的状态筛选跟着排名一起放：候选卡片现在嵌在各自的排名行里，
+  // 不再单独占一整块（用户要求"二次精剪不应该分开的"）。
+  const candidateFilterSelect = el("select", { "aria-label": "筛选切片详情" },
+    el("option", { value: "all", selected: materialInteractionCandidateFilter === "all" ? "" : null }, "全部切片"),
+    el("option", { value: "review", selected: materialInteractionCandidateFilter === "review" ? "" : null }, "待人工确认"),
+    el("option", { value: "partial", selected: materialInteractionCandidateFilter === "partial" ? "" : null }, "需回看"),
+    el("option", { value: "approved", selected: materialInteractionCandidateFilter === "approved" ? "" : null }, "已入库"),
+    el("option", { value: "rejected", selected: materialInteractionCandidateFilter === "rejected" ? "" : null }, "已弃用"),
+    el("option", { value: "history", selected: materialInteractionCandidateFilter === "history" ? "" : null }, "历史版本"));
+  candidateFilterSelect.addEventListener("change", () => {
+    materialInteractionCandidateFilter = candidateFilterSelect.value;
+    rerender();
+  });
+  const toolbar = el("div", { class: "interaction-rank-toolbar" },
+    el("label", {}, "排序方式", orderSelect),
+    el("label", { class: "interaction-rank-filter" }, requirementOnly, "只看满足选材要求"),
+    el("label", {}, "切片详情", candidateFilterSelect),
+    el("span", { class: "minor" },
+      `${rows.length}/${(recommendations.events || []).length} 条 · 当前 ${materialInteractionOrderLabel(recommendations.order_mode)}`),
+    el("details", { class: "interaction-weight-wrap" },
+      el("summary", {}, "评分权重"), renderMaterialInteractionWeightPanel()));
+  const notes = recommendations.error
+    ? el("p", { class: "minor warning" }, `推荐排序不可用：${recommendations.error}`)
+    : (recommendations.notes || []).length
+      ? el("p", { class: "minor" }, recommendations.notes.join("；"))
+      : null;
+
+  // ---- 排名卡片：**左＝该条素材的切片，右＝该条素材的评分**，按排名从上到下 ----
+  const cards = rows.map((row) => {
+    const event = materialInteractionReviewEventFor(data, row);
+    const clip = materialInteractionClipSource(data, row, event);
+    const clipPlayer = el("video", { controls: "", preload: "metadata", src: clip.src,
+      class: "interaction-clip-player", "aria-label": `${row.event_id} 对应切片` });
+    const speechEvidence = event ? (data.audio?.utterances || [])
+      .filter((utterance) => Number(utterance.end) > Number(event.start) && Number(utterance.start) < Number(event.end))
+      .map((utterance) => el("p", { class: "minor" }, `${Number(utterance.start).toFixed(1)}秒 · ${utterance.text}`)) : [];
+    const highlightActions = event ? (event.highlights || []).map((highlight) =>
+      button(`${highlight.label} · ${Number(highlight.time).toFixed(1)}秒`, "quiet small", () => seek(highlight.time))) : [];
+    const actionRow = event ? (() => {
+      const startInput = el("input", { type: "number", min: "0", max: String(data.duration), step: "0.01", value: Number(event.start).toFixed(2), "aria-label": `${event.review_event_id} 开始秒数` });
+      const endInput = el("input", { type: "number", min: "0.4", max: String(data.duration), step: "0.01", value: Number(event.end).toFixed(2), "aria-label": `${event.review_event_id} 结束秒数` });
+      const checkbox = el("input", { type: "checkbox", checked: materialInteractionMergeSelection.has(event.review_event_id) ? "" : null, "aria-label": `选择 ${event.review_event_id} 合并` });
+      checkbox.addEventListener("change", () => {
+        if (checkbox.checked) materialInteractionMergeSelection.add(event.review_event_id);
+        else materialInteractionMergeSelection.delete(event.review_event_id);
+      });
+      const targetGap = el("select", { "aria-label": `${event.review_event_id} 目标停顿` },
+        el("option", { value: ".3" }, "普通等待保留 0.3 秒"),
+        el("option", { value: ".5" }, "自然等待保留 0.5 秒"),
+        el("option", { value: ".8" }, "保守等待保留 0.8 秒"));
+      return el("div", { class: "interaction-rank-actions" },
+        el("div", { class: "interaction-range-editor" },
+          el("label", {}, "开始（秒）", startInput), el("label", {}, "结束（秒）", endInput),
+          button("保存边界", "quiet small", () => updateMaterialInteractionReview("set_range", { event_id: event.review_event_id, start: startInput.value, end: endInput.value }))),
+        el("div", { class: "inline-actions" },
+          el("label", { class: "interaction-merge-choice" }, checkbox, "加入合并"),
+          button("保留", event.status === "kept" ? "primary small" : "quiet small", () => updateMaterialInteractionReview("set_status", { event_id: event.review_event_id, status: "kept" })),
+          button("弃用", event.status === "discarded" ? "danger small" : "quiet small", () => updateMaterialInteractionReview("set_status", { event_id: event.review_event_id, status: "discarded" })),
+          button("恢复待审核", "quiet small", () => updateMaterialInteractionReview("set_status", { event_id: event.review_event_id, status: "pending" })),
+          button("原片回看开始", "quiet small", () => seek(event.start)),
+          button("原片回看结束", "quiet small", () => seek(Math.max(event.start, event.end - 3))),
+          // 拆分点取**本条切片**的当前播放位置（原片时间 = 切片内的偏移 + 目录起点）。
+          button("在播放点拆分", "quiet small", () => updateMaterialInteractionReview("split", {
+            event_id: event.review_event_id,
+            split_seconds: Number(event.start) + (clipPlayer.currentTime || 0),
+          })),
+          targetGap,
+          button("生成自然精剪", "primary small", () => generateMaterialInteractionCandidate(event, targetGap.value), event.status === "discarded"),
+          ...highlightActions));
+    })() : el("p", { class: "minor warning" }, "该素材没有对应的人工审核条目，只能回看原片。");
+
+    // 这一条自己的两层详情：第一次完整切片的操作 + 二次精剪候选。二次精剪不再单独
+    // 占页面最下面一整块（用户要求"二次精剪不应该分开的"），而是挂在对应素材下面。
+    const reviewEventId = event ? String(event.review_event_id) : "";
+    const candidateNode = reviewEventId ? candidateCardsByEvent.get(reviewEventId) : null;
+    const parentPlanId = String(((data.candidates || []).find((item) =>
+      String(item.event_id) === reviewEventId) || {}).plan_id || "");
+    const secondPassNodes = parentPlanId ? (secondPassCardsByParent.get(parentPlanId) || []) : [];
+    // 一个素材会有多版方案（每次改算法/改选项都会留一版）。默认只铺**最新**那一版，
+    // 更早的收进「更早的方案」——否则一个素材下面挂四张卡片，又变成用户抱怨的那种混乱。
+    const newestSecondPass = secondPassNodes.length
+      ? secondPassNodes.map((item, index) => ({ item, index, at: String(item.dataset.updatedAt || "") }))
+        .sort((left, right) => (left.at === right.at ? left.index - right.index : (left.at < right.at ? 1 : -1)))
+      : [];
+    const candidateDetail = candidateNode
+      ? el("details", { class: "interaction-row-detail" },
+          el("summary", {}, `第一次完整切片：详情与操作${parentPlanId ? ` · ${parentPlanId}` : ""}`),
+          candidateNode)
+      : null;
+    const secondPassDetail = el("details", { class: "interaction-row-detail" },
+      el("summary", {}, secondPassNodes.length
+        ? `二次精剪（${secondPassNodes.length} 条，点击展开）`
+        : "二次精剪（尚未生成）"),
+      ...(newestSecondPass.length
+        ? [newestSecondPass[0].item,
+           newestSecondPass.length > 1
+             ? el("details", { class: "interaction-row-detail" },
+                 el("summary", {}, `更早的方案（${newestSecondPass.length - 1} 条，点击展开）`),
+                 ...newestSecondPass.slice(1).map((entry) => entry.item))
+             : null]
+        : [el("p", { class: "minor" },
+            "还没有二次精剪方案：先用上面的「生成自然精剪」出第一次完整切片，再在它的详情里点「二次剪辑（人工触发）」。")]));
+
+    return el("article", { class: `interaction-rank-card ${event ? `review-${event.status}` : "is-orphan"}${String(row.event_id) === String(materialInteractionCurrentEventId) ? " is-selected" : ""}` },
+      el("div", { class: "interaction-rank-card-head" },
+        el("span", { class: "interaction-rank-badge" }, `第 ${row.rank} 名`),
+        el("div", { class: "interaction-rank-identity" },
+          el("strong", {}, `素材编号 ${row.event_id}`),
+          el("span", { class: "minor" },
+            `${Number(row.start).toFixed(2)}—${Number(row.end).toFixed(2)} 秒 · 时长 ${Number(row.duration_seconds).toFixed(1)} 秒`
+            + ` · 分组 ${row.group_id || "未分组"}`
+            + (event ? ` · ${statusLabels[event.status] || "待审核"} · ${labels[event.completeness] || "待确认"} · ${event.review_event_id}` : ""))),
+        el("div", { class: "interaction-rank-total" },
+          el("strong", {}, `综合 ${Math.round(Number(row.recommendation_score) * 100)} 分`),
+          el("span", { class: "minor" }, `原评分 ${Math.round(Number(row.baseline_score) * 100)}`))),
+      el("div", { class: "interaction-rank-card-body" },
+        el("div", { class: "interaction-rank-clip" },
+          clipPlayer,
+          el("p", { class: clip.kind === "cut" ? "interaction-clip-badge is-cut" : "interaction-clip-badge" }, clip.label),
+          el("p", { class: "minor" }, clip.detail),
+          el("div", { class: "inline-actions" },
+            button("播放本段", "primary small", () => { materialInteractionCurrentEventId = String(row.event_id); clipPlayer.play().catch(() => {}); }),
+            button("暂停", "quiet small", () => clipPlayer.pause()))),
+        el("div", { class: "interaction-rank-scores" },
+          el("div", { class: "interaction-score-list" },
+            ...Object.keys(MATERIAL_INTERACTION_FACTOR_LABELS).map((key) =>
+              el("div", { class: "interaction-score-row" },
+                el("span", { class: "interaction-score-name" }, MATERIAL_INTERACTION_FACTOR_LABELS[key]),
+                materialInteractionScoreBar(row.factors?.[key])))),
+          el("p", { class: row.requirement?.ok ? "interaction-requirement is-ok" : "interaction-requirement is-unmet" },
+            `选材要求 · 同一主体 ${row.requirement?.ok ? "✓ 满足" : "✗ 未满足"}`),
+          el("p", { class: "minor" }, row.requirement_reason || ""),
+          el("p", { class: "minor" }, event ? `${event.participants}` : (row.summary || "")),
+          el("p", { class: "minor" }, row.summary || "（无摘要）"),
+          event?.boundary_reason ? el("p", { class: "minor" }, `边界依据：${event.boundary_reason}`) : null,
+          event?.unknowns?.length ? el("p", { class: "minor warning" }, `待核验：${event.unknowns.join("；")}`) : null,
+          el("ul", { class: "interaction-recommendation-reasons" },
+            ...(row.reasons || []).map((text) => el("li", { class: "minor" }, text))),
+          event ? el("details", {}, el("summary", {}, "查看对白证据"), ...speechEvidence) : null)),
+      actionRow,
+      candidateDetail,
+      secondPassDetail);
+  });
+
+  return el("div", { class: "panel-body interaction-rank-layout" },
+    el("div", { class: "interaction-rank-head" },
+      el("h5", { class: "interaction-column-title" }, "素材排名：左＝对应切片，右＝对应评分"),
+      el("span", { class: "minor" }, review ? `待审核 ${review.counts.pending} · 保留 ${review.counts.kept} · 弃用 ${review.counts.discarded} · 版本 ${review.revision}` : "")),
+    sourceReview,
+    toolbar,
+    notes,
+    review ? el("div", { class: "inline-actions" },
+      button("合并所选同组事件", "quiet small", () => updateMaterialInteractionReview("merge", { event_ids: [...materialInteractionMergeSelection] })),
+      button("撤销上一步", "quiet small", () => updateMaterialInteractionReview("undo"), !review.can_undo)) : null,
+    ...(cards.length ? cards : [el("p", {}, "没有满足当前筛选条件的互动素材。")]));
+}
+
 function renderMaterialInteractions() {
-  if (!materialInteractionDetails) return null;
   // Reuse media state across ordinary result renders.
   if (materialInteractionPanel) return materialInteractionPanel;
+  if (!materialInteractionDetails) return null;
   const data = materialInteractionDetails;
   const review = data.review;
+  // The first response carries the shipped weights; adopt them unless the user
+  // has already set their own, so the page never invents a different default.
+  materialInteractionAdoptServerWeights(data.recommendations);
   const player = el("video", { controls: "", preload: "metadata", src: mediaURL(projectId, data.playback_video_path || data.source_video_path), "aria-label": "互动原片回看" });
   const playbackNotice = el("p", { class: "minor warning", hidden: "" }, "浏览器审核代理和原片均无法播放；请用本地播放器回看。候选时间仍保留，勿将播放失败视为无可用素材。");
   player.addEventListener("error", () => { playbackNotice.hidden = false; });
-  let targetTime = 0;
+  // Remember where the reviewer last pointed the player: re-ranking the list
+  // rebuilds this element, and losing the position on every weight tweak would
+  // make the left half of the page useless.
+  let targetTime = materialInteractionResumeSeconds;
   const seek = (seconds) => {
     targetTime = Math.max(0, Math.min(Number(seconds) || 0, Number(data.duration) - .05));
+    materialInteractionResumeSeconds = targetTime;
     if (player.readyState >= 1) player.currentTime = targetTime;
   };
   player.addEventListener("loadedmetadata", () => seek(targetTime));
   const labels = { complete: "过程完整", start_missing: "缺开头", end_missing: "缺结尾", both_missing: "缺头缺尾", uncertain: "边界待确认" };
   const audioLabels = { available: "已取得分句转写", no_audio: "原片无音轨", no_speech: "未识别到有效语句", skipped: "按选择未识别音频" };
   const statusLabels = { pending: "待审核", kept: "已保留", discarded: "已弃用" };
-  const events = (review?.events || []).map((event) => {
-    const speechEvidence = (data.audio?.utterances || [])
-      .filter((utterance) => Number(utterance.end) > Number(event.start) && Number(utterance.start) < Number(event.end))
-      .map((utterance) => el("p", { class: "minor" }, `${Number(utterance.start).toFixed(1)}秒 · ${utterance.text}`));
-    const highlightActions = (event.highlights || []).map((highlight) =>
-      button(`${highlight.label} · ${Number(highlight.time).toFixed(1)}秒`, "quiet small", () => seek(highlight.time)));
-    const startInput = el("input", { type: "number", min: "0", max: String(data.duration), step: "0.01", value: Number(event.start).toFixed(2), "aria-label": `${event.review_event_id} 开始秒数` });
-    const endInput = el("input", { type: "number", min: "0.4", max: String(data.duration), step: "0.01", value: Number(event.end).toFixed(2), "aria-label": `${event.review_event_id} 结束秒数` });
-    const checkbox = el("input", { type: "checkbox", checked: materialInteractionMergeSelection.has(event.review_event_id) ? "" : null, "aria-label": `选择 ${event.review_event_id} 合并` });
-    checkbox.addEventListener("change", () => {
-      if (checkbox.checked) materialInteractionMergeSelection.add(event.review_event_id);
-      else materialInteractionMergeSelection.delete(event.review_event_id);
-    });
-    const targetGap = el("select", { "aria-label": `${event.review_event_id} 目标停顿` },
-      el("option", { value: ".3" }, "普通等待保留 0.3 秒"),
-      el("option", { value: ".5" }, "自然等待保留 0.5 秒"),
-      el("option", { value: ".8" }, "保守等待保留 0.8 秒"));
-    return el("article", { class: `interaction-event review-${event.status}` },
-      el("div", { class: "interaction-event-heading" },
-        el("strong", {}, `${event.participants} · ${Number(event.start).toFixed(1)}—${Number(event.end).toFixed(1)}秒`),
-        el("span", { class: "interaction-review-status" }, `${statusLabels[event.status] || "待审核"} · ${event.review_event_id}`),
-        el("span", { class: "minor" }, `${labels[event.completeness] || "待确认"} · ${event.group_id}${event.requires_review ? " · 需人工核验" : ""}`)),
-      el("p", {}, event.summary),
-      el("p", { class: "minor" }, `推荐理由：${event.recommend_reason} · 参考评分 ${Math.round(event.score * 100)}`),
-      event.boundary_reason ? el("p", { class: "minor" }, `边界依据：${event.boundary_reason}`) : null,
-      event.unknowns?.length ? el("p", { class: "minor warning" }, `待核验：${event.unknowns.join("；")}`) : null,
-      el("div", { class: "interaction-range-editor" },
-        el("label", {}, "开始（秒）", startInput), el("label", {}, "结束（秒）", endInput),
-        button("保存边界", "quiet small", () => updateMaterialInteractionReview("set_range", { event_id: event.review_event_id, start: startInput.value, end: endInput.value }))),
-      el("div", { class: "inline-actions" },
-        el("label", { class: "interaction-merge-choice" }, checkbox, "加入合并"),
-        button("保留", event.status === "kept" ? "primary small" : "quiet small", () => updateMaterialInteractionReview("set_status", { event_id: event.review_event_id, status: "kept" })),
-        button("弃用", event.status === "discarded" ? "danger small" : "quiet small", () => updateMaterialInteractionReview("set_status", { event_id: event.review_event_id, status: "discarded" })),
-        button("恢复待审核", "quiet small", () => updateMaterialInteractionReview("set_status", { event_id: event.review_event_id, status: "pending" })),
-        button("回看开始", "quiet small", () => seek(event.start)),
-        button("回看结束", "quiet small", () => seek(Math.max(event.start, event.end - 3))),
-        button("在播放点拆分", "quiet small", () => updateMaterialInteractionReview("split", { event_id: event.review_event_id, split_seconds: player.currentTime })),
-        targetGap,
-        button("生成自然精剪", "primary small", () => generateMaterialInteractionCandidate(event, targetGap.value), event.status === "discarded"),
-        ...highlightActions),
-      el("details", {}, el("summary", {}, "查看对白证据"), ...speechEvidence));
-  });
   const filteredCandidates = (data.candidates || []).filter((candidate) => {
     if (materialInteractionCandidateFilter === "history") return candidate.is_active !== true;
     if (candidate.is_active !== true) return false;
@@ -7775,6 +8247,59 @@ function renderMaterialInteractions() {
     const trimTail = el("input", { type: "checkbox", checked: "", "aria-label": `${candidate.plan_id} 去尾` });
     const extractHighlights = el("input", { type: "checkbox", checked: "", "aria-label": `${candidate.plan_id} 提取精华` });
     const hookEnabled = el("input", { type: "checkbox", checked: "", "aria-label": `${candidate.plan_id} 精彩前置` });
+    // The two requests that used to have no control at all: tightening the dead
+    // air between lines, and burning the captions into the preview.
+    const compressPauses = el("input", { type: "checkbox", checked: "", "aria-label": `${candidate.plan_id} 压缩对话间停顿` });
+    const burnSubtitles = el("input", { type: "checkbox", checked: "", "aria-label": `${candidate.plan_id} 配上字幕` });
+    // 字幕按句切分：一条 cue 一句话，不再把整段独白重复贴进每个切口。
+    // 这个字数是**目标值**，不是硬上限：为保证可读，个别长句可能略微超出。
+    const subtitleMaxChars = el("input", { type: "number", min: "4", max: "60", step: "1", value: "16", "aria-label": `${candidate.plan_id} 字幕单条目标字数` });
+    // 切口消爆音、等待段三选一、整片首尾淡化：P0-3 / P0-4 / P1-3 的可见开关。
+    const audioFade = el("input", { type: "checkbox", checked: "", "aria-label": `${candidate.plan_id} 切口消爆音` });
+    const audioFadeMs = el("input", { type: "number", min: "5", max: "15", step: "1", value: "8", "aria-label": `${candidate.plan_id} 切口淡化毫秒` });
+    const pauseHandling = el("select", { "aria-label": `${candidate.plan_id} 等待段处理方式` },
+      el("option", { value: "remove", selected: "" }, "删掉停顿（默认）"),
+      el("option", { value: "speed_up" }, "快放等待段"),
+      el("option", { value: "off" }, "不处理等待段"));
+    const pauseSpeed = el("select", { "aria-label": `${candidate.plan_id} 等待段快放倍速` },
+      ...[1.5, 2, 3, 4].map((value) => el("option", { value: String(value), selected: value === 2 ? "" : null }, `${value}× 快放`)));
+    const edgeFade = el("input", { type: "checkbox", "aria-label": `${candidate.plan_id} 整片首尾淡化` });
+    const edgeFadeMs = el("input", { type: "number", min: "150", max: "300", step: "10", value: "200", "aria-label": `${candidate.plan_id} 首尾淡化毫秒` });
+    // 停顿压缩强度：探测下限与计划层固定开销必须一起降，否则「压缩对话间停顿」看起来开着、
+    // 实际一刀不删（素材的对话间隙普遍短于旧参数的 0.69 秒门槛）。三档与计划层常量一一对应。
+    const pausePreset = el("select", { "aria-label": `${candidate.plan_id} 停顿压缩强度` },
+      el("option", { value: "conservative" }, "间隙留 0.5 秒"),
+      el("option", { value: "standard" }, "间隙留 0.4 秒"),
+      el("option", { value: "tight", selected: "" }, "间隙留 0.3 秒（默认）"));
+    // 间隙压缩范围：默认连环境音一起压，这样"上一句结束到下一句衔接"才真的是固定 0.3 秒；
+    // 「只压真静音」保留旧的三重许可，适合电机声/环境音本身也是内容的素材。
+    const gapPolicy = el("select", { "aria-label": `${candidate.plan_id} 间隙压缩范围` },
+      el("option", { value: "any", selected: "" }, "连环境音一起压（默认）"),
+      el("option", { value: "quiet" }, "只压真静音（三重许可）"));
+    // 目标时长策略：默认按素材比例（0.70—1.00×父内容），不再强压到 45—60 秒。
+    // 选「固定秒数」才发送 target_min/max —— 后端也是这么判定的（写了秒数即按秒数）。
+    const durationPolicy = el("select", { "aria-label": `${candidate.plan_id} 目标时长策略` },
+      el("option", { value: "proportional", selected: "" }, "按素材比例（默认）"),
+      el("option", { value: "absolute" }, "固定秒数"));
+    const targetMin = el("input", { type: "number", min: "15", max: "1800", step: "1", value: "45", "aria-label": `${candidate.plan_id} 目标最短秒数` });
+    const targetMax = el("input", { type: "number", min: "15", max: "1800", step: "1", value: "60", "aria-label": `${candidate.plan_id} 目标最长秒数` });
+    // 三选一与「压缩对话间停顿」互斥：即时互斥，避免提交后才被后端以中文错误拒绝。
+    const syncPauseControls = () => {
+      const cutting = pauseHandling.value === "remove";
+      compressPauses.disabled = !cutting;
+      if (!cutting) compressPauses.checked = false;
+      pausePreset.disabled = !cutting;
+      gapPolicy.disabled = !cutting;
+      pauseSpeed.disabled = pauseHandling.value !== "speed_up";
+      audioFadeMs.disabled = !audioFade.checked;
+      edgeFadeMs.disabled = !edgeFade.checked;
+      subtitleMaxChars.disabled = !burnSubtitles.checked;
+      const proportional = durationPolicy.value === "proportional";
+      targetMin.disabled = proportional;
+      targetMax.disabled = proportional;
+    };
+    [pauseHandling, audioFade, edgeFade, burnSubtitles, durationPolicy].forEach((node) => node.addEventListener("change", syncPauseControls));
+    syncPauseControls();
     const hookMode = el("select", { "aria-label": `${candidate.plan_id} 精彩前置方式` },
       el("option", { value: "move", selected: "" }, "移动到片头（正文不重复）"),
       el("option", { value: "repeat" }, "预告式重复（显式重复）"));
@@ -7782,8 +8307,6 @@ function renderMaterialInteractions() {
       el("option", { value: "1" }, "1.0× 原速"),
       el("option", { value: "1.1", selected: "" }, "1.1× 自然加速"),
       el("option", { value: "1.25" }, "1.25× 紧凑"));
-    const targetMin = el("input", { type: "number", min: "15", max: "180", step: "1", value: "45", "aria-label": `${candidate.plan_id} 目标最短秒数` });
-    const targetMax = el("input", { type: "number", min: "15", max: "180", step: "1", value: "60", "aria-label": `${candidate.plan_id} 目标最长秒数` });
     const secondPassPreset = existingSecondPass
       ? el("div", { class: "interaction-second-pass-entry is-ready" },
           el("strong", {}, "户外互动精剪已建立"),
@@ -7800,17 +8323,50 @@ function renderMaterialInteractions() {
           el("summary", {}, "二次剪辑（人工触发）"),
           el("p", { class: "minor" }, "先保留当前完整互动，再另生成“精彩前置＋精简正文”。只按完整对话组取舍，不覆盖第一次切片。"),
           el("div", { class: "interaction-second-pass-options" },
-            el("label", {}, trimHead, "掐头"), el("label", {}, trimTail, "去尾"),
+            el("label", {}, trimHead, "掐头（按明确开场词）"), el("label", {}, trimTail, "去尾（按明确告别词）"),
             el("label", {}, extractHighlights, "提取精华"), el("label", {}, hookEnabled, "精彩前置"),
+            el("label", {}, compressPauses, "压缩对话间停顿"), el("label", {}, burnSubtitles, "配上字幕"),
+            el("label", {}, "字幕单条目标字数", subtitleMaxChars),
+            el("small", { class: "form-note" }, "为保证可读，个别长句可能略微超出目标字数。"),
+            el("label", {}, "等待段处理", pauseHandling),
+            el("label", {}, "相邻间隙保留", pausePreset),
+            el("label", {}, "间隙压缩范围", gapPolicy),
+            el("label", {}, "快放倍速", pauseSpeed),
+            el("label", {}, audioFade, "切口消爆音"),
+            el("label", {}, "淡化毫秒", audioFadeMs),
+            el("label", {}, edgeFade, "整片首尾淡化"),
+            el("label", {}, "首尾淡化毫秒", edgeFadeMs),
             el("label", {}, "前置方式", hookMode),
             el("label", {}, "统一倍速", presetSpeed),
-            el("label", {}, "目标最短（秒）", targetMin), el("label", {}, "目标最长（秒）", targetMax)),
-          button("生成户外互动精剪", "primary small", () => generateMaterialInteractionSecondPass(candidate, {
-            trim_head: trimHead.checked, trim_tail: trimTail.checked,
-            extract_highlights: extractHighlights.checked, hook_enabled: hookEnabled.checked,
-            hook_mode: hookEnabled.checked ? hookMode.value : "none",
-            speed: Number(presetSpeed.value), target_min_seconds: Number(targetMin.value), target_max_seconds: Number(targetMax.value),
-          }), candidate.is_active !== true || candidate.status === "rejected" || candidate.qa?.status !== "passed" || data.audio?.status !== "available" || !data.second_pass_preflight?.configured));
+            el("label", {}, "目标时长", durationPolicy),
+            el("label", {}, "目标最短（秒）", targetMin), el("label", {}, "目标最长（秒）", targetMax),
+            el("small", { class: "form-note" }, "按素材比例时目标区间 = 父内容的 0.70—1.00 倍，秒数框不参与。")),
+          button("生成户外互动精剪", "primary small", () => {
+            const options = {
+              trim_head: trimHead.checked, trim_tail: trimTail.checked,
+              extract_highlights: extractHighlights.checked, hook_enabled: hookEnabled.checked,
+              burn_subtitles: burnSubtitles.checked,
+              subtitle_max_chars: Number(subtitleMaxChars.value),
+              hook_mode: hookEnabled.checked ? hookMode.value : "none",
+              speed: Number(presetSpeed.value),
+              duration_policy: durationPolicy.value,
+              pause_preset: pausePreset.value,
+              gap_policy: gapPolicy.value,
+              pause_handling: pauseHandling.value,
+              pause_speed: Number(pauseSpeed.value),
+              audio_fade: audioFade.checked, audio_fade_ms: Number(audioFadeMs.value),
+              edge_fade: edgeFade.checked, edge_fade_ms: Number(edgeFadeMs.value),
+            };
+            // 按素材比例时**不发**秒数：后端见到显式秒数就会当作"固定秒数"，
+            // 那样会把默认的按比例策略悄悄覆盖掉。
+            if (durationPolicy.value === "absolute") {
+              options.target_min_seconds = Number(targetMin.value);
+              options.target_max_seconds = Number(targetMax.value);
+            }
+            // 与「快放等待段 / 不处理」互斥：非删停路线绝不发送 compress_pauses=true。
+            if (pauseHandling.value === "remove") options.compress_pauses = compressPauses.checked;
+            return generateMaterialInteractionSecondPass(candidate, options);
+          }, candidate.is_active !== true || candidate.status === "rejected" || candidate.qa?.status !== "passed" || data.audio?.status !== "available" || !data.second_pass_preflight?.configured));
     return el("article", { class: `interaction-candidate is-${candidate.status} ${candidate.is_active ? "is-active" : "is-history"}` },
       el("div", { class: "interaction-candidate-heading" },
         el("strong", {}, `${candidate.event_id} · ${candidate.version || "未知版本"} · 原始 ${Number(candidate.source_duration || 0).toFixed(1)} 秒 → 候选 ${Number(candidate.output_duration || 0).toFixed(1)} 秒`),
@@ -7882,8 +8438,12 @@ function renderMaterialInteractions() {
           el("label", { class: "interaction-story-lock" }, locked, "锁定"),
           el("span", { class: "minor" }, `${Number(range.start || 0).toFixed(2)}—${Number(range.end || 0).toFixed(2)}秒 · ${group.type}`)),
         el("p", { class: "minor" }, group.reason || "未记录取舍理由"),
-        el("div", { class: "interaction-story-lines" }, ...(group.utterances || []).map((line) =>
-          el("p", {}, el("strong", {}, `${Number(line.start || 0).toFixed(2)}s`), ` ${line.text || ""}`))),
+        // 对白墙默认收起：字幕在成片里已经能看见，把整段转写平铺出来既不美观也不必要
+        // （用户反馈"不需要列怎么长的字幕出来给人看"）。证据仍然保留，点开即得。
+        el("details", { class: "interaction-story-transcript" },
+          el("summary", {}, `该组对白（${(group.utterances || []).length} 句，点击展开）`),
+          el("div", { class: "interaction-story-lines" }, ...(group.utterances || []).map((line) =>
+            el("p", {}, el("strong", {}, `${Number(line.start || 0).toFixed(2)}s`), ` ${line.text || ""}`)))),
         group.depends_on?.length ? el("p", { class: "minor warning" }, `依赖前文：${group.depends_on.join("、")}`) : null,
         el("div", { class: "inline-actions" },
           button("定位原片", "quiet small", locateOriginal),
@@ -7892,7 +8452,8 @@ function renderMaterialInteractions() {
     });
     saveButton = button("保存调整并更新一次预览", "primary small", () => updateMaterialInteractionSecondPass(candidate, "save_edits"), terminal || !draft.dirty);
     const statusCopy = candidate.status === "approved" ? "已确认入库" : candidate.status === "rejected" ? "已弃用" : "待人工确认";
-    return el("article", { class: `interaction-second-pass-card is-${candidate.status}`, id: `second-pass-${candidate.plan_id}` },
+    return el("article", { class: `interaction-second-pass-card is-${candidate.status}`, id: `second-pass-${candidate.plan_id}`,
+      "data-updated-at": String(candidate.updated_at || "") },
       el("div", { class: "interaction-candidate-heading" },
         el("div", {}, el("strong", {}, `户外互动精剪 · ${candidate.plan_id}`),
           el("p", { class: "minor" }, `父版本 ${candidate.parent?.plan_id || "未知"} / r${candidate.parent?.revision ?? "?"} · 当前 r${candidate.revision}`)),
@@ -7908,6 +8469,36 @@ function renderMaterialInteractions() {
         el("span", { class: Number(candidate.repeated_source_seconds || 0) > 0 ? "warning" : "is-good" }, `源片重复 ${Number(candidate.repeated_source_seconds || 0).toFixed(1)}秒`),
         el("span", {}, `输出 ${Number(candidate.output_duration || 0).toFixed(1)}秒`),
         el("span", { class: candidate.target_duration_status === "within_target" ? "is-good" : "warning" }, candidate.target_duration_status === "within_target" ? "目标时长内" : "未强行凑目标时长")),
+      el("div", { class: "interaction-second-pass-metrics" },
+        el("span", { class: Number(candidate.removed_by_pause_seconds || 0) > 0 ? "is-good" : "" },
+          `压缩停顿 ${Number(candidate.removed_by_pause_seconds || 0).toFixed(1)}秒（${candidate.pause_trims?.length || 0}处）`),
+        el("span", { class: candidate.subtitles?.burned ? "is-good" : (candidate.subtitles?.requested ? "warning" : "") },
+          candidate.subtitles?.burned ? `已烧入字幕 ${candidate.subtitles.cue_count}句`
+            : candidate.subtitles?.requested ? "字幕未烧入" : "未启用字幕")),
+      el("div", { class: "interaction-second-pass-metrics" },
+        el("span", { class: candidate.options?.pause_handling === "speed_up" ? "is-good" : "" },
+          candidate.options?.pause_handling === "speed_up"
+            ? `等待段快放 ${Number(candidate.options?.pause_speed || 2).toFixed(1)}×`
+            : candidate.options?.pause_handling === "off" ? "等待段不处理" : "等待段删掉停顿"),
+        el("span", {}, `快放段 ${(candidate.speed_segments || []).length} 处`),
+        el("span", { class: candidate.options?.audio_fade === false ? "" : "is-good" },
+          candidate.options?.audio_fade === false ? "切口未消爆音" : `切口消爆音 ${Number(candidate.options?.audio_fade_ms || 8).toFixed(0)} 毫秒`),
+        el("span", { class: candidate.options?.edge_fade ? "is-good" : "" },
+          candidate.options?.edge_fade ? `首尾淡化 ${Number(candidate.options?.edge_fade_ms || 200).toFixed(0)} 毫秒` : "未启用首尾淡化")),
+      el("div", { class: "interaction-second-pass-metrics" },
+        el("span", {}, candidate.options?.duration_policy === "proportional"
+          ? `目标按素材比例 ${Number(candidate.options?.target_min_seconds || 0).toFixed(0)}—${Number(candidate.options?.target_max_seconds || 0).toFixed(0)} 秒`
+          : `目标固定 ${Number(candidate.options?.target_min_seconds || 0).toFixed(0)}—${Number(candidate.options?.target_max_seconds || 0).toFixed(0)} 秒`),
+        el("span", { class: candidate.options?.gap_policy === "any" ? "is-good" : "" },
+          candidate.options?.gap_policy === "quiet" ? "只压真静音（三重许可）" : "连环境音一起压"),
+        el("span", { class: candidate.options?.pause_preset === "tight" ? "is-good" : "" },
+          `相邻对话间隙 ${Number(candidate.pause_survivor_seconds || 0).toFixed(2)} 秒`
+          + `（${({ conservative: "留 0.5 秒", standard: "留 0.4 秒", tight: "留 0.3 秒" })[candidate.options?.pause_preset] || "未记录"}）`),
+        el("span", { class: candidate.unit_source === "vad_aligned" ? "is-good" : "warning" },
+          candidate.unit_source === "vad_aligned" ? `短语级语音单元 ${candidate.unit_count || 0} 个` : "分块级原子（语音活动证据缺失）")),
+      ...(candidate.compression?.notes || []).map((note) => el("p", { class: "minor" }, note)),
+      ...(candidate.degradations || []).map((item) => el("p", { class: "minor warning" }, `降级：${item}`)),
+      ...(candidate.render_degradations || []).map((item) => el("p", { class: "minor warning" }, `渲染降级：${item}`)),
       el("p", {}, candidate.story?.summary || "已按完整语义组形成待审方案"),
       el("p", { class: "minor" }, `语义模型：${candidate.story_identity?.model || "未记录"} · 本次新增调用 ${candidate.usage?.semantic_model_calls ?? "未记录"} · 分析 ${Number(candidate.usage?.analysis_elapsed_seconds || 0).toFixed(1)}秒 · 本地渲染 ${Number(candidate.usage?.render_elapsed_seconds || 0).toFixed(1)}秒${candidate.usage?.analysis_cache_hit ? " · 分析缓存命中" : ""}${candidate.usage?.render_cache_hit ? " · 渲染缓存命中" : ""}`),
       ...(candidate.warnings || []).map((warning) => el("p", { class: "minor warning" }, warning)),
@@ -7916,11 +8507,17 @@ function renderMaterialInteractions() {
       el("div", { class: "interaction-second-pass-controls" },
         el("label", {}, "统一倍速", speed), el("label", {}, "精彩前置", hook), el("label", {}, "前置方式", hookMode),
         el("span", { class: "minor" }, "连续修改只保存在页面草稿中；点击一次保存后才会重渲染。")),
-      el("div", { class: "interaction-story-groups" }, ...groupRows),
+      // 语义分组同样折叠：默认只看方案与理由，需要核对逐句对白时再展开。
+      el("details", { class: "interaction-story-wrap" },
+        el("summary", {}, `语义分组与取舍（${groupRows.length} 组，点击展开）`),
+        el("div", { class: "interaction-story-groups" }, ...groupRows)),
+      renderMaterialInteractionDeliverables(candidate),
       el("div", { class: "inline-actions" },
         saveButton,
         button("撤销上一步", "quiet small", () => updateMaterialInteractionSecondPass(candidate, "undo"), terminal || !candidate.can_undo || draft.dirty),
         button("确认入库", "primary small", () => updateMaterialInteractionSecondPass(candidate, "approve"), terminal || draft.dirty || !candidate.parent_current || candidate.qa?.status !== "passed" || (candidate.version !== "interaction-second-pass-plan-v1" && candidate.content_qa?.status !== "passed") || candidate.preview?.stale === true),
+        button("导出成片+字幕", "primary small", () => exportMaterialInteractionSecondPassDeliverables(candidate), terminal || candidate.qa?.status !== "passed"),
+        button("导出剪辑决策", "quiet small", () => exportMaterialInteractionSecondPass(candidate)),
         button("弃用候选", "danger small", () => updateMaterialInteractionSecondPass(candidate, "reject"), terminal)));
   });
   const secondPassJob = data.second_pass_job || {};
@@ -7929,43 +8526,27 @@ function renderMaterialInteractions() {
         el("strong", {}, secondPassJob.status === "queued" ? "二次剪辑已排队" : secondPassJob.status === "generating" ? "二次剪辑正在处理" : secondPassJob.status === "ambiguous" ? "模型请求受理状态待核对" : "二次剪辑未完成"),
         el("span", {}, secondPassJob.status === "generating" ? `当前阶段：${secondPassJob.stage || "处理中"}` : secondPassJob.error || "任务会保留现场，不会自动重复收费请求。"))
     : null;
+  const candidateCardsByEvent = new Map(
+    filteredCandidates.map((candidate, index) => [String(candidate.event_id), candidateCards[index]]));
+  const secondPassCardsByParent = new Map();
+  (data.second_pass_candidates || []).forEach((candidate, index) => {
+    const key = String((candidate.parent || {}).plan_id || "");
+    if (!key) return;
+    secondPassCardsByParent.set(key, [...(secondPassCardsByParent.get(key) || []), secondPassCards[index]]);
+  });
+  const rerender = () => { materialInteractionPanel = null; render(); };
   materialInteractionPanel = el("section", { class: "panel material-interactions" },
     el("div", { class: "panel-head" }, el("div", {}, el("h4", {}, "完整互动候选目录"),
       el("p", {}, `${data.asset_name} · ${review?.events?.length || 0}条人工目录 · ${audioLabels[data.audio?.status] || "音频待核验"}`)),
       button("收起", "quiet small", () => { player.pause(); materialInteractionDetails = null; materialInteractionPanel = null; render(); })),
-    el("div", { class: "panel-body interaction-layout" },
-      el("div", { class: "interaction-preview" }, player, playbackNotice,
-        el("p", { class: "minor" }, data.proxy?.status === "completed" ? "当前播放浏览器审核代理；原片未被修改。" : data.proxy?.status === "source_compatible" ? "原片编码已兼容浏览器，无需额外转码。" : `当前回退播放原片。${data.proxy?.error || "尚无审核代理。"}`),
-        el("p", { class: "minor" }, data.notice),
-        el("p", { class: "minor" }, `模型：${data.identity?.model || "未记录"} · 视觉请求${data.usage?.model_calls ?? 0}次 · 联系表${data.usage?.contact_sheets ?? 0}张 · 边界补证${data.usage?.detail_frames ?? 0}帧 · 初次处理${Math.round(data.usage?.elapsed_seconds || 0)}秒（不是费用账单）`),
-        ...(data.analysis_warnings || []).map((warning) => el("p", { class: "minor warning" }, `${warning.window_id || "分析窗口"}：${warning.reason}`))),
-      el("div", { class: "interaction-events" },
-        review ? el("div", { class: "interaction-review-toolbar" },
-          el("span", {}, `待审核 ${review.counts.pending} · 保留 ${review.counts.kept} · 弃用 ${review.counts.discarded} · 版本 ${review.revision}`),
-          button("合并所选同组事件", "quiet small", () => updateMaterialInteractionReview("merge", { event_ids: [...materialInteractionMergeSelection] })),
-          button("撤销上一步", "quiet small", () => updateMaterialInteractionReview("undo"), !review.can_undo),
-          el("span", { class: "minor" }, review.confirmed_catalog.notice)) : null,
-        ...(events.length ? events : [el("p", {}, "没有找到有充分证据的互动候选；可回看原片或改用通用概览。")])),
-      el("div", { class: "interaction-candidates" },
-        el("div", { class: "interaction-review-toolbar" },
-          el("strong", {}, `智能分析与候选片段 · 当前 ${data.candidate_counts?.active ?? 0} / 历史 ${data.candidate_counts?.history ?? 0}`),
-          el("select", { "aria-label": "筛选互动候选", onchange: (event) => { materialInteractionCandidateFilter = event.target.value; materialInteractionPanel = null; render(); } },
-            el("option", { value: "all", selected: materialInteractionCandidateFilter === "all" ? "" : null }, "全部候选"),
-            el("option", { value: "history", selected: materialInteractionCandidateFilter === "history" ? "" : null }, "历史版本"),
-            el("option", { value: "review", selected: materialInteractionCandidateFilter === "review" ? "" : null }, "待人工确认"),
-            el("option", { value: "partial", selected: materialInteractionCandidateFilter === "partial" ? "" : null }, "需回看"),
-            el("option", { value: "approved", selected: materialInteractionCandidateFilter === "approved" ? "" : null }, "已入库"),
-            el("option", { value: "rejected", selected: materialInteractionCandidateFilter === "rejected" ? "" : null }, "已弃用")),
-          el("span", { class: "minor" }, "预览 QA 通过不等于批准；确认后只登记到素材库。")),
-        ...(candidateCards.length ? candidateCards : [el("p", { class: "minor" }, "尚未生成精剪预览；可从上方任一互动事件生成。")]),
-      ),
-      el("div", { class: "interaction-second-pass-list" },
-        el("div", { class: "interaction-review-toolbar" },
-          el("strong", {}, `户外互动二次剪辑 · ${secondPassCards.length}`),
-          el("span", { class: "minor" }, "以完整切片为只读父版本；系统出方案和预览，人工决定是否入库。")),
-        secondPassJobNotice,
-        ...(secondPassCards.length ? secondPassCards : [el("p", { class: "minor" }, "尚未建立二次剪辑。请在上方满意的完整互动候选中展开“二次剪辑（人工触发）”。")]),
-      )));
+    // 排名列表是唯一的主视图：每条素材自己带「第一次完整切片」和「二次精剪」两层折叠详情，
+    // 不再各自单独占页面下方一整块（用户要求"二次精剪不应该分开的"）。
+    secondPassJobNotice,
+    renderMaterialInteractionRankLayout(data, review, player, playbackNotice, seek, labels, audioLabels,
+                                        statusLabels, candidateCardsByEvent, secondPassCardsByParent, rerender),
+    el("p", { class: "minor" },
+      `智能分析与候选片段：当前 ${data.candidate_counts?.active ?? 0} / 历史 ${data.candidate_counts?.history ?? 0}`
+      + ` · 户外互动二次剪辑 ${secondPassCards.length} 条（都挂在各自素材行下面）。预览 QA 通过不等于批准。`));
   return materialInteractionPanel;
 }
 
@@ -7976,7 +8557,7 @@ async function startAssetMaterialOverview(asset, profile = "efficient", recogniz
     ? "复用联系表概览，并仅对模型标记的候选原帧做精细复核"
     : "先在本机抽帧、去重并生成联系表，再发送联系表生成粗粒度画面地图";
   const confirmed = window.confirm(
-    `${action}。\n\n不会上传整条视频；${recognizeAudio ? "会提取音轨并发送给豆包取得分句时间线" : "音频识别关闭，不会上传音轨"}；可能产生模型费用。确认后任务会自动完成上述流程，不会要求第二次确认。\n确认开始吗？`,
+    `${action}。\n\n不会上传整条视频；${recognizeAudio ? `会提取音轨并发送给${transcriptProviderLabel(defaultTranscriptProvider())}取得分句时间线` : "音频识别关闭，不会上传音轨"}；可能产生模型费用。确认后任务会自动完成上述流程，不会要求第二次确认。\n确认开始吗？`,
   );
   if (!confirmed) return;
   try {
@@ -7987,7 +8568,7 @@ async function startAssetMaterialOverview(asset, profile = "efficient", recogniz
         stage: "overview",
         profile,
         recognize_audio: Boolean(recognizeAudio),
-        transcript_provider: recognizeAudio ? "doubao" : "none",
+        transcript_provider: recognizeAudio ? defaultTranscriptProvider() : "none",
         remote_asr_confirmed: Boolean(recognizeAudio),
         remote_vision_confirmed: true,
         selected_chapter_ids: selectedChapterIds,
@@ -8123,7 +8704,7 @@ function renderAssets() {
         ? button("补本地语音语义", "quiet small", () => startAssetMediaCoarseIndex(asset, "local"), indexRunning)
         : null,
       indexState.coarse_index_path && (indexState.transcript_status || {}).status !== "available"
-        ? button("豆包语音识别（确认）", "quiet small", () => startAssetDoubaoTranscript(asset), indexRunning)
+        ? button(`${transcriptProviderLabel(defaultTranscriptProvider())}语音识别（确认）`, "quiet small", () => startAssetCloudTranscript(asset, defaultTranscriptProvider()), indexRunning)
         : null,
       indexState.coarse_index_path ? button("精筛区间", "quiet small", () => startAssetMediaFineIndex(asset), indexRunning) : null,
       indexState.coarse_index_path ? button("按台词找候选", "quiet small", () => requestAssetMediaRecommendations(asset), indexRunning) : null,
@@ -8284,7 +8865,7 @@ function renderAssets() {
         ),
         overviewAudio.status === "failed" ? el("div", { class: "material-overview-note warning" },
           el("strong", {}, "音频识别未完成"),
-          el("span", {}, overviewAudio.error || "画面概览已保留；可检查豆包配置后按相同选项重新分析。"),
+          el("span", {}, overviewAudio.error || "画面概览已保留；可检查云端语音配置后按相同选项重新分析。"),
         ) : null,
         audioUtterances.length ? el("details", { class: "material-overview-transcript" },
           el("summary", {}, `查看带时间线的音频转写（${audioUtterances.length} 句）`),

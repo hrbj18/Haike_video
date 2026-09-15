@@ -90,10 +90,86 @@ def cmd_open(project_id: str | None, *, open_browser: bool = True) -> int:
     return 0
 
 
+def _attach_server_logging() -> None:
+    """Mirror server logs into .backlot/logs/backlot.log.
+
+    The launcher starts this process detached and windowless, so stdout and
+    stderr never reach anything a human can read.  Writing our own log file
+    guarantees that a crashed or wedged server can still be explained later.
+    """
+    import logging
+    from pathlib import Path
+
+    log_dir = Path(__file__).resolve().parent.parent / ".backlot" / "logs"
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        handler = logging.FileHandler(log_dir / "backlot.log", encoding="utf-8")
+    except OSError:
+        return
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s [%(name)s] %(message)s")
+    )
+    root = logging.getLogger()
+    if root.level == logging.NOTSET or root.level > logging.INFO:
+        root.setLevel(logging.INFO)
+    root.addHandler(handler)
+
+
+def _detach_console() -> None:
+    """Drop the inherited console when we are meant to run as a service.
+
+    A Windows virtual environment's ``python.exe`` is a trampoline: it spawns
+    the real interpreter as a child process and waits for it.  The child ends up
+    owning a freshly created console of its own, even when the trampoline itself
+    was started detached.  That console is a window somebody can close, and
+    closing it kills the server -- which is exactly the failure this command
+    keeps hitting.  ``FreeConsole`` detaches us from it, so no console event can
+    ever take the server down, and the stray window disappears with it.
+
+    Only done for background launches (``BACKLOT_DETACHED`` is set by
+    scripts/launch_backlot.py): a developer running ``python -m backlot serve``
+    in a terminal keeps their console and their Ctrl+C.
+    """
+    if os.name != "nt" or not os.environ.get("BACKLOT_DETACHED"):
+        return
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.SetConsoleCtrlHandler.argtypes = [ctypes.c_void_p, ctypes.c_bool]
+        kernel32.SetConsoleCtrlHandler.restype = ctypes.c_bool
+        kernel32.FreeConsole.restype = ctypes.c_bool
+        kernel32.SetConsoleCtrlHandler(None, True)
+        kernel32.FreeConsole()
+    except Exception:
+        pass
+
+
 def cmd_serve(port: int) -> int:
+    import logging
+
     import uvicorn
 
-    uvicorn.run("backlot.server:app", host="127.0.0.1", port=port, log_level="warning")
+    _detach_console()
+    # The server is launched through ``pythonw.exe`` (see
+    # scripts/launch_backlot.py) and then drops even that console, so it owns no
+    # console at all.  Every console child it spawns -- ffmpeg, ffprobe, npx --
+    # is therefore handed a brand new console *window* by Windows, and a render
+    # spawns hundreds of them.  Installing the no-window default here covers the
+    # whole process tree in one place, grandchildren included.
+    from lib.subprocess_window import install_default
+
+    install_default()
+    _attach_server_logging()
+    try:
+        uvicorn.run("backlot.server:app", host="127.0.0.1", port=port, log_level="warning")
+    except BaseException:
+        # SystemExit from a failing lifespan handler used to kill this process
+        # with nothing written anywhere; record it before it propagates.
+        logging.getLogger("backlot.serve").exception(
+            "Backlot server stopped unexpectedly on port %s", port
+        )
+        raise
     return 0
 
 

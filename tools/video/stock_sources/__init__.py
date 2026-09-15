@@ -23,7 +23,16 @@ import importlib
 import inspect
 import pkgutil
 
+from lib.env_loader import load_env
+
 from .base import Candidate, SearchFilters, StockSource
+
+# Adapters decide availability by reading os.environ, and the package is
+# importable on its own (without going through a BaseTool module that would
+# have loaded the dotenv files as a side effect).  Load them here so
+# source_catalog()/available_sources() never report a configured provider as
+# "unavailable" just because of import order.
+load_env()
 
 __all__ = [
     "Candidate",

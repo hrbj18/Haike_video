@@ -133,6 +133,7 @@ Pipeline type skills provide production guidance for specific video formats, ind
 | Animation Pipeline | `creative/animation-pipeline.md` | Motion graphics, easing, transitions, composition |
 | Character Animation Pipeline | `pipelines/character-animation/` | Rigged local cartoon characters, pose libraries, action timelines, SVG/Canvas/Remotion/HyperFrames rendering |
 | Cinematic | `creative/cinematic.md` | Letterbox, film pacing, layered audio, color grading |
+| Material Remake Workflow | `creative/material-remake-workflow.md` | 外站素材复刻端到端：素材双筛（人脸 + 烧入字幕）、参考视频付费转写、时长实测、清洗母版 + 源区间绑定、数字人合成、生效窗口复检、局部换镜与零付费重出预览、**竖屏字幕安全区（防平台底部遮挡）**。脚本入口 `scripts/remake_material_screen.py`（screen/pick/verify/**audit**） / `scripts/remake_reference_transcript.py` / `scripts/remake_build_project.py` / `scripts/remake_retime_shots.py` / `scripts/remake_subtitle_safe_area.py`（probe/apply/measure） |
 
 ## Pipeline Stage Director Skills
 

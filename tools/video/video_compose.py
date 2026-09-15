@@ -316,6 +316,7 @@ class VideoCompose(BaseTool):
     _REMOTION_COMPONENTS = [
         "text_card", "stat_card", "callout", "comparison",
         "progress", "chart", "bar_chart", "line_chart", "pie_chart", "kpi_grid",
+        "news_anchor",
     ]
 
     best_for = [
@@ -864,6 +865,8 @@ class VideoCompose(BaseTool):
         "screen-demo": "Explainer",
         "presenter": "TalkingHead",
         "animation-first": "Explainer",
+        # 深色科技新闻四固定位：走 Explainer 的 news_anchor cut 类型。
+        "news-anchor": "Explainer",
     }
 
     @classmethod
@@ -946,7 +949,7 @@ class VideoCompose(BaseTool):
         return scenes
 
     @staticmethod
-    def _stage_remotion_media(value: Any, public_dir: Path) -> int:
+    def _stage_remotion_media(value: Any, public_dir: Path, project_root: Path | None = None) -> int:
         """Copy local media references into a Remotion public dir in-place.
 
         OffthreadVideo's compositor rejects ``file://`` sources. Rewriting
@@ -955,7 +958,10 @@ class VideoCompose(BaseTool):
         """
 
         staged_by_source: dict[Path, str] = {}
-        media_keys = {"source", "src", "backgroundSrc"}
+        media_keys = {
+            "source", "src", "backgroundSrc",
+            "backgroundImage", "backgroundVideo", "avatarImage",
+        }
 
         def visit(node: Any, parent_key: str | None = None) -> Any:
             if isinstance(node, dict):
@@ -986,7 +992,14 @@ class VideoCompose(BaseTool):
                     raw_path = raw_path[1:]
             else:
                 raw_path = node
-            source = Path(raw_path).resolve()
+            # Resolve relative paths against the project root first (the
+            # workbench stores assets under projects/<id>/assets/...). Without
+            # this, Remotion (which runs from the composer cwd) cannot find
+            # the source file and 404s the staticFile() request.
+            candidate = Path(raw_path)
+            if not candidate.is_absolute() and project_root is not None:
+                candidate = (project_root / raw_path).resolve()
+            source = candidate
             if not source.is_file():
                 return node
             if source not in staged_by_source:
@@ -1375,7 +1388,7 @@ class VideoCompose(BaseTool):
             bg = palette.get("background", "#FFFFFF")
             text = palette.get("text", "#1F2937")
             surface = palette.get("surface", bg)
-            muted = palette.get("muted_text", "#6B7280")
+            muted = palette.get("muted", palette.get("muted_text", "#6B7280"))
 
             # Build chart colors from all palette entries
             chart_colors = []
@@ -1715,6 +1728,16 @@ class VideoCompose(BaseTool):
                 remotion_inputs["remotion_timeout_ms"] = inputs["remotion_timeout_ms"]
             if inputs.get("public_dir") is not None:
                 remotion_inputs["public_dir"] = inputs["public_dir"]
+            # Forward explicit render dimensions so project render_profile
+            # (e.g. 720x1280 vertical) reaches Remotion directly.
+            if inputs.get("width") and inputs.get("height"):
+                remotion_inputs["width"] = inputs["width"]
+                remotion_inputs["height"] = inputs["height"]
+            # Forward the project root so the Remotion stager can resolve
+            # relative media paths (workbench stores assets under
+            # projects/<id>/assets/, and the composer cwd is different).
+            if inputs.get("project_root"):
+                remotion_inputs["project_root"] = inputs["project_root"]
             render_result = self._remotion_render(remotion_inputs)
 
             # Governance: NEVER silently fall back to FFmpeg when Remotion fails.
@@ -2055,7 +2078,7 @@ class VideoCompose(BaseTool):
             public_dir = output_path.parent / f".remotion-public-{output_path.stem}"
             cleanup_public_dir = True
 
-        staged_count = self._stage_remotion_media(props, public_dir)
+        staged_count = self._stage_remotion_media(props, public_dir, project_root=Path(inputs.get("project_root") or "") if inputs.get("project_root") else None)
         if not staged_count and cleanup_public_dir:
             public_dir = None
 
@@ -2088,6 +2111,12 @@ class VideoCompose(BaseTool):
                 cmd.extend(["--width", str(p.width), "--height", str(p.height)])
             except (ImportError, ValueError):
                 pass
+
+        # Direct width/height override (project render dimensions win over profile).
+        direct_width = inputs.get("width")
+        direct_height = inputs.get("height")
+        if direct_width and direct_height:
+            cmd.extend(["--width", str(int(direct_width)), "--height", str(int(direct_height))])
 
         # Optional creator-facing render timeout. Remotion's `--timeout` (ms)
         # governs headless-browser setup and delayRender(); on slow machines or
