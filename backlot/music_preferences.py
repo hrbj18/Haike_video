@@ -19,7 +19,7 @@ from backlot.state import REPO_ROOT
 
 
 PREFERENCES_PATH = REPO_ROOT / ".backlot" / "music_preferences.json"
-DEFAULT_PLAYBACK_GAIN_DB = -8.0
+DEFAULT_PLAYBACK_GAIN_DB = -14.0
 MIN_PLAYBACK_GAIN_DB = -24.0
 MAX_PLAYBACK_GAIN_DB = 0.0
 

@@ -1,8 +1,9 @@
 """Local defaults for final-program loudness.
 
-The software preference is captured by newly bootstrapped workbenches.  Older
-projects intentionally keep the legacy -14 LUFS contract until a user saves an
-explicit project value, so changing the workstation default never rewrites an
+The software preference is captured by newly bootstrapped workbenches, and it is
+also the value used to backfill a project that stores no loudness policy at all
+(``workbench._ensure_output_loudness_policy``).  A project that already carries an
+explicit target keeps it, so changing the workstation default never rewrites an
 already reviewed mix.
 """
 
@@ -19,6 +20,9 @@ from backlot.state import REPO_ROOT
 
 PREFERENCES_PATH = REPO_ROOT / ".backlot" / "output_loudness_preferences.json"
 DEFAULT_OUTPUT_TARGET_LUFS = -10.0
+# Historical target of projects created before this policy existed.  Reference
+# only: the render path no longer falls back to it, because doing so silently
+# pinned every policy-less project to the old target.
 LEGACY_OUTPUT_TARGET_LUFS = -14.0
 MIN_OUTPUT_TARGET_LUFS = -16.0
 MAX_OUTPUT_TARGET_LUFS = -8.0

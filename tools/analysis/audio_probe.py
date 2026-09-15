@@ -28,13 +28,27 @@ from tools.base_tool import (
 )
 
 
+def _ffprobe_binary() -> str | None:
+    """Prefer PATH, then fall back to the ffmpeg pair shipped with the project."""
+    found = shutil.which("ffprobe")
+    if found:
+        return found
+    try:
+        from lib.ffmpeg_locator import resolve_ffmpeg_pair
+
+        pair = resolve_ffmpeg_pair()
+    except Exception:
+        pair = None
+    return pair[1] if pair else None
+
+
 def probe_duration(file_path: str | Path) -> float | None:
     """Quick helper: return duration in seconds, or None on failure.
 
     Use this from other tools that just need the duration without
     going through the full tool execute() flow.
     """
-    ffprobe = shutil.which("ffprobe")
+    ffprobe = _ffprobe_binary()
     if not ffprobe:
         return None
     try:
@@ -101,7 +115,7 @@ class AudioProbe(BaseTool):
     side_effects = []
 
     def get_status(self) -> ToolStatus:
-        if shutil.which("ffprobe"):
+        if _ffprobe_binary():
             return ToolStatus.AVAILABLE
         return ToolStatus.UNAVAILABLE
 
@@ -113,9 +127,9 @@ class AudioProbe(BaseTool):
         if not input_path.exists():
             return ToolResult(success=False, error=f"File not found: {input_path}")
 
-        ffprobe = shutil.which("ffprobe")
+        ffprobe = _ffprobe_binary()
         if not ffprobe:
-            return ToolResult(success=False, error="ffprobe not found on PATH")
+            return ToolResult(success=False, error="ffprobe not found on PATH or in the bundled ffmpeg build")
 
         start = time.time()
 

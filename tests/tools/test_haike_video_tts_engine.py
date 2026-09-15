@@ -27,9 +27,9 @@ def test_clean_profile_store_exposes_checked_in_chinese_presets(tmp_path):
     profiles = store.public_profiles()
 
     assert {profile["id"] for profile in profiles} >= {
-        "haike_video-qwen-serena",
-        "haike_video-qwen-vivian",
-        "haike_video-qwen-dylan",
+        "openmontage-qwen-serena",
+        "openmontage-qwen-vivian",
+        "openmontage-qwen-dylan",
     }
     assert all(profile["voice_type"] == "preset" for profile in profiles)
     assert all(profile["available"] is True for profile in profiles)
