@@ -1,0 +1,58 @@
+%% Cut V2 时序图：并发基准台 / 粗剪并发 / 二次精剪生成+渲染 / 导出
+%% 与 docs/team-runs/2026-09-12-cut-v2/02-ARCHITECTURE.md 第 4 节一致
+
+sequenceDiagram
+    autonumber
+    participant LEAD as 主理人/工程师
+    participant BENCH as benchmark_interaction_concurrency
+    participant BIO as build_interaction_index
+    participant ASR as _transcribe_long_file
+
+    rect rgb(245,248,255)
+    note over LEAD,ASR: ① 零付费基准台（A1，T01）——34 窗口 / 9 分片规模
+    LEAD->>BENCH: --windows 34 --chunks 9 --sleep-ms 120 --concurrency 1,2,3,4
+    BENCH->>BIO: 注入 fake_analyze/fake_extract（不联网）
+    BENCH->>ASR: 注入 fake_asr_submit（不联网）
+    BENCH->>BENCH: 串行 vs 各 C 值；量 墙钟 / in_flight_peak / 提交次数
+    BENCH-->>LEAD: {wall, speedup, in_flight_peak<=C, submissions==units}
+    end
+
+    rect rgb(245,255,245)
+    note over LEAD,ASR: ② 粗剪并发（T03）：5分钟.mp4 真实小样本 + 基准台
+    LEAD->>ASR: transcribe_file(5分钟.mp4)  （315s < 600s -> 仅 1 片，测不出 ASR 并发）
+    LEAD->>BIO: build_interaction_index(..., policy, concurrency)
+    BIO->>BIO: 命中 material-interaction-index.json? -> cache_hit 早返回（S-001 走此路，零付费）
+    BIO-->>LEAD: 真实小样本(≈2-3 窗口) 的在飞与墙钟（真实性补足）
+    end
+
+    rect rgb(255,250,240)
+    note over LEAD,ASR: ③ 二次精剪生成 + 渲染（T02/T05）
+    participant WB as Workbench
+    participant SP as build_second_pass_plan
+    participant RD as render_second_pass_candidate
+    LEAD->>WB: 选项 {pause_handling, pause_speed, audio_fade_ms, edge_fade}
+    WB->>SP: normalize_options（互斥校验：remove vs speed_up）
+    SP->>SP: _rebuild: remove -> _pause_trims / speed_up -> _pause_speed_segments
+    SP->>SP: occurrences(+actions) -> timeline_mapping -> subtitle_cues
+    SP->>SP: validate_second_pass_plan（v4 才比对 actions/speed_segments）
+    SP-->>WB: plan (v4)
+    WB->>RD: render_second_pass_candidate(render_source=审核代理)
+    RD->>RD: _atempo_chain(speed) + afade(in/out, st=(end-start)/speed - fade)
+    RD->>RD: ffmpeg -> probe -> QA(duration / av_tail / faststart)
+    RD-->>WB: manifest（VERSION v3，afade 进签名）
+    end
+
+    rect rgb(250,245,255)
+    note over LEAD,ASR: ④ 导出（T04）
+    participant SRV as server.py
+    participant EXP as material_interaction_export
+    LEAD->>SRV: POST .../second-pass/{plan_id}/export
+    SRV->>WB: export_second_pass_plan(...)
+    WB->>EXP: build_cut_list(plan, source, contract, media_reference=review_proxy)
+    EXP-->>WB: cut_list (cut-list-v1)
+    WB->>EXP: build_fcp7_xml(cut_list) / build_otio()
+    EXP-->>WB: xml / otio
+    WB->>WB: 写 export/<plan_id>.{json,xml,srt}（不覆盖既有产物，零付费）
+    WB-->>SRV: {files, degradations, notice}
+    SRV-->>LEAD: 成功 toast / 中文补救
+    end

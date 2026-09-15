@@ -2,6 +2,20 @@
 
 OpenMontage 已内置独立的 Qwen3-TTS 服务。工作台、每日生产和数字人驱动音频不需要安装或启动 Voicebox；历史 Python 类名 `VoiceboxTTS` 仅作为项目状态兼容层保留。
 
+## 先分清两件事（常见误解）
+
+1. **`http://127.0.0.1:17494` 是 OpenMontage 自带的 Qwen3-TTS 服务地址，不是 Voicebox 的端口。**
+   独立 Voicebox 早已移除（见 `docs/handoff/DECISIONS.md`）。所以报错
+   `TTSServiceUnavailable 无法连接 OpenMontage 本地配音服务 http://127.0.0.1:17494` 的含义是
+   **「内置本地配音服务没有在运行」**，而不是「缺少某个第三方组件」。
+2. **当前生产配音统一走云端**（`doubao` / `tencent`）。本地内置服务是保留的兼容与离线路径，
+   没装或没启动**不影响云端生产**：`VoiceboxTTS.get_status()` 会返回不可用，
+   `audio_center._local_profiles()` 直接返回空列表且不发网络请求 —— 这是**优雅降级，不是故障**。
+
+写测试时注意：若为了让本地音色出现在目录里而把 `get_status()` 打桩成可用，
+就必须同时把音色目录也打桩（`tests/backlot/conftest.py::local_tts_catalog`），
+否则 `list_profiles()` 会产生真实 HTTP 调用，用例会隐性依赖一个后台服务。
+
 ## 新机器安装
 
 在项目根目录运行：

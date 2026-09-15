@@ -154,3 +154,6 @@ venv/
 /content/episodes/*/qa/*
 !/content/episodes/*/qa/.gitkeep
 /content/episodes/*/composition/out/
+
+# WorkBuddy 工作区记忆（本机专用，不入库）
+.workbuddy/

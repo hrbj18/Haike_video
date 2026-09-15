@@ -13,6 +13,37 @@
 
 FFmpeg/ffprobe 由固定版本的 `static-ffmpeg` Python 包提供；如果系统 PATH 已有完整的一对，也可直接使用。
 
+### 1.1 FFmpeg 必须支持 `-filter_complex_script`（数字人合成）
+
+数字人母版的滤镜图很长，为避免撞上 Windows 命令行长度上限，合成时是**写进临时文件**再交给 FFmpeg 的：
+
+```
+ffmpeg -y -i … -filter_complex_script <临时文件> -map [vout] -map [aout] …
+```
+
+**问题**：并非所有构建都实现了这个选项。本机实测（2026-09-12）：
+
+| 二进制 | `-filter_complex_script` |
+|---|---|
+| `static-ffmpeg`（项目自带，`.venv/Lib/site-packages/static_ffmpeg/bin/win32/`） | **支持** |
+| master 构建 `N-126495-g3a165c77dc-20260910`（当时在 PATH 上） | **不支持**，报 `Unrecognized option 'filter_complex_script'.` |
+
+一旦选到不支持的构建，合成会失败，且**发生在付费的数字人生成之后**。
+
+**现在的行为**：`backlot/avatar_import.py::_graph_script_ffmpeg()` 不再按 PATH 顺序取第一个，
+而是**按能力挑选** —— 逐个探测已知候选（`FFMPEG_BINARY`/PATH → VideoCompose 运行时 → `static-ffmpeg`），
+取第一个真正认这个选项的。都不支持时抛出明确中文错误，指出需要改用项目自带的 `static-ffmpeg`。
+
+**排查**：看到 `Unrecognized option 'filter_complex_script'` 或
+`本机没有支持 -filter_complex_script 的 FFmpeg` 时，检查 PATH 上是不是混进了别的 FFmpeg：
+
+```bash
+./.venv/Scripts/python.exe -c "import sys; sys.path.insert(0,'.'); from lib.ffmpeg_locator import supports_option, resolve_ffmpeg_with_option as r; import shutil; print('PATH:', shutil.which('ffmpeg'), supports_option(shutil.which('ffmpeg'), '-filter_complex_script')); print('选中:', r('-filter_complex_script')[0])"
+```
+
+注意 FFmpeg 报错时**会把选项的前导短横线去掉**（打印 `'filter_complex_script'` 而不是 `'-filter_complex_script'`），
+写解析脚本时按无短横线的形式匹配。
+
 ## 2. 克隆与一键安装
 
 这是私有仓库。先用有访问权限的 GitHub 账号完成认证：Git for Windows 可在首次克隆时通过 Git Credential Manager 打开浏览器登录；已安装 GitHub CLI 时也可运行 `gh auth login --web`。不要把个人访问令牌写进命令、脚本或文档。

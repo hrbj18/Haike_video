@@ -1,0 +1,166 @@
+%% Cut V2 类图：并发内核 / 粗剪调度 / 二次精剪计划与渲染 / 导出
+%% 命名与字段与 docs/team-runs/2026-09-12-cut-v2/02-ARCHITECTURE.md 第 3 节一致
+classDiagram
+    direction LR
+
+    class InteractionConcurrency {
+        <<module backlot/interaction_concurrency.py>>
+        +int DEFAULT_ASR_CONCURRENCY = 3
+        +int DEFAULT_INTERACTION_CONCURRENCY = 1
+        +int MAX_CONCURRENCY = 4
+        +resolve_limit(kind, requested) int
+        +run_bounded(items, worker, limit, stats) list
+        +run_batches(items, worker, batch_size, stats) list
+        +serial_kill_switch_active() bool
+    }
+    class ConcurrencyStats {
+        +int dispatched
+        +int completed
+        +int retries
+        +int in_flight_peak
+        +record_start()
+        +record_end()
+    }
+    class InteractionConcurrencyError {
+        <<ValueError>>
+    }
+    InteractionConcurrency --> ConcurrencyStats : 计量在飞峰值
+    InteractionConcurrency --> InteractionConcurrencyError : 抛错
+
+    class BenchmarkHarness {
+        <<scripts/benchmark_interaction_concurrency.py>>
+        +int windows
+        +int chunks
+        +float sleep_ms
+        +list concurrency
+        +fake_analyze(kind, payload, images) dict
+        +fake_asr_submit(data) dict
+        +fake_extract(source, ffmpeg, t, target) tuple
+        +measure() dict
+    }
+    BenchmarkHarness ..> InteractionConcurrency : 复用有界池
+
+    class AsrChunkScheduler {
+        <<tencent_asr._transcribe_long_file>>
+        +int CHUNK_SECONDS = 600
+        +int asr_concurrency
+        +pending_chunks(index) list
+        +process_chunk(index) dict
+        +merge_by_offset(ordered) tuple
+    }
+    AsrChunkScheduler ..> InteractionConcurrency : run_bounded(分片)
+    AsrChunkScheduler ..> ConcurrencyStats
+
+    class WindowScheduler {
+        <<material_interactions.build_interaction_index>>
+        +str VERSION = outdoor-interaction-v1  %% 绝不升位
+        +str window_context_policy
+        +int interaction_concurrency
+        +extract(t) dict
+        +contact_sheets(window) list
+        +paid_window(window, batch_context) dict
+    }
+    WindowScheduler ..> InteractionConcurrency : run_batches / 1-slot 锁
+    WindowScheduler ..> ConcurrencyStats
+
+    class SecondPassOptions {
+        +str pause_handling
+        +float pause_speed
+        +bool audio_fade
+        +float audio_fade_ms
+        +bool edge_fade
+        +float edge_fade_ms
+        +float pause_margin_head_seconds
+        +float pause_margin_tail_seconds
+        +normalize(raw) SecondPassOptions
+    }
+    class OccurrenceAction {
+        +str kind
+        +float value
+        +str unit
+        +str reason
+    }
+    class Occurrence {
+        +str occurrence_id
+        +str role
+        +list group_ids
+        +float source_start
+        +float source_end
+        +float speed
+        +list actions
+    }
+    class PauseTrim {
+        +str trim_id
+        +str occurrence_id
+        +float source_start
+        +float source_end
+        +float removed_seconds
+    }
+    class SpeedSegment {
+        +str segment_id
+        +str occurrence_id
+        +float source_start
+        +float source_end
+        +float speed
+        +str unit
+        +str reason
+    }
+    class SecondPassPlan {
+        +str VERSION = interaction-second-pass-plan-v4
+        +set SUPPORTED_VERSIONS
+        +dict options
+        +list occurrences
+        +list pause_trims
+        +list speed_segments
+        +list timeline_mapping
+        +list subtitle_cues
+        +float output_duration
+        +list degradations
+        +build_second_pass_plan(...) SecondPassPlan
+        +validate_second_pass_plan(plan)
+    }
+    class SecondPassRender {
+        +str VERSION = interaction-second-pass-render-v3
+        +_atempo_chain(speed) str
+        +_segment_audio_filters(start, end, speed) str
+        +_filters(occurrences, contract, ...) tuple
+        +render_second_pass_candidate(source, plan, ...) dict
+    }
+
+    SecondPassOptions --> SecondPassPlan : 冻结进计划
+    Occurrence --> OccurrenceAction : 含 1..* 动作
+    SecondPassPlan --> Occurrence : 派生
+    SecondPassPlan --> PauseTrim : 派生(remove)
+    SecondPassPlan --> SpeedSegment : 派生(speed_up)
+    SpeedSegment ..> Occurrence : 切出等待段
+    SecondPassRender --> SecondPassPlan : 读取 occurrences
+    SecondPassRender --> Occurrence : 逐段渲染
+
+    class MaterialInteractionExport {
+        <<backlot/material_interaction_export.py>>
+        +str SCHEMA_NAME = cut-list-v1
+        +int SCHEMA_VERSION = 1
+        +build_cut_list(plan, source, contract, media_reference) dict
+        +build_fcp7_xml(cut_list) str
+        +build_otio(cut_list) dict
+        +export_plan(plan, output_dir, formats, ...) dict
+    }
+    class InteractionExportError {
+        <<ValueError>>
+    }
+    MaterialInteractionExport ..> SecondPassPlan : 只读冻结计划
+    MaterialInteractionExport --> InteractionExportError
+
+    class WorkbenchExportEntry {
+        <<backlot/workbench.py>>
+        +export_second_pass_plan(project_dir, asset_id, plan_id, payload) dict
+        +_interaction_dependency_preflight(...) dict
+    }
+    WorkbenchExportEntry --> MaterialInteractionExport : 落盘 + 提示
+    WorkbenchExportEntry ..> SecondPassPlan
+
+    class ExportRoute {
+        <<backlot/server.py>>
+        +POST second-pass/{plan_id}/export
+    }
+    ExportRoute --> WorkbenchExportEntry
