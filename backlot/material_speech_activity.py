@@ -73,9 +73,25 @@ def _model_path() -> Path:
     return Path(get_assets_path()) / "silero_vad_v6.onnx"
 
 
+def _require_vad_runtime() -> None:
+    """Treat a broken onnxruntime as "unavailable" instead of crashing later.
+
+    依赖装上了、但 onnxruntime 的 DLL 初始化失败（本机 System32 的 msvcp140.dll /
+    vcruntime140.dll 长期停在 VS2017 的 14.0.24215.1，而 onnxruntime 1.29 是 VS2022
+    构建）时，``get_speech_timestamps`` 会抛一个**裸 RuntimeError**，绕过上层专门为
+    「可选依赖缺失」准备的降级路径，把已经成立的互动区间一起毁掉。在这里提前判定，
+    ``capability()`` 才能如实上报不可用并让审核端看到原因。
+    """
+    try:
+        import onnxruntime  # noqa: F401
+    except Exception as exc:  # DLL 初始化失败抛的是 ImportError/OSError，不是 ImportError 一族
+        raise SpeechActivityUnavailable(f"本机 VAD 运行依赖不可用：{exc}") from exc
+
+
 def runtime_identity(options: SpeechActivityOptions | None = None) -> dict[str, Any]:
     options = options or SpeechActivityOptions()
     options.validate()
+    _require_vad_runtime()
     model = _model_path()
     if not model.is_file():
         raise SpeechActivityUnavailable("本地 Silero VAD 模型不存在；不会自动联网下载")
@@ -218,7 +234,12 @@ def detect_speech_activity(
         decoded_samples += int(audio.size)
         chunk_count += 1
         if audio.size:
-            for row in detector(audio, sampling_rate=SAMPLE_RATE):
+            try:
+                detected = detector(audio, sampling_rate=SAMPLE_RATE)
+            except (ImportError, OSError, RuntimeError) as exc:
+                # 运行期才发现依赖坏掉（onnxruntime 的 DLL 初始化失败等）也要走降级路径。
+                raise SpeechActivityUnavailable(f"本机 VAD 运行依赖不可用：{exc}") from exc
+            for row in detected:
                 try:
                     local_start = int(row["start"]) / SAMPLE_RATE
                     local_end = int(row["end"]) / SAMPLE_RATE

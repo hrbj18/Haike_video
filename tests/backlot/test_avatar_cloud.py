@@ -452,7 +452,8 @@ def test_stale_package_save_is_rejected_instead_of_overwriting_newer_state(proje
         avatar_mod._save_package(project, stale)
 
 
-def test_voicebox_take_is_auditioned_before_becoming_cloud_driving_audio(project, monkeypatch):
+def test_voicebox_take_is_auditioned_before_becoming_cloud_driving_audio(project, monkeypatch,
+                                                                        local_tts_catalog):
     """Local TTS stays a candidate; only an explicit adoption changes cloud input."""
     avatar_mod.initialize_avatar_package(project, {"generation_mode": "dashscope_wan_s2v"})
     monkeypatch.setattr(cloud_mod, "_probe_audio", lambda _path: {
@@ -587,7 +588,9 @@ def test_voicebox_same_name_routing_wins_over_default_and_single_turn_uses_it(pr
     validate_artifact("avatar_source_package", queued)
 
 
-def test_voicebox_batch_is_script_order_serial_and_preserves_current_audio_in_candidate_mode(project, monkeypatch):
+def test_voicebox_batch_is_script_order_serial_and_preserves_current_audio_in_candidate_mode(project,
+                                                                                             monkeypatch,
+                                                                                             local_tts_catalog):
     avatar_mod.initialize_avatar_package(project, {"generation_mode": "dashscope_wan_s2v"})
     calls: list[tuple[str, str]] = []
     _prepare_fake_voicebox(monkeypatch, calls)
@@ -662,7 +665,9 @@ def test_voicebox_mapping_and_batch_http_routes_return_project_workbench(client,
     assert started.json()["avatar_package"]["voicebox"]["batch"]["mode"] == "missing_and_apply"
 
 
-def test_voicebox_candidate_cannot_replace_audio_while_cloud_turn_is_running(project, tmp_path, monkeypatch):
+def test_voicebox_candidate_cannot_replace_audio_while_cloud_turn_is_running(project, tmp_path,
+                                                                            monkeypatch,
+                                                                            local_tts_catalog):
     setup_ready_cloud_package(project, tmp_path, monkeypatch)
     monkeypatch.setattr(cloud_mod, "read_audio_center", lambda: {
         "provider": {"status": "available"}, "default_voice": {"id": "voice-yaya", "name": "雅雅"},

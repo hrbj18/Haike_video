@@ -118,7 +118,9 @@ def _scene_change_times(source: Path, ffmpeg: str, duration: float, threshold: f
         # Coarse indexing does not need every full-resolution source frame.
         # Downsample before scene scoring so a one-hour upload stays bounded.
         "-vf", f"fps=2,scale=480:-2,select='gt(scene,{threshold:.3f})',showinfo",
-        "-vsync", "vfr",
+        # ffmpeg 8 起移除了 -vsync（本机 PATH 上的构建会直接报 Unrecognized option），
+        # -fps_mode 是等价的新写法，项目自带的 8.0.1 同样支持。
+        "-fps_mode", "vfr",
         "-f", "null",
         "-",
     ], timeout=max(180, duration * 1.5))

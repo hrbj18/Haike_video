@@ -9,12 +9,18 @@ from pathlib import Path
 import subprocess
 from typing import Any
 
+from backlot.material_motion_timeline import (
+    MaterialMotionTimelineError,
+    max_motion_in,
+    motion_identity as _motion_identity,
+)
+
 
 VERSION = "interaction-refinement-v2"
 BOUNDARY_EXTENSION_SECONDS = 6.0
 PROTECTION_PADDING_SECONDS = .15
 STAGES = {"greeting", "dialogue", "action", "reaction", "waiting", "departure", "unrelated", "unknown"}
-PAUSE_VISUAL_VERSION = "interaction-pause-visual-v1"
+PAUSE_VISUAL_VERSION = "interaction-pause-visual-v2"
 PAUSE_VISUAL_FPS = 2.0
 PAUSE_VISUAL_WIDTH = 96
 PAUSE_VISUAL_HEIGHT = 54
@@ -27,12 +33,19 @@ class InteractionRefinementError(ValueError):
     pass
 
 
-def pause_visual_identity() -> dict[str, Any]:
+def pause_visual_identity(motion: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Identity of the visual-permission evidence.
+
+    The motion metric identity is part of it: a source analysed with the
+    whole-file timeline is a different measurement from the per-window
+    ``-ss`` sampler, and the two must never share a cache entry.
+    """
     identity = {
         "version": PAUSE_VISUAL_VERSION, "fps": PAUSE_VISUAL_FPS,
         "width": PAUSE_VISUAL_WIDTH, "height": PAUSE_VISUAL_HEIGHT,
         "max_windows": PAUSE_VISUAL_MAX_WINDOWS, "max_seconds": PAUSE_VISUAL_MAX_SECONDS,
         "low_motion_threshold": PAUSE_VISUAL_LOW_MOTION,
+        "motion_identity": (motion or _motion_identity()).get("signature"),
     }
     identity["signature"] = _digest(identity)
     return identity
@@ -165,8 +178,60 @@ def plan_pause_visual_windows(index: dict[str, Any], *, max_windows: int = PAUSE
     return [{**row, "id": f"PV{sequence:03d}"} for sequence, row in enumerate(selected, 1)]
 
 
+def plan_pause_visual_windows_from_timeline(
+    index: dict[str, Any], motion_timeline: dict[str, Any], *,
+    max_windows: int | None = None, max_seconds: float = PAUSE_VISUAL_MAX_SECONDS,
+) -> list[dict[str, Any]]:
+    """Every ASR gap, judged against the whole-file motion timeline.
+
+    The legacy :func:`plan_pause_visual_windows` spends a **global budget of 12
+    windows** for the entire source, which measured only 3/28 event coverage:
+    authorization was a lottery, not a content decision.  Here every gap is
+    evaluated (``max_windows=None``), and the permission is decided by the
+    pause's *own* span rather than by one sampled 2-second slice.
+    """
+    max_seconds = _number(max_seconds, minimum=.5, maximum=PAUSE_VISUAL_MAX_SECONDS, label="局部画面窗口")
+    limit = None if max_windows is None else int(_number(max_windows, minimum=1, maximum=10_000,
+                                                        label="局部画面疑点预算"))
+    utterances = _valid_utterances(index)
+    rows: list[dict[str, Any]] = []
+    for left, right in zip(utterances, utterances[1:]):
+        gap_start, gap_end = float(left["end"]), float(right["start"])
+        available_start = gap_start + PROTECTION_PADDING_SECONDS
+        available_end = gap_end - PROTECTION_PADDING_SECONDS
+        if available_end - available_start < .5:
+            continue
+        duration = min(max_seconds, available_end - available_start)
+        center = (available_start + available_end) / 2
+        start, end = center - duration / 2, center + duration / 2
+        try:
+            motion_maximum = max_motion_in(motion_timeline, start, end)
+        except MaterialMotionTimelineError as exc:
+            raise InteractionRefinementError(str(exc)) from exc
+        authorized = motion_maximum <= PAUSE_VISUAL_LOW_MOTION
+        rows.append({
+            "start": round(start, 3), "end": round(end, 3),
+            "gap_start": round(gap_start, 3), "gap_end": round(gap_end, 3),
+            "gap_seconds": round(gap_end - gap_start, 3),
+            "left_utterance_id": str(left.get("id") or ""),
+            "right_utterance_id": str(right.get("id") or ""),
+            "motion_maximum": round(motion_maximum, 6),
+            "low_motion_threshold": PAUSE_VISUAL_LOW_MOTION,
+            "authorized": authorized,
+            "safe_to_shorten": authorized,
+            "stage": "waiting" if authorized else "action",
+            "reason": "全片运动时间线显示该停顿区间画面稳定" if authorized
+                      else "全片运动时间线显示该停顿区间存在活动，保守保留",
+        })
+    if limit is not None:
+        rows = sorted(rows, key=lambda row: (-row["gap_seconds"], row["start"]))[:limit]
+        rows.sort(key=lambda row: row["start"])
+    return [{**row, "id": f"PV{sequence:03d}"} for sequence, row in enumerate(rows, 1)]
+
+
 def analyze_pause_visual_activity(
     source: Path, index: dict[str, Any], *, ffmpeg: str,
+    motion_timeline: dict[str, Any] | None = None,
     timeout: float = 180.0,
     runner: Any = subprocess.run,
 ) -> dict[str, Any]:
@@ -175,11 +240,51 @@ def analyze_pause_visual_activity(
     This is intentionally conservative and semantic-free: low motion may
     authorize a short waiting edit, while high motion and decode uncertainty
     only protect/retain content.  It never claims to identify a person/action.
+
+    Passing ``motion_timeline`` (the whole-file timeline) answers every window
+    from memory — **zero spawns** — and keeps the legacy ``-ss`` sampler only as
+    the fallback path.
     """
     source = Path(source).resolve()
     if not source.is_file():
         raise InteractionRefinementError("局部画面源素材不存在")
     windows = plan_pause_visual_windows(index)
+    identity = pause_visual_identity()
+    if motion_timeline is not None:
+        annotations = []
+        failures = 0
+        for row in windows:
+            try:
+                maximum = max_motion_in(motion_timeline, float(row["start"]), float(row["end"]))
+            except MaterialMotionTimelineError:
+                failures += 1
+                annotations.append({
+                    **row, "stage": "unknown", "confidence": 0.0, "safe_to_shorten": False,
+                    "evidence_frame_ids": [], "local_evidence_ids": [], "frame_count": 0,
+                    "reason": "局部画面证据不足，保守保留",
+                })
+                continue
+            low_motion = maximum <= PAUSE_VISUAL_LOW_MOTION
+            annotations.append({
+                **row, "stage": "waiting" if low_motion else "action",
+                "confidence": round(max(.85, 1.0 - maximum), 3) if low_motion else .5,
+                "safe_to_shorten": low_motion,
+                "evidence_frame_ids": [],
+                "local_evidence_ids": [],
+                "frame_count": 0,
+                "motion": {"maximum": round(maximum, 6), "median": None,
+                           "low_motion_threshold": PAUSE_VISUAL_LOW_MOTION,
+                           "source": "whole_file_timeline"},
+                "reason": "全片运动时间线显示该停顿区间画面稳定" if low_motion
+                          else "全片运动时间线显示该停顿区间存在活动，保守保留",
+            })
+        return {
+            "version": PAUSE_VISUAL_VERSION,
+            "status": "available" if not failures else ("partial" if failures < len(windows) else "unavailable"),
+            "identity": identity, "windows": annotations,
+            "metadata": {"window_count": len(windows), "failed_windows": failures, "frame_count": 0,
+                         "spawns": 0, "source": "whole_file_timeline"},
+        }
     try:
         import numpy as np
     except ImportError:
@@ -236,13 +341,13 @@ def analyze_pause_visual_activity(
                 "reason": "局部画面证据不足，保守保留",
             }
         annotations.append(annotation)
-    identity = pause_visual_identity()
     return {
         "version": PAUSE_VISUAL_VERSION,
         "status": "available" if not failures else ("partial" if failures < len(windows) else "unavailable"),
         "identity": identity, "windows": annotations,
         "metadata": {"window_count": len(windows), "failed_windows": failures,
-                     "frame_count": sum(int(row.get("frame_count") or 0) for row in annotations)},
+                     "frame_count": sum(int(row.get("frame_count") or 0) for row in annotations),
+                     "spawns": len(windows), "source": "per_window_decode"},
     }
 
 

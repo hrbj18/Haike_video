@@ -395,7 +395,12 @@ def test_second_pass_api_requires_one_confirmation_then_supports_review_and_appr
         assert data["second_pass_job"]["status"] == "completed", data["second_pass_job"]
         second = data["second_pass_candidates"][0]
         assert second["status"] == "pending_review" and second["parent_current"] is True
-        assert [row["id"] for row in second["story"]["groups"] if row["selected"]] == ["G2"]
+        # G3 holds "拜拜。", the clip's closing word, so the deterministic edge
+        # anchor keeps it even though the model called it disposable farewell —
+        # the clip has to end *on* the farewell, not before it.
+        assert [row["id"] for row in second["story"]["groups"] if row["selected"]] == ["G2", "G3"]
+        anchored = next(row for row in second["story"]["groups"] if row["id"] == "G3")
+        assert "锚定" in anchored["reason"]
         assert second["story_identity"]["confirmed"] is True
         assert second["story_identity"]["maximum_model_calls"] == 1
         assert counters == {"analysis": 1, "render": 1}

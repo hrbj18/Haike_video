@@ -1196,3 +1196,69 @@ def test_avatar_master_applies_immutable_native_audio_timeline_and_composite_rev
     assert final_path.is_file()
     assert report["avatar"]["audio_mode"] == "native_avatar_audio"
     assert report["avatar"]["pip_scene_ids"] == [second_scene_id]
+
+
+# --- 读路径争用：瞬时 PermissionError 必须重试，不能误报「没有素材包」 -------------
+# 写者用「临时文件 + os.replace」原子保存；Windows 上读者在替换瞬间可能抛
+# PermissionError。若把它当成「读不出来」，接口响应会带 avatar_package=None，
+# 前端 ["voicebox"] 取下标就 TypeError（用户可见）。同时 None 契约本身不变。
+
+
+def test_read_avatar_package_retries_a_transient_permission_error(tmp_path, monkeypatch):
+    project = tmp_path / "avatar-race"
+    (project / "artifacts").mkdir(parents=True)
+    package_path = project / "artifacts" / "avatar_source_package.json"
+    write_json(package_path, {"revision": 1, "generation_mode": "dashscope_wan_s2v"})
+
+    real_read_text = Path.read_text
+    calls = {"count": 0}
+
+    def flaky_read_text(self, *args, **kwargs):
+        if self == package_path and calls["count"] == 0:
+            calls["count"] += 1
+            raise PermissionError(13, "另一个进程正在替换该文件")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", flaky_read_text)
+    monkeypatch.setattr(avatar_mod.time, "sleep", lambda _seconds: None)
+
+    recovered = avatar_mod.read_avatar_package(project)
+
+    assert calls["count"] == 1, "用例没有真正命中一次瞬时 PermissionError"
+    assert recovered is not None, "瞬时争用不得被当成「没有素材包」"
+    assert recovered["generation_mode"] == "dashscope_wan_s2v"
+
+
+def test_read_avatar_package_none_contract_is_unchanged_for_missing_and_corrupt(tmp_path, monkeypatch):
+    project = tmp_path / "avatar-none"
+    (project / "artifacts").mkdir(parents=True)
+    assert avatar_mod.read_avatar_package(project) is None
+
+    package_path = project / "artifacts" / "avatar_source_package.json"
+    package_path.write_text("{ 这不是 JSON", encoding="utf-8")
+    sleeps: list = []
+    monkeypatch.setattr(avatar_mod.time, "sleep", lambda seconds: sleeps.append(seconds))
+    assert avatar_mod.read_avatar_package(project) is None
+    assert sleeps == [], "内容损坏不是瞬时争用，不得退避重试"
+
+
+def test_read_avatar_package_gives_up_only_after_the_retry_budget(tmp_path, monkeypatch):
+    project = tmp_path / "avatar-stuck"
+    (project / "artifacts").mkdir(parents=True)
+    package_path = project / "artifacts" / "avatar_source_package.json"
+    write_json(package_path, {"revision": 1})
+
+    real_read_text = Path.read_text
+    attempts = {"count": 0}
+
+    def always_locked(self, *args, **kwargs):
+        if self == package_path:
+            attempts["count"] += 1
+            raise PermissionError(13, "一直被占用")
+        return real_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", always_locked)
+    monkeypatch.setattr(avatar_mod.time, "sleep", lambda _seconds: None)
+
+    assert avatar_mod.read_avatar_package(project) is None
+    assert attempts["count"] == avatar_mod._PACKAGE_READ_ATTEMPTS

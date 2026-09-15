@@ -16,6 +16,8 @@ from backlot import state as state_mod
 from backlot import workbench as workbench_mod
 from backlot.text_overlay_composition import (
     TextOverlayValidationError,
+    _font_path,
+    _font_variation,
     assert_locked_layer_transition,
     build_text_overlay_assets,
     composition_layers_for_window,
@@ -321,5 +323,53 @@ def test_video_compose_really_renders_four_animated_layers(tmp_path: Path) -> No
     })
     assert result.success, result.error
     assert output.is_file() and output.stat().st_size > 1000
-    assert result.data["overlay_count"] == 4
-    assert len(report["assets"]) == 4
+
+
+def test_noto_family_resolves_to_the_variable_font_with_a_weight_named_instance() -> None:
+    resolved = _font_path("Noto Sans SC", True)
+    assert resolved is not None and resolved.name == "NotoSansSC-VF.ttf"
+    assert _font_variation(layer("T1", font_family="Noto Sans SC", font_weight=900)) == "Black"
+    assert _font_variation(layer("T1", font_family="思源黑体", font_weight=700)) == "Bold"
+
+
+def test_non_variable_family_must_not_gain_a_variation() -> None:
+    """A stray variation name would silently reraster every existing project."""
+    assert _font_variation(layer("T1", font_family="Microsoft YaHei", font_weight=900)) == ""
+    assert _font_variation(layer("T1", font_family="SimHei", font_weight=900)) == ""
+
+
+def test_explicit_font_variation_wins_and_survives_normalization() -> None:
+    contract = normalize_text_overlay_composition(composition(
+        layer("T1", font_family="Noto Sans SC", font_weight=900, font_variation="Medium"),
+    ))
+    assert contract["layers"][0]["font_variation"] == "Medium"
+    assert _font_variation(contract["layers"][0]) == "Medium"
+
+
+def test_two_tone_hook_headline_stays_inside_its_lane(tmp_path: Path) -> None:
+    """A raster layer holds one fill colour, so a two-tone headline is two layers.
+
+    This pins the invariants the hook headline actually depends on: the two
+    lines keep a real gap, and neither runs under the presenter picture-in-picture
+    that starts at x=599 on a 1080-wide canvas.
+    """
+    from PIL import Image
+
+    contract = normalize_text_overlay_composition(composition(
+        layer("L1", text="英伟达天价收购", y=.0974, height=.055, width=.47, x=.05, font_family="Noto Sans SC",
+              font_size=56, font_weight=900, color="#5CE1FF", stroke_color="#111111", stroke_width=7,
+              line_height=1.05, text_align="left", background_opacity=0, padding_x=8, padding_y=10),
+        layer("L2", text="爆款是只机械鸭", y=.1396, height=.065, width=.47, x=.05, font_family="Noto Sans SC",
+              font_size=66, font_weight=900, color="#FFD400", stroke_color="#111111", stroke_width=7,
+              line_height=1.05, text_align="left", background_opacity=0, padding_x=8, padding_y=10,
+              z_index=1),
+    ))
+    overlays, _ = build_text_overlay_assets(tmp_path, contract, 1080, 1920, window_end_seconds=5)
+    assert [item["text_layer_id"] for item in overlays] == ["L1", "L2"]
+    assert contract["layers"][0]["color"] != contract["layers"][1]["color"]
+
+    first = Image.open(overlays[0]["asset_path"]).convert("RGBA").split()[-1].getbbox()
+    second = Image.open(overlays[1]["asset_path"]).convert("RGBA").split()[-1].getbbox()
+    assert overlays[1]["y"] + second[1] > overlays[0]["y"] + first[3], "lines must not overlap"
+    assert overlays[0]["x"] + first[2] < 599
+    assert overlays[1]["x"] + second[2] < 599

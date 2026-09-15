@@ -243,7 +243,7 @@ def _scene_activity_times(source: Path, ffmpeg: str, duration: float) -> list[di
     completed = _run([
         ffmpeg, "-hide_banner", "-i", str(source), "-an", "-sn", "-dn",
         "-vf", "fps=2,scale=480:-2,select='gt(scene,0.30)',showinfo",
-        "-vsync", "vfr", "-f", "null", "-",
+        "-fps_mode", "vfr", "-f", "null", "-",
     ], timeout=max(180, duration * 1.5))
     rows: list[dict[str, Any]] = []
     for match in re.finditer(r"pts_time:([0-9]+(?:\.[0-9]+)?)", completed.stderr or ""):

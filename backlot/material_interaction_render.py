@@ -112,7 +112,20 @@ def _faststart(path: Path) -> bool:
     return moov >= 0 and (mdat < 0 or moov < mdat)
 
 
-def _filters(ranges: list[dict[str, float]], contract: dict[str, Any], has_audio: bool) -> tuple[str, list[str]]:
+def _filters(ranges: list[dict[str, float]], contract: dict[str, Any],
+             has_audio: bool) -> tuple[str, list[str]]:
+    """Build the filter graph and the output mappings for a single input.
+
+    取值一律走**绝对时间戳** trim，输入只有一个。这要求送进来的媒体时间戳连续，
+    因此调用方必须传审核代理（`render_source`）而不是原片：
+
+    本项目的长直播回放是 TS 转封装录制的 HEVC，时间戳在部分区间断裂。直接对原片
+    `trim` 会少取数据——实测 46.042 秒的区间只取到 21.8 秒视频 / 25.0 秒音频，候选比
+    保留清单短几十秒，被 QA 判为不合格（QA 只容忍 1 帧 + 一次 AAC padding）。改成
+    「每段一次输入 seek」虽然能取对（46.083 秒，误差 41 毫秒），但每段一次 seek 在
+    1.7 GB 的 HEVC 上代价极高：三段事件跑满 900 秒超时。代理是完整重编码的标准
+    H.264、时间戳连续，且分辨率与渲染契约完全一致，所以输出规格不变。
+    """
     pieces = []
     video_inputs = []
     audio_inputs = []
@@ -157,11 +170,19 @@ def render_interaction_candidate(
     *,
     ffmpeg: str,
     ffprobe: str,
+    render_source: Path | None = None,
     longest_edge: int = 1280,
     timeout: float = 900,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
 ) -> dict[str, Any]:
-    """Render one exact edit plan and return its auditable browser-preview manifest."""
+    """Render one exact edit plan and return its auditable browser-preview manifest.
+
+    ``source`` 是原片，负责指纹校验和渲染契约（尺寸/帧率/音轨以它为准）；
+    ``render_source`` 是真正送进 FFmpeg 的文件，默认同原片。长直播回放的原片是
+    TS 转封装录制的 HEVC、时间戳在部分区间断裂，直接 trim 会少取数据（见 ``_filters``），
+    所以调用方应传时间戳连续的审核代理——它由原片完整重编码而来，分辨率与契约一致，
+    输出规格不受影响。
+    """
     validate_edit_plan(plan)
     source = source.resolve()
     expected_fingerprint = str((plan.get("source") or {}).get("fingerprint") or "")
@@ -170,13 +191,22 @@ def render_interaction_candidate(
     ranges = plan.get("keep_ranges") or []
     if not ranges:
         raise InteractionRenderError("精剪清单没有可保留画面")
+    media_input = Path(render_source).resolve() if render_source else source
+    if not media_input.is_file():
+        raise InteractionRenderError("审核代理不存在，已停止生成候选")
+    render_fingerprint = expected_fingerprint if media_input == source else media_content_fingerprint(media_input)
     source_probe = probe_media(source, ffprobe, runner=runner)
     contract = _render_contract(source_probe, longest_edge)
     has_audio = contract["audio"] is not None
+    if media_input != source:
+        render_streams = probe_media(media_input, ffprobe, runner=runner).get("streams") or []
+        if any(row.get("codec_type") == "audio" for row in render_streams) != has_audio:
+            raise InteractionRenderError("审核代理的音轨与原片不一致，已停止生成候选")
     frozen = {
         "version": VERSION, "plan_id": plan["plan_id"], "plan_revision": plan["revision"],
         "source_fingerprint": expected_fingerprint, "keep_ranges": ranges,
         "timeline_mapping": plan.get("timeline_mapping"), "contract": contract,
+        "render_source_fingerprint": render_fingerprint,
     }
     signature = _digest(frozen)
     directory = output_dir.resolve() / str(plan["plan_id"]) / signature[:20]
@@ -193,8 +223,12 @@ def render_interaction_candidate(
     if temporary.exists():
         temporary.unlink()
     filter_graph, mappings = _filters(ranges, contract, has_audio)
-    command = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", str(source),
-               "-filter_complex", filter_graph, *mappings, "-c:v", "libx264", "-preset", "fast", "-crf", "25",
+    expected_duration = sum(float(row["end"]) - float(row["start"]) for row in ranges)
+    command = [ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y", "-i", str(media_input),
+               "-filter_complex", filter_graph, *mappings,
+               # 输出级 -t 把成品卡在各保留段之和上，避免尾部边界帧累积。
+               "-t", f"{expected_duration:.6f}",
+               "-c:v", "libx264", "-preset", "fast", "-crf", "25",
                "-pix_fmt", "yuv420p", "-threads", "4"]
     if has_audio:
         command.extend(["-c:a", "aac", "-b:a", "128k", "-ar", "48000"])
@@ -207,7 +241,7 @@ def render_interaction_candidate(
         video = next((row for row in output_probe["streams"] if row.get("codec_type") == "video"), {})
         audio = next((row for row in output_probe["streams"] if row.get("codec_type") == "audio"), None)
         actual = float((output_probe.get("format") or {}).get("duration") or 0)
-        expected = sum(float(row["end"]) - float(row["start"]) for row in ranges)
+        expected = expected_duration
         tolerance = 1.0 / float(contract["fps"]) + (1024.0 / 48000 if has_audio else 0) + .01
         checks = {
             "video_codec": video.get("codec_name") == "h264",

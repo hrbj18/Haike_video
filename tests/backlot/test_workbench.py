@@ -128,7 +128,104 @@ def test_subtitle_phrases_do_not_split_latin_product_group():
     )
 
     assert any("Xiaomi AI Cube Prototype" in phrase for phrase in phrases)
-    assert "".join(phrases).replace(" ", "") == "小米展示玄戒O100原型机和XiaomiAICubePrototype端侧AI原型设备。"
+    # The closing 。 goes with the caption's final punctuation.
+    assert "".join(phrases).replace(" ", "") == "小米展示玄戒O100原型机和XiaomiAICubePrototype端侧AI原型设备"
+
+
+def test_subtitle_phrases_let_a_nearby_comma_beat_the_hard_cut():
+    """A comma one character past the limit must win over slicing a word.
+
+    The delivered microduck S01 rendered "更狠的是仿真器和强化学习训练栈全部开"
+    followed by "源，个人开发者也能改。": the comma sat at index 19 while the
+    window only reached index 18, so 开源 was cut in half and the stray 源
+    opened the next frame.  The comma decides the cut, then leaves the frame.
+    """
+    phrases = workbench_mod._split_subtitle_phrases(
+        "更狠的是仿真器和强化学习训练栈全部开源，个人开发者也能改。"
+    )
+
+    assert phrases == [
+        "更狠的是仿真器和强化学习训练栈全部开源",
+        "个人开发者也能改",
+    ]
+
+
+def test_subtitle_captions_drop_the_line_final_mark_but_keep_inner_commas():
+    """The frame cut terminates a caption, so a dangling mark reads as a typo.
+
+    The delivered film showed "发布24小时卖了260万美元，" with the comma still
+    attached, while a comma sitting at a semantic pause *inside* one frame is
+    what makes a long caption readable, so only the final mark is dropped.
+    """
+    assert workbench_mod._split_subtitle_phrases(
+        "一只桌面机器鸭，发布24小时卖了260万美元，折合人民币一千八百万。"
+    ) == [
+        "一只桌面机器鸭",
+        "发布24小时卖了260万美元",
+        "折合人民币一千八百万",
+    ]
+    assert workbench_mod._split_subtitle_phrases(
+        "全身15个电机驱动，配了摄像头、深度传感器，还有两颗惯性测量单元。"
+    ) == [
+        "全身15个电机驱动，配了摄像头",
+        "深度传感器，还有两颗惯性测量单元",
+    ]
+    # Tone marks and ellipses survive final position: they carry intonation the
+    # frame cut cannot express.
+    assert workbench_mod._split_subtitle_phrases("你会买吗？") == ["你会买吗？"]
+    assert workbench_mod._split_subtitle_phrases("它就这么停住了……") == ["它就这么停住了……"]
+
+
+def test_hand_edited_captions_also_lose_their_line_final_mark():
+    scene: dict = {}
+    scene["subtitles"] = {"cue_overrides": {"cue-001": "开场说明，"}}
+    assert workbench_mod._subtitle_cue_text(scene, 0, "fallback") == "开场说明"
+
+    scene = {"subtitles": {"cue_overrides": {"cue-002": "为什么？"}}}
+    assert workbench_mod._subtitle_cue_text(scene, 1, "fallback") == "为什么？"
+
+
+def test_subtitle_phrases_keep_a_short_tail_on_the_previous_frame():
+    """A one-to-three character tail is a leftover, not its own frame."""
+    for text in (
+        "是一家开源机器人公司做的宠物级小型机器人。",
+        "训练好的动作模型直接部署在机器人本体上。",
+    ):
+        phrases = workbench_mod._split_subtitle_phrases(text)
+
+        assert phrases == [workbench_mod._strip_subtitle_trailing_punctuation(text)], phrases
+        assert len(phrases[-1]) >= workbench_mod.SUBTITLE_MIN_TAIL_CHARS
+
+
+def test_subtitle_phrases_stay_inside_the_frame_width_budget():
+    """Every phrase must stay within the measured 21-glyph width ceiling.
+
+    21 CJK glyphs at font_size 64 measure 984px on a 1080px canvas
+    (≈0.732em per glyph in libass + Microsoft YaHei), and ``WrapStyle: 2``
+    clips rather than wraps — so the ceiling is a hard constraint.
+    """
+    wide_limit = workbench_mod.SUBTITLE_MAX_CHARS + workbench_mod.SUBTITLE_BREAK_LOOKAHEAD + 1
+    lines = [
+        "一只桌面机器鸭，发布 24 小时卖了 260 万美元，折合人民币一千八百万。",
+        "它叫 Microduck，是一家开源机器人公司做的宠物级小型机器人。",
+        "全身 15 个电机驱动，配了摄像头、深度传感器，还有两颗惯性测量单元。",
+        "主控是一颗 RK3566 芯片，训练好的动作模型直接部署在机器人本体上。",
+        "用手柄就能直接控制它走路、坐下、站起来，还能用嘴把东西叼走。",
+        "更狠的是仿真器和强化学习训练栈全部开源，个人开发者也能改。",
+        "在仿真里训练自定义动作，导出成 ONNX 策略，再直接部署到真机运行。",
+        "四千块的价签，买到的是一个能自己学本事的机器人平台，你会买吗？",
+    ]
+
+    for line in lines:
+        phrases = workbench_mod._split_subtitle_phrases(line)
+
+        assert phrases and all(phrase == phrase.strip() for phrase in phrases)
+        for phrase in phrases:
+            assert len(phrase) <= wide_limit, (line, phrase, len(phrase))
+        assert not (
+            len(phrases) >= 2
+            and len(phrases[-1]) < workbench_mod.SUBTITLE_MIN_TAIL_CHARS
+        ), (line, phrases)
 
 
 def test_video_loudness_normalization_targets_douyin_ready_level(tmp_path: Path):
@@ -679,12 +776,20 @@ def test_subtitles_are_split_into_short_phrase_cues(projects_root):
     subtitle_path = workbench_mod._write_subtitles(project, scenes, sections)
     content = subtitle_path.read_text(encoding="utf-8")
 
-    assert content.count(" --> ") == 4
-    assert "如果你总觉得一本书很厚、很难开始，" in content
-    assert "不妨先别追求一次读完。" in content
-    assert "你只要先读十分钟，" in content
-    assert "今天就已经迈出第一步了。" in content
-    assert all(len(line) <= 19 for line in content.splitlines() if line and "-->" not in line and not line.isdigit())
+    # Three cues, not four: the closing 21-glyph sentence stays whole.  The old
+    # hard cut at 18 left a stranded "步了。" on its own frame.
+    wide_limit = workbench_mod.SUBTITLE_MAX_CHARS + workbench_mod.SUBTITLE_BREAK_LOOKAHEAD + 1
+    assert content.count(" --> ") == 3
+    captions = [
+        line for line in content.splitlines()
+        if line and "-->" not in line and not line.isdigit()
+    ]
+    assert captions == [
+        "如果你总觉得一本书很厚、很难开始",
+        "不妨先别追求一次读完",
+        "你只要先读十分钟，今天就已经迈出第一步了",
+    ]
+    assert all(len(line) <= wide_limit for line in captions)
 
 
 def test_scene_subtitle_edits_preserve_review_preview_and_phrase_timing(projects_root):
@@ -976,6 +1081,118 @@ def test_workbench_client_exposes_persistent_light_dark_theme_switch(client, pro
     assert ".theme-toggle" in stylesheet.text
 
 
+def test_the_second_pass_job_key_reacts_to_the_derivation_version(monkeypatch):
+    """A better derivation must re-run the same parent+options, not return the old plan.
+
+    Keyed on the request alone, a completed job short-circuits (see
+    ``start_asset_material_interaction_second_pass_job``), so a change to the
+    story normalizer, the spoken-unit derivation or the plan format would keep
+    serving a plan this build no longer generates.  The acceptance run hit
+    exactly that: one material silently reused an old, wrongly anchored plan.
+    """
+    request = {"parent_plan_id": "IEP-x", "expected_parent_revision": 1,
+               "options": {"speed": 1.1}}
+    baseline = workbench_mod._interaction_second_pass_job_signature("S-001", request)
+    assert baseline == workbench_mod._interaction_second_pass_job_signature("S-001", request)
+    assert baseline != workbench_mod._interaction_second_pass_job_signature("S-002", request)
+    assert baseline != workbench_mod._interaction_second_pass_job_signature(
+        "S-001", {**request, "expected_parent_revision": 2})
+    monkeypatch.setattr(workbench_mod, "INTERACTION_STORY_VERSION", "interaction-story-test")
+    assert workbench_mod._interaction_second_pass_job_signature("S-001", request) != baseline
+    monkeypatch.setattr(workbench_mod, "INTERACTION_STORY_VERSION", "interaction-story-v4")
+    monkeypatch.setattr(workbench_mod, "INTERACTION_UNITS_VERSION", "units-test")
+    assert workbench_mod._interaction_second_pass_job_signature("S-001", request) != baseline
+    monkeypatch.setattr(workbench_mod, "INTERACTION_UNITS_VERSION", "material-interaction-units-v1")
+    monkeypatch.setattr(workbench_mod, "INTERACTION_SECOND_PASS_VERSION", "plan-test")
+    assert workbench_mod._interaction_second_pass_job_signature("S-001", request) != baseline
+
+
+def test_workbench_client_serves_one_row_per_rank_with_its_own_clip_and_score(client):
+    """D 类结构契约：**每条排名自己左切片、右评分**，原素材不参与排名。
+
+    The panel used to stack every score, reason, boundary note and action button
+    into one vertical card list (the material scrolled off screen), and the first
+    rewrite then pinned the *original* video as a left column.  Both are wrong:
+    the clip shown on the left must be the one that belongs to that rank, and the
+    original is only a reference viewer.
+    """
+    script = client.get("/ui/workbench.js").text
+    stylesheet = client.get("/ui/workbench.css").text
+    for marker in (
+        "interaction-rank-layout",
+        "interaction-rank-badge",
+        "interaction-rank-clip",
+        "interaction-clip-player",
+        "interaction-clip-badge",
+        "interaction-source-review",
+        "materialInteractionClipSource",
+        "素材编号 ${row.event_id}",
+        "renderMaterialInteractionRankLayout",
+        "左＝对应切片，右＝对应评分",
+    ):
+        assert marker in script, marker
+    # 每条排名绑定的是**它自己的**切片：优先已出的完整切片，否则是原片里的对应区间。
+    assert "对应切片 · 完整切片 ${candidate.plan_id}" in script
+    assert "对应切片 · 原片区间（尚未生成完整切片）" in script
+    assert "#t=${start.toFixed(3)},${end.toFixed(3)}" in script
+    # 原素材只出现在可折叠的「原片回看」里，不再是排名左侧的常驻列。
+    assert "原片回看（与排名无关，仅用于核对边界）" in script
+    assert "interaction-material-column" not in script
+    assert "interaction-material-column" not in stylesheet
+    assert "interaction-score-column" not in stylesheet
+    # 默认排序 = 优先时间长，且权重出厂序为 时长 > 老外 > 情绪 > 互动/歌舞。
+    assert '["duration_desc", "优先时间长（默认）"]' in script
+    assert '["emotion_desc", "优先情绪值"]' in script
+    assert "duration: 0.40, foreign_speech: 0.25, high_emotion: 0.20, performance: 0.15" in script
+    # 同一主体以「选材要求」呈现，不再是综合分的一项。
+    assert "选材要求 · 同一主体" in script
+    assert "只看满足选材要求" in script
+    # 二次精剪的可见开关：目标时长策略、相邻间隙保留、间隙压缩范围。
+    assert 'el("option", { value: "proportional", selected: "" }, "按素材比例（默认）")' in script
+    assert 'el("option", { value: "tight", selected: "" }, "间隙留 0.3 秒（默认）")' in script
+    assert 'el("option", { value: "any", selected: "" }, "连环境音一起压（默认）")' in script
+    assert "gap_policy: gapPolicy.value" in script
+    # 按素材比例时**不发送**秒数，否则后端会按"固定秒数"处理（策略被悄悄覆盖）。
+    assert 'if (durationPolicy.value === "absolute") {' in script
+    for selector in (".interaction-rank-layout", ".interaction-rank-clip",
+                     ".interaction-clip-player", ".interaction-source-review",
+                     ".interaction-row-detail", ".interaction-story-transcript"):
+        assert selector in stylesheet, selector
+    # 窄屏把「切片 | 评分」降级为上下排列，而不是把切片挤没。
+    assert "grid-template-columns: minmax(180px, 260px) minmax(0, 1fr)" in stylesheet
+
+
+def test_the_second_pass_cards_are_nested_under_their_own_material(client):
+    """二次精剪挂在对应素材行下面，不再单独占页面最底部一整块。
+
+    用户原话："二次精剪不应该分开的，可以在每个素材下面有一个点击展开的下拉部分来展示
+    二次精剪的素材片段。"  以及"字幕在视频里能看到就够了，不需要列这么长的字幕出来给人看"。
+    """
+    script = client.get("/ui/workbench.js").text
+    stylesheet = client.get("/ui/workbench.css").text
+    # 每行自带两层折叠详情，二次精剪的内容按父方案分组挂到行上。
+    assert "interaction-row-detail" in script
+    assert "二次精剪（${secondPassNodes.length} 条，点击展开）" in script
+    assert "第一次完整切片：详情与操作" in script
+    assert "secondPassCardsByParent" in script
+    assert "candidateCardsByEvent" in script
+    # 一个素材多版方案时只铺最新一版，更早的收进「更早的方案」。
+    assert "更早的方案（${newestSecondPass.length - 1} 条，点击展开）" in script
+    assert '"data-updated-at": String(candidate.updated_at || "")' in script
+    # 旧的两块独立列表已经不再渲染。
+    assert 'class: "interaction-second-pass-list"' not in script
+    assert "智能分析与候选片段 · 当前" not in script
+    # 对白墙默认收起（证据保留，点开即得）。
+    assert "该组对白（${(group.utterances || []).length} 句，点击展开）" in script
+    assert "语义分组与取舍（${groupRows.length} 组，点击展开）" in script
+    assert ".interaction-story-transcript" in stylesheet
+    # 交付物：无字幕成片 + 字幕文件，两个下载入口都要在。
+    assert "无字幕成片" in script and "下载字幕文件" in script
+    assert "导出成片+字幕" in script
+    assert "/deliverables" in script
+    assert ".interaction-deliverables" in stylesheet
+
+
 def test_workbench_client_uses_explicit_two_step_visual_batch_flow(client):
     script = client.get("/ui/workbench.js")
     stylesheet = client.get("/ui/workbench.css")
@@ -1085,8 +1302,13 @@ def test_avatar_full_preview_subtitles_reuse_scene_review_phrase_cues(projects_r
     assert "00:00:00,000 --> 00:00:01,500" in content
     assert "00:00:01,500 --> 00:00:04,000" in content
     assert "00:00:04,000 --> 00:00:09,000" in content
-    assert "\u7b2c\u4e00\u53e5\u3002" in content
-    assert "\u7b2c\u4e09\u53e5\u3002" in content
+    # Approved captions are reused as they are, minus the line-final mark: the
+    # frame cut already terminates a caption.
+    captions = [
+        line for line in content.splitlines()
+        if line and "-->" not in line and not line.isdigit()
+    ]
+    assert captions == ["\u7b2c\u4e00\u53e5", "\u7b2c\u4e8c\u53e5", "\u7b2c\u4e09\u53e5"]
     assert "\u5173\u952e\u5e27\u6279\u6ce8" not in content
 
 
@@ -2687,7 +2909,10 @@ def test_new_projects_use_the_approved_circle_presenter_framing(projects_root):
     template = next(item for item in layouts["templates"] if item["id"] == "pip_top_right")
 
     assert layouts["default_template_id"] == "pip_top_right"
-    assert template["geometry"] == {"x": .675, "y": .04, "width": .29}
+    # 2026-09-14 第二版：以用户手绘圈的截图为准重新测量（preview 中心 467.5/210.5、
+    # 直径 ~162px / 511x910）⇒ width .317 / x .557 / y .076，取整为 .31 / .555 / .075。
+    # 右边缘 .865 仍留在平台互动栏裁切线 .87 内侧。
+    assert template["geometry"] == {"x": .555, "y": .075, "width": .31}
     assert template["shape"] == "circle"
     assert template["crop_bottom"] == 0.0
     assert template["face_crop"] == {"x": .48, "y": .38, "zoom": 1.15}
@@ -4422,7 +4647,9 @@ def test_scene_network_refresh_replaces_only_the_selected_scene(projects_root, m
 
 
 @pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg is required for automatic production verification")
-def test_separated_voicebox_narration_and_video_render_create_a_reviewable_final_video(projects_root, monkeypatch):
+def test_separated_voicebox_narration_and_video_render_create_a_reviewable_final_video(projects_root,
+                                                                                       monkeypatch,
+                                                                                       local_tts_catalog):
     """Narration can be listened to before the separately queued FFmpeg render."""
     project = make_project(projects_root)
     # The generic workbench fixture uses a byte placeholder for its many
@@ -4762,7 +4989,9 @@ def test_output_loudness_policy_is_project_level_and_legacy_safe(projects_root, 
 
     legacy = dict(unchanged)
     legacy.pop("output_loudness_policy", None)
-    assert workbench_mod._ensure_output_loudness_policy(legacy)["target_lufs"] == -14.0
+    # 缺字段的项目没有记录过任何目标，因此采用工作站当前默认（此处 monkeypatch 为 -10），
+    # 而不是硬编码的历史值 -14 —— 后者会让绕过 bootstrap 的项目被静默压到旧目标上。
+    assert workbench_mod._ensure_output_loudness_policy(legacy)["target_lufs"] == -10.0
 
 
 def test_background_music_source_range_is_validated_and_invalidates_sample(projects_root, monkeypatch):
@@ -5091,7 +5320,8 @@ def test_background_music_sample_is_isolated_and_must_be_approved(projects_root,
 
 
 @pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg is required for narration timing verification")
-def test_new_narration_marks_existing_short_visuals_for_refresh(projects_root, monkeypatch):
+def test_new_narration_marks_existing_short_visuals_for_refresh(projects_root, monkeypatch,
+                                                               local_tts_catalog):
     """A changed voice clock must expose inadequate selected images/videos before render."""
     project = make_project(projects_root)
     ffmpeg = _ffmpeg_available()
@@ -5134,7 +5364,9 @@ def test_new_narration_marks_existing_short_visuals_for_refresh(projects_root, m
 
 
 @pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg is required for scene narration hot-swap verification")
-def test_scene_narration_candidate_is_auditioned_then_replaces_only_target_segment(projects_root, monkeypatch):
+def test_scene_narration_candidate_is_auditioned_then_replaces_only_target_segment(projects_root,
+                                                                                  monkeypatch,
+                                                                                  local_tts_catalog):
     """A Voicebox take remains a candidate until its B-only composition is promoted."""
     project = make_project(projects_root)
     ffmpeg = _ffmpeg_available()
@@ -5218,7 +5450,8 @@ def test_scene_narration_candidate_is_auditioned_then_replaces_only_target_segme
 
 
 @pytest.mark.skipif(not _ffmpeg_available(), reason="ffmpeg is required for ripple narration verification")
-def test_natural_scene_narration_ripple_keeps_a_and_c_content_while_retiming_c(projects_root, monkeypatch):
+def test_natural_scene_narration_ripple_keeps_a_and_c_content_while_retiming_c(projects_root, monkeypatch,
+                                                                              local_tts_catalog):
     """A shorter B take moves C without regenerating either neighbouring segment."""
     project = make_project(projects_root)
     write_json(project / "artifacts" / "script.json", {
@@ -5299,3 +5532,88 @@ def test_natural_scene_narration_ripple_keeps_a_and_c_content_while_retiming_c(p
     assert __import__("hashlib").sha256((project / segments["SEG-001"]["versions"][0]["artifact_path"]).read_bytes()).hexdigest() == before["SEG-001"]
     assert __import__("hashlib").sha256((project / segments["SEG-003"]["versions"][0]["artifact_path"]).read_bytes()).hexdigest() == before["SEG-003"]
     assert workbench_mod._probe_duration_seconds(project / "renders" / "final.mp4", ffmpeg) == pytest.approx(10, abs=0.05)
+
+
+def test_interaction_rank_preferences_reads_order_mode_and_named_weights():
+    preferences = workbench_mod.interaction_rank_preferences(
+        order_mode="emotion_desc", weights="duration:0.5,high_emotion:0.5")
+    assert preferences["order_mode"] == "emotion_desc"
+    assert preferences["weights"] == {"duration": 0.5, "high_emotion": 0.5}
+    assert workbench_mod.interaction_rank_preferences() == {}
+    # Nothing is inferred from a half-filled string.
+    assert workbench_mod.interaction_rank_preferences(weights=" , ") == {}
+
+
+@pytest.mark.parametrize("kwargs, message", [
+    ({"order_mode": "cheapest"}, "排序方式无效"),
+    ({"weights": "loudness:1"}, "未知的推荐权重项"),
+    ({"weights": "duration:fast"}, "必须是数值"),
+])
+def test_interaction_rank_preferences_rejects_junk(kwargs, message):
+    with pytest.raises(workbench_mod.WorkbenchError, match=message):
+        workbench_mod.interaction_rank_preferences(**kwargs)
+
+
+def test_the_interactions_endpoint_serves_a_ranking_view_without_touching_the_cache(tmp_path, monkeypatch):
+    """A preference request is a view over cached factors, never a cache rewrite."""
+    from backlot import material_interaction_recommend as recommend
+
+    index = {"signature": "sig-1", "source": {"fingerprint": "src"}, "duration": 120.0,
+             "audio": {"status": "available", "utterances": []},
+             "events": [{"event_id": "E1", "group_id": "G1", "start": 0.0, "end": 30.0,
+                         "participants": "一名男子", "summary": "长互动", "completeness": "complete",
+                         "score": 0.6, "quality": {"engagement": 0.5}, "highlights": [],
+                         "utterance_ids": [], "evidence_frame_ids": []},
+                        {"event_id": "E2", "group_id": "G2", "start": 40.0, "end": 42.0,
+                         "participants": "一名女子", "summary": "短互动", "completeness": "complete",
+                         "score": 0.9, "quality": {"engagement": 0.9}, "highlights": [],
+                         "utterance_ids": [], "evidence_frame_ids": []}]}
+    project = tmp_path / "projects" / "demo"
+    (project / "artifacts" / "media-index" / "S-001" / "interaction-candidates").mkdir(parents=True)
+
+    calls = []
+    real_write = recommend.write_recommendations
+
+    def counting_write(path, payload):
+        calls.append(payload["order_mode"])
+        return real_write(path, payload)
+
+    monkeypatch.setattr(workbench_mod, "write_interaction_recommendations", counting_write)
+    default = workbench_mod._interaction_recommendations(project, "S-001", index)
+    assert default["order_mode"] == "duration_desc"
+    assert [row["event_id"] for row in default["events"]] == ["E1", "E2"]
+    assert calls == ["duration_desc"]
+
+    shortest = workbench_mod._interaction_recommendations(project, "S-001", index, sort_mode="duration_asc")
+    assert [row["event_id"] for row in shortest["events"]] == ["E2", "E1"]
+    emotion = workbench_mod._interaction_recommendations(project, "S-001", index, sort_mode="emotion_desc")
+    assert [row["event_id"] for row in emotion["events"]] == ["E2", "E1"]
+    weighted = workbench_mod._interaction_recommendations(
+        project, "S-001", index, weights={"duration": 1, "high_emotion": 0,
+                                         "foreign_speech": 0, "performance": 0})
+    assert [row["event_id"] for row in weighted["events"]] == ["E1", "E2"]
+    # Only the first, canonical build ever wrote the side-car.
+    assert calls == ["duration_desc"]
+
+
+def test_a_stale_recommendation_cache_is_rebuilt_for_the_current_version(tmp_path, monkeypatch):
+    from backlot import material_interaction_recommend as recommend
+
+    index = {"signature": "sig-1", "source": {"fingerprint": "src"}, "duration": 10.0,
+             "audio": {"status": "available", "utterances": []},
+             "events": [{"event_id": "E1", "group_id": "G1", "start": 0.0, "end": 30.0,
+                         "participants": "一名男子", "summary": "互动", "completeness": "complete",
+                         "score": 0.6, "quality": {"engagement": 0.5}, "highlights": [],
+                         "utterance_ids": [], "evidence_frame_ids": []}]}
+    project = tmp_path / "projects" / "demo"
+    root = project / "artifacts" / "media-index" / "S-001" / "interaction-candidates"
+    root.mkdir(parents=True)
+    path = root / "recommendations.json"
+    # A v1 side-car has no `version` and no `requirement`: keeping it would ship
+    # the old scoring to the browser, so it must be rebuilt locally (free).
+    path.write_text(json.dumps({"index_signature": "sig-1", "events": [{"event_id": "E1"}]},
+                               ensure_ascii=False), encoding="utf-8")
+    payload = workbench_mod._interaction_recommendations(project, "S-001", index)
+    assert payload["version"] == recommend.VERSION
+    assert payload["events"][0]["requirement"]["key"] == "same_subject"
+    assert json.loads(path.read_text(encoding="utf-8"))["version"] == recommend.VERSION

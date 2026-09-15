@@ -96,3 +96,38 @@ def test_failed_render_does_not_publish_temporary_or_manifest(tmp_path):
                                             runner=fail_runner)
     assert not list((tmp_path / "out").rglob("*.mp4"))
     assert not list((tmp_path / "out").rglob("manifest.json"))
+
+
+def test_candidate_render_reads_from_the_proxy_not_the_broken_timestamp_source(tmp_path):
+    """时间戳断裂的原片不能直接 trim，渲染必须改读审核代理。
+
+    真实事故：长直播回放原片是 TS 转封装录制的 HEVC，PTS 在部分区间断裂。单输入 +
+    `trim=start:end` 会少取数据——46.042 秒的区间只取到 21.8 秒视频 / 25.0 秒音频，
+    候选被 QA 判为不合格；改成逐段输入 seek 虽能取对（46.083 秒），但每段一次 seek
+    在 1.7 GB 的 HEVC 上要付出分钟级代价，三段事件跑满 900 秒超时。
+    所以渲染源换成时间戳连续的代理，而渲染契约仍按原片计算（规格不变）。
+    """
+    source, ffmpeg, ffprobe = create_fixture(tmp_path)
+    proxy = tmp_path / "review-proxy.mp4"
+    shutil.copy2(source, proxy)
+    plan = plan_for(source)
+    seen = {}
+
+    def capture(command, **kwargs):
+        if command[0] == ffprobe:
+            return subprocess.run(command, **kwargs)
+        seen["command"] = command
+        return subprocess.CompletedProcess(command, 1, "", "stop-here")
+
+    with pytest.raises(render.InteractionRenderError):
+        render.render_interaction_candidate(source, plan, tmp_path / "out", ffmpeg=ffmpeg, ffprobe=ffprobe,
+                                            render_source=proxy, runner=capture)
+
+    command = seen["command"]
+    assert command.count("-i") == 1, "只能开一个输入：多输入各自 seek 会超时"
+    assert command[command.index("-i") + 1] == str(proxy.resolve()), "取帧必须走代理"
+    assert str(source.resolve()) not in command, "原片只用于契约与指纹，不该出现在命令行"
+    assert "-ss" not in command, "不能靠逐段输入 seek：大 HEVC 上代价是分钟级"
+    assert "trim=start=0.000000:end=0.500000" in " ".join(command)
+    assert abs(float(command[command.index("-t") + 1]) - 1.0) < 1e-6, "-t 应卡在各保留段之和上"
+    assert plan["source"]["fingerprint"] not in command

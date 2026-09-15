@@ -82,3 +82,54 @@ def test_real_ffmpeg_silence_detection(tmp_path):
         pytest.skip("Current FFmpeg cannot create the audio fixture")
     rows = audio.detect_silence(source, ffmpeg=ffmpeg, start=0, end=2, noise_db=-35, minimum_duration=.2)
     assert any(row["start"] <= .55 and row["end"] >= 1.45 for row in rows)
+
+
+def test_audio_policy_is_specific_to_the_selected_transcript_engine(tmp_path):
+    assert audio.audio_policy(True) == "doubao_transcript"
+    assert audio.audio_policy(True, "doubao") == "doubao_transcript"
+    assert audio.audio_policy(True, "tencent") == "tencent_transcript"
+    assert audio.audio_policy(True, "local") == "local_transcript"
+    assert audio.audio_policy(False, "tencent") == "disabled"
+    assert audio.audio_policy(True, "TENCENT") == "tencent_transcript"
+    assert set(audio.TRANSCRIPT_PROVIDERS) == {"doubao", "tencent", "local"}
+    assert audio.POLICIES == {"disabled", "doubao_transcript", "tencent_transcript", "local_transcript"}
+
+
+@pytest.mark.parametrize("value", ["openai", "gemini", "", None])
+def test_unknown_transcript_engine_is_rejected_when_requested(value):
+    if value in {"", None}:
+        assert audio.transcript_policy(value) == "doubao_transcript"
+        return
+    with pytest.raises(audio.MaterialAudioEvidenceError, match="不支持的语音识别服务"):
+        audio.transcript_policy(value)
+
+
+def test_cache_identity_separates_engines_for_the_same_source():
+    doubao = audio.cache_identity("same-source", recognize_audio=True, asr_identity="doubao-asr", provider="doubao")
+    tencent = audio.cache_identity("same-source", recognize_audio=True, asr_identity="tencent-asr", provider="tencent")
+    local = audio.cache_identity("same-source", recognize_audio=True, asr_identity="faster-whisper-local", provider="local")
+    assert len({doubao, tencent, local}) == 3
+    # Same engine and same frozen identity must stay stable so cached work is reused.
+    assert tencent == audio.cache_identity("same-source", recognize_audio=True, asr_identity="tencent-asr", provider="tencent")
+
+
+def test_tencent_evidence_records_its_own_policy(tmp_path):
+    result = audio.resolve_audio_evidence(
+        tmp_path / "source.mp4", duration=10, has_audio=True, recognize_audio=True,
+        asr_identity="tencent-asr", provider="tencent",
+        transcript_provider=lambda _: ("腾讯云转写", [
+            {"start": 0, "end": 2.5, "text": "腾讯云转写"},
+        ], {"timestamp_unit": "seconds"}),
+    )
+    assert result["policy"] == "tencent_transcript"
+    assert result["status"] == "available" and result["provider"] == "tencent-asr"
+    assert [row["text"] for row in result["utterances"]] == ["腾讯云转写"]
+
+
+def test_policy_uses_transcript_only_for_real_transcript_policies():
+    assert audio.policy_uses_transcript("doubao_transcript") is True
+    assert audio.policy_uses_transcript("tencent_transcript") is True
+    assert audio.policy_uses_transcript("local_transcript") is True
+    assert audio.policy_uses_transcript("disabled") is False
+    assert audio.policy_uses_transcript(None) is False
+    assert audio.policy_uses_transcript("unknown_transcript") is False

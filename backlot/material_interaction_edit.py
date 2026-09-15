@@ -12,6 +12,8 @@ import time
 from typing import Any
 from pathlib import Path
 
+from backlot.material_audio_evidence import audio_policy
+
 
 VERSION = "interaction-edit-plan-v2"
 SUPPORTED_VERSIONS = {"interaction-edit-plan-v1", VERSION}
@@ -309,7 +311,7 @@ def build_edit_plan(index: dict[str, Any], review: dict[str, Any], event_id: str
         "version": VERSION, "source": source, "index_signature": index.get("signature"),
         "review_revision": review.get("revision"), "event_id": event_id, "group_id": event.get("group_id"),
         "event_start": start, "event_end": end,
-        "audio_policy": (index.get("audio") or {}).get("policy") or ("doubao_transcript" if audio_enabled else "disabled"),
+        "audio_policy": (index.get("audio") or {}).get("policy") or audio_policy(audio_enabled),
         "audio_status": (index.get("audio") or {}).get("status"),
         "asr_identity": (index.get("audio") or {}).get("provider"),
         "transcript_signature": _digest(utterances),

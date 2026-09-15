@@ -33,6 +33,7 @@ from backlot.material_interaction_story import (
     normalize_story_analysis,
     story_utterances,
 )
+from backlot.material_interaction_units import build_spoken_units, units_signature
 
 
 VERSION = "interaction-second-pass-candidates-v1"
@@ -94,10 +95,16 @@ def _resolve_story(
     output_root: Path,
     runtime_identity: dict[str, Any],
     analyze: Callable[[dict[str, Any]], tuple[dict[str, Any], str]],
+    units: list[dict[str, Any]] | None = None,
+    unit_degradations: list[str] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], bool]:
-    context = build_story_context(index, parent_plan, options)
+    context = build_story_context(index, parent_plan, options, units=units)
     request_signature = _digest({
         "version": VERSION, "context_signature": context["signature"],
+        # The unit derivation is part of the request: better atoms are a
+        # different question, and reusing the old answer would silently keep the
+        # 60-second grouping this build exists to replace.
+        "unit_signature": units_signature(units) if units else "",
         "runtime_identity": runtime_identity,
     })
     path = _analysis_record_path(output_root, request_signature)
@@ -114,6 +121,8 @@ def _resolve_story(
     record = {
         "version": VERSION, "status": "submitting", "request_signature": request_signature,
         "context_signature": context["signature"], "runtime_identity": deepcopy(runtime_identity),
+        "unit_source": context["unit_source"], "unit_count": context["unit_count"],
+        "unit_degradations": list(unit_degradations or []),
         "attempts": 1, "safe_resume_point": "story_request_submitting",
     }
     _atomic_json(path, record)
@@ -138,6 +147,7 @@ def _resolve_story(
         "prompt_version": PROMPT_VERSION,
         "context_signature": context["signature"], "analysis_signature": story["signature"],
         "request_signature": request_signature,
+        "unit_source": context["unit_source"], "unit_count": context["unit_count"],
         "model_calls": 1,
         "analysis_elapsed_seconds": round(time.perf_counter() - analysis_started, 3),
     }
@@ -146,6 +156,28 @@ def _resolve_story(
         "story": story, "identity": identity,
     })
     return story, identity, False
+
+
+def _parent_speech_ranges(parent_plan: dict[str, Any]) -> list[dict[str, float]]:
+    """VAD speech evidence the first pass already paid for.
+
+    Derived here rather than demanded from the caller: every pause cut is
+    validated against it, so forgetting it would silently disable the safest of
+    the two permissions.
+    """
+    state = parent_plan.get("speech_activity")
+    state = state if isinstance(state, dict) else {}
+    rows: list[dict[str, float]] = []
+    for raw in state.get("speech_ranges") or []:
+        if not isinstance(raw, dict):
+            continue
+        try:
+            start, end = float(raw["start"]), float(raw["end"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if end > start:
+            rows.append({"start": start, "end": end})
+    return sorted(rows, key=lambda row: (row["start"], row["end"]))
 
 
 def generate_second_pass_candidate(
@@ -160,18 +192,35 @@ def generate_second_pass_candidate(
     ffmpeg: str,
     ffprobe: str,
     analyze: Callable[[dict[str, Any]], tuple[dict[str, Any], str]] = plan_interaction_story,
+    pause_evidence: dict[str, Any] | None = None,
+    render_source: Path | None = None,
     timeout: float = 900,
 ) -> dict[str, Any]:
     operation_started = time.perf_counter()
     try:
+        speech_ranges = _parent_speech_ranges(parent_plan)
+        units, unit_degradations = build_spoken_units(
+            (index.get("audio") or {}).get("utterances"),
+            speech_ranges,
+            allowed=[row for row in parent_plan.get("keep_ranges") or [] if isinstance(row, dict)],
+        )
         story, identity, analysis_cache_hit = _resolve_story(
             index=index, parent_plan=parent_plan, options=options, output_root=output_root,
             runtime_identity=runtime_identity, analyze=analyze,
+            units=units or None, unit_degradations=unit_degradations,
         )
         plan = build_second_pass_plan(
             parent_plan=parent_plan, story=story,
             utterances=story_utterances(index, parent_plan), options=options, story_identity=identity,
+            pause_evidence=pause_evidence, speech_ranges=speech_ranges,
+            units=units or None,
         )
+        if unit_degradations:
+            # ``warnings`` is frozen input (never re-derived), unlike
+            # ``degradations``, which the plan rebuilds from the pause evidence —
+            # writing a unit note there would make the stored plan disagree with
+            # its own reconstruction on the next read.
+            plan["warnings"] = list(dict.fromkeys(list(plan.get("warnings") or []) + unit_degradations))
         path = plan_path(output_root, plan["plan_id"])
         if path.is_file():
             plan = read_second_pass_plan(path)
@@ -183,7 +232,8 @@ def generate_second_pass_candidate(
             write_second_pass_plan(path, plan)
         render_started = time.perf_counter()
         manifest = render_second_pass_candidate(
-            source, plan, output_root / "renders", ffmpeg=ffmpeg, ffprobe=ffprobe, timeout=timeout,
+            source, plan, output_root / "renders", ffmpeg=ffmpeg, ffprobe=ffprobe,
+            render_source=render_source, timeout=timeout,
         )
         render_elapsed = round(time.perf_counter() - render_started, 3)
         plan = attach_render_result(
@@ -221,6 +271,7 @@ def update_second_pass_candidate(
     hook_mode: str | None = None,
     ffmpeg: str,
     ffprobe: str,
+    render_source: Path | None = None,
     timeout: float = 900,
 ) -> dict[str, Any]:
     path = plan_path(output_root, plan_id)
@@ -235,7 +286,8 @@ def update_second_pass_candidate(
         if action == "save_edits":
             render_started = time.perf_counter()
             manifest = render_second_pass_candidate(
-                source, updated, output_root / "renders", ffmpeg=ffmpeg, ffprobe=ffprobe, timeout=timeout,
+                source, updated, output_root / "renders", ffmpeg=ffmpeg, ffprobe=ffprobe,
+                render_source=render_source, timeout=timeout,
             )
             updated = attach_render_result(
                 updated, manifest, expected_revision=int(updated["revision"]),

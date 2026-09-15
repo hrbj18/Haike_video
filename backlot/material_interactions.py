@@ -16,12 +16,35 @@ import time
 from typing import Any, Callable
 
 from backlot.ai_vision import _jpeg_data_url, _post_vision_json, _vision_runtime
+from backlot.interaction_concurrency import (
+    ConcurrencyStats,
+    InteractionConcurrencyError,
+    KIND_INTERACTION,
+    bounded_executor,
+    resolve_limit,
+    run_batches,
+    serial_kill_switch_active,
+)
+from backlot.material_audio_evidence import audio_policy
 from backlot.material_overview import _contact_sheets, _extract_frame, _write_json
 from backlot.media_index import media_content_fingerprint, probe_media
 
 VERSION = "outdoor-interaction-v1"
-MAX_DURATION = 3600
+# D1 双路线：默认「串行等价」保持 payload 与付费顺序逐字不变；显式「并发」才启用批次屏障。
+WINDOW_CONTEXT_POLICIES = {"serial_equivalent", "concurrent"}
+# 长素材上限。原为 3600（60 分钟），导致 88.9 分钟的直播回放被整条互动/切割链路拒收。
+# 互动分析按 180 秒窗口、20 秒重叠逐窗调用视觉模型，费用随窗口数线性增长
+# （model_calls_max = 窗口数 + 1，见 preflight 预算）。放宽到 6 小时是为了容纳长直播回放，
+# 同时仍然挡住「误把一整部片子丢进来」这类会让费用失控的输入。
+MAX_DURATION = 6 * 3600
 MAX_DETAIL_FRAMES = 12
+# 云端 ASR 的末段 EndMs 常因解码填充略微越过音频末尾（实测 mp3 比视频长 33 ms 上下）。
+# 严格拒绝会让任何长音轨的整条互动分析失败，因此只容忍这点点越界；真出界仍然拦截。
+TRANSCRIPT_EDGE_TOLERANCE = 1.0
+# 事件边界取证容差。抽帧是 6 秒一格，模型选的证据帧经常正好贴在边界外那一格上，
+# 而实际 PTS 与请求时刻存在毫秒级偏差（实测 2348.043 对边界 2348.044，差 1 毫秒），
+# 用 6.0 严格比较会以毫秒之差否掉一个完全合理的事件。多给 0.1 秒吸收这点抖动。
+EVIDENCE_EDGE_TOLERANCE = 6.1
 STATES = {"observed", "missing", "uncertain", "window_edge"}
 
 
@@ -131,14 +154,32 @@ def window_plan(duration: float) -> list[dict]:
     return windows
 
 
+def _transcript_time(value: Any, duration: float, *, clamp: bool) -> float:
+    """Validate one ASR timestamp; optionally pin it inside the media."""
+    if isinstance(value, bool):
+        raise InteractionError("语音索引数值格式无效")
+    try:
+        result = float(value)
+    except (TypeError, ValueError) as exc:
+        raise InteractionError("语音索引数值格式无效") from exc
+    if not math.isfinite(result) or result < 0 or result > duration + TRANSCRIPT_EDGE_TOLERANCE:
+        raise InteractionError("语音索引数值越界")
+    return round(min(result, duration) if clamp else result, 3)
+
+
 def normalize_transcript(rows: list, duration: float) -> list[dict]:
     result = []
     for row in rows:
         if not isinstance(row, dict):
             raise InteractionError("语音识别句子结构无效")
-        start, end = number(row.get("start"), 0, duration), number(row.get("end"), 0, duration)
-        if end <= start:
+        raw_start = _transcript_time(row.get("start"), duration, clamp=False)
+        raw_end = _transcript_time(row.get("end"), duration, clamp=False)
+        if raw_end <= raw_start:
             raise InteractionError("语音识别句子时间倒序或为空")
+        start, end = min(raw_start, duration), min(raw_end, duration)
+        if end <= start:
+            # 整句都落在音频末尾的填充区：丢弃这一句，不要让整条长音轨分析失败。
+            continue
         result.append({"id": f"U{len(result)+1:05d}", "start": start, "end": end, "text": short(row.get("text"), 1500)})
     return result
 
@@ -220,12 +261,28 @@ def normalize_events(raw: dict, frames: dict, utterances: dict, window: dict, kn
         start, end = frames[start_id]["pts"], frames[end_id]["pts"]
         if end <= start or start < window["start"] - .2 or end > window["end"] + .2:
             raise InteractionError("互动事件范围超出当前窗口或倒序")
-        evidence = references(row.get("evidence_frame_ids"), frames)
-        speech = references(row.get("utterance_ids", []), utterances, required=False)
-        if any(not start - 6 <= frames[x]["pts"] <= end + 6 for x in evidence):
+        # 证据帧是事件的画面依据。贴着边界外一格的帧（含毫秒级抖动）照收；
+        # 真正跑远的引用剔除并留痕，但事件本身不能没有任何落地证据。
+        evidence, out_of_range_evidence = [], []
+        for key in references(row.get("evidence_frame_ids"), frames):
+            if start - EVIDENCE_EDGE_TOLERANCE <= frames[key]["pts"] <= end + EVIDENCE_EDGE_TOLERANCE:
+                evidence.append(key)
+            else:
+                out_of_range_evidence.append(key)
+        if not evidence:
             raise InteractionError("互动证据不属于事件时间范围")
-        if any(utterances[x]["end"] < start - 6 or utterances[x]["start"] > end + 6 for x in speech):
-            raise InteractionError("互动对白不属于事件时间范围")
+        speech = references(row.get("utterance_ids", []), utterances, required=False)
+        # 云端 ASR 的句段粒度很粗（腾讯单句常跨 30–60 秒），模型为事件选定对白时
+        # 合理引到稍早/稍晚的那一句是常态。这种引用不该让整条长素材分析作废：
+        # 剔除越界引用、在事件上留痕，其余证据照旧保留。
+        speech_in_range, speech_out_of_range = [], []
+        for key in speech:
+            recorded = utterances[key]
+            if recorded["end"] < start - EVIDENCE_EDGE_TOLERANCE or recorded["start"] > end + EVIDENCE_EDGE_TOLERANCE:
+                speech_out_of_range.append(key)
+            else:
+                speech_in_range.append(key)
+        speech = speech_in_range
         start_state, end_state = row.get("start_state"), row.get("end_state")
         if start_state not in STATES or end_state not in STATES:
             raise InteractionError("互动完整性状态无效")
@@ -241,15 +298,21 @@ def normalize_events(raw: dict, frames: dict, utterances: dict, window: dict, kn
         highlights = []
         if not isinstance(row.get("highlights", []), list):
             raise InteractionError("互动亮点列表格式无效")
+        out_of_range_highlights = []
         for item in row.get("highlights", []):
             if not isinstance(item, dict):
                 raise InteractionError("互动亮点结构无效")
             fid = item.get("frame_id")
             references([fid], frames)
+            # 亮点只是给审核端看的画面锚点。模型偶尔会把「事件刚结束那一刻」的画面
+            # 标成亮点（实测 W015 把 2336 秒的唱歌环节挂在 2300–2324 秒的事件上），
+            # 剔除这一条远比让整条长素材分析作废划算。
             if not start <= frames[fid]["pts"] <= end:
-                raise InteractionError("互动亮点越出事件")
+                out_of_range_highlights.append(fid)
+                continue
             highlights.append({"label": short(item.get("label"), 80), "frame_id": fid, "time": frames[fid]["pts"]})
         irrelevant_segments = []
+        out_of_range_segments = []
         if not isinstance(row.get("irrelevant_segments", []), list):
             raise InteractionError("互动无关段列表格式无效")
         for item in row.get("irrelevant_segments", [])[:12]:
@@ -258,8 +321,13 @@ def normalize_events(raw: dict, frames: dict, utterances: dict, window: dict, kn
             segment_start_id, segment_end_id = item.get("start_frame_id"), item.get("end_frame_id")
             references([segment_start_id, segment_end_id], frames)
             segment_start, segment_end = frames[segment_start_id]["pts"], frames[segment_end_id]["pts"]
-            if segment_end <= segment_start or segment_start < start or segment_end > end:
+            if segment_end <= segment_start:
                 raise InteractionError("互动无关段越出事件或时间倒序")
+            if segment_start < start or segment_end > end:
+                # 无关段是「事件内部可以剪掉的冗余段」。越出事件边界说明模型把手伸到了
+                # 事件之外，剔除它才不会误删事件外的画面；同时也不该因此放弃整条素材。
+                out_of_range_segments.append(f"{segment_start_id}~{segment_end_id}")
+                continue
             segment_evidence = references(item.get("evidence_frame_ids"), frames)
             if len(segment_evidence) < 2:
                 raise InteractionError("互动无关段至少需要两张证据帧")
@@ -283,6 +351,18 @@ def normalize_events(raw: dict, frames: dict, utterances: dict, window: dict, kn
         unknowns = row.get("unknowns", [])
         if not isinstance(unknowns, list):
             raise InteractionError("互动不确定项格式无效")
+        # 被剔除的引用全部留痕，审核端能看到「模型原本想标什么」。
+        # 放在最前面，因为事件只保留前 12 条不确定项。
+        traces = []
+        if out_of_range_evidence:
+            traces.append(f"模型引用的证据画面（{'、'.join(out_of_range_evidence)}）超出事件时间范围，已剔除")
+        if speech_out_of_range:
+            traces.append(f"模型引用的对白（{'、'.join(speech_out_of_range)}）超出事件时间范围，已剔除")
+        if out_of_range_highlights:
+            traces.append(f"模型标记的亮点画面（{'、'.join(out_of_range_highlights)}）超出事件时间范围，已剔除")
+        if out_of_range_segments:
+            traces.append(f"模型标记的无关段（{'、'.join(out_of_range_segments)}）超出事件时间范围，已剔除")
+        unknowns = [*traces, *unknowns]
         events.append({
             "event_id": f"{window['id']}-E{i+1:02d}", "group_id": group,
             "participants": short(row.get("participants")), "summary": short(row.get("summary")),
@@ -421,11 +501,32 @@ def build_interaction_index(source: Path, output_dir: Path, *, ffmpeg: str, ffpr
                             identity: dict, asr_identity: str, transcript_provider: Callable | None,
                             recognize_audio: bool = True,
                             profile: str = "efficient", analyze: Callable | None = None,
-                            progress: Callable = lambda *_: None) -> dict:
+                            progress: Callable = lambda *_: None,
+                            transcript_provider_id: str | None = None,
+                            window_context_policy: str = "serial_equivalent",
+                            interaction_concurrency: int | None = None) -> dict:
     if profile not in {"efficient", "detailed"}:
         raise InteractionError("互动分析深度无效")
+    if window_context_policy not in WINDOW_CONTEXT_POLICIES:
+        raise InteractionError("窗口上下文策略无效，请选择「串行等价」或「并发」后重试")
+    # 并发上限与一键回串行必须在**任何付费调用之前**判定，避免「先花了钱才报参数错」。
+    try:
+        interaction_limit = resolve_limit(KIND_INTERACTION, interaction_concurrency)
+    except InteractionConcurrencyError as exc:
+        # 统一成互动分析的领域错误：界面才能给出可执行的中文补救而不是一页堆栈。
+        raise InteractionError(str(exc)) from exc
+    if serial_kill_switch_active():
+        # 一键回串行：强制走路线甲；切回的事实通过进度文案让界面可见（索引结构不变，N2）。
+        if window_context_policy == "concurrent":
+            progress("interaction_windows", "检测到一键回串行设置，已把窗口分析切回逐窗串行；如需并发请先关闭该设置。")
+        window_context_policy = "serial_equivalent"
+        interaction_limit = 1
     if not isinstance(recognize_audio, bool):
         raise InteractionError("识别音频必须明确为开启或关闭")
+    try:
+        transcript_policy_name = audio_policy(recognize_audio, transcript_provider_id)
+    except ValueError as exc:
+        raise InteractionError(str(exc)) from exc
     started = time.monotonic()
     if analyze is None:
         analyze = lambda kind, payload, paths: model_call(kind, payload, paths, expected_identity=identity)
@@ -434,7 +535,8 @@ def build_interaction_index(source: Path, output_dir: Path, *, ffmpeg: str, ffpr
     windows = window_plan(duration)
     fingerprint = media_content_fingerprint(source)
     effective_asr_identity = asr_identity if recognize_audio else "disabled"
-    signature = digest({"source": fingerprint, "identity": identity, "asr": effective_asr_identity, "profile": profile, "version": VERSION})
+    signature = digest({"source": fingerprint, "identity": identity, "asr": effective_asr_identity,
+                        "audio_policy": transcript_policy_name, "profile": profile, "version": VERSION})
     directory = interaction_run_directory(output_dir, fingerprint, identity, effective_asr_identity, profile)
     path = directory / "material-interaction-index.json"
     if path.is_file():
@@ -475,30 +577,114 @@ def build_interaction_index(source: Path, output_dir: Path, *, ffmpeg: str, ffpr
             _write_json(manifest, data)
         return {"id": prefix + key, **data}
 
-    for wi, window in enumerate(windows):
-        progress("interaction_windows", f"正在分析互动窗口 {wi+1}/{len(windows)}；已保留 {len(events)} 条候选")
-        window["has_next"] = wi < len(windows) - 1
+    # 窗口并发布局（D1 双路线）。`events` 的构造顺序与合并顺序严格按窗口序，
+    # 保证 `C=1` 与既有实现逐字节一致；并发旋钮一律不进索引签名（N2）。
+    stats = ConcurrencyStats()
+    concurrency = interaction_limit
+    for index, window in enumerate(windows):
+        window["has_next"] = index < len(windows) - 1
+
+    def local_prepare(window: dict) -> tuple[list[dict], list[dict], list[dict]]:
+        """纯本地部分：抽帧 + 联系表。只依赖 ``window["times"]``，与 events 无关，可安全并发。"""
         local_frames = [extract(t) for t in window["times"]]
-        frame_map = {x["id"]: x for x in local_frames}
-        frames.update(frame_map)
         sheet_frames = [{"frame_id": x["id"], "chapter_id": window["id"], "actual_pts_seconds": x["pts"],
-                         "source_frame_sha256": x["sha256"], "path": x["path"], "selected_for_overview": True} for x in local_frames]
+                         "source_frame_sha256": x["sha256"], "path": x["path"], "selected_for_overview": True}
+                        for x in local_frames]
         sheets, cells = _contact_sheets(directory / window["id"], sheet_frames,
-                                       {"grid_rows": 3, "grid_columns": 3, "chapters": [{"chapter_id": window["id"]}]})
-        context = [x for x in events if x["end"] >= window["start"] - 6]
+                                        {"grid_rows": 3, "grid_columns": 3, "chapters": [{"chapter_id": window["id"]}]})
+        return local_frames, sheets, cells
+
+    def analyze_window(window: dict, local_frames: list[dict], sheets: list[dict], cells: list[dict],
+                       context: list[dict]) -> tuple[dict, list[dict], list[dict]]:
+        """付费窗口识别 + 本地校验。付费失败照抛（在途日志保留），格式出格只跳过本窗。"""
+        frame_map = {x["id"]: x for x in local_frames}
         local_speech = {x["id"]: x for x in utterances if x["end"] >= window["start"] and x["start"] <= window["end"]}
         payload = {"window_id": window["id"], "audio_status": audio_status, "previous_events": context,
                    "cells": [{k: x[k] for k in ("cell_id", "frame_id", "actual_pts_seconds")} for x in cells],
                    "utterances": list(local_speech.values())}
         raw = _remote(directory / f"{window['id']}-model.json", lambda: analyze("events", payload, [Path(x["path"]) for x in sheets]),
                       kind="互动识别", request_signature=digest([identity, payload, [x["sha256"] for x in sheets]]))
-        raw, rejected = reject_events_with_unknown_references(raw, frame_map, local_speech)
-        rejected_model_events.extend({"window_id": window["id"], **item} for item in rejected)
-        incoming = normalize_events(raw, frame_map, local_speech, window, {x["group_id"] for x in context})
-        events = merge_events(events, incoming)
+        # 一个窗口的回复格式出格，不该让整条长素材分析作废。34 个窗口的视觉调用是已经
+        # 付过费的识别工作（只看不改），整窗跳过并在审核端留一条可见告警，比让一部 88.9
+        # 分钟的素材彻底无法出片保守得多。窗口级证据也仍然要过后面的边界核验。
+        try:
+            raw, rejected = reject_events_with_unknown_references(raw, frame_map, local_speech)
+            incoming = normalize_events(raw, frame_map, local_speech, window, {x["group_id"] for x in context})
+        except InteractionError as exc:
+            return frame_map, [], [{
+                "window_id": window["id"], "event_number": None, "group_id": "",
+                "unknown_frame_ids": [], "unknown_utterance_ids": [],
+                "reason": "window_failed_local_validation", "detail": str(exc)[:200],
+            }]
+        return frame_map, incoming, [{"window_id": window["id"], **item} for item in rejected]
+
+    def note_window(window: dict, frame_map: dict, sheets: list[dict], rejected: list[dict]) -> None:
+        """按窗口序回放本地产物；`frames`/`sheet_records`/告警顺序与串行一致。"""
+        frames.update(frame_map)
         sheet_records.extend({"window_id": window["id"], **x} for x in sheets)
-        _write_json(directory / "progress.json", {"completed_windows": wi+1, "events": events,
-                                                    "rejected_model_events": rejected_model_events})
+        rejected_model_events.extend(rejected)
+
+    def progress_text(index: int) -> str:
+        suffix = f"；并发 {concurrency} 路" if concurrency > 1 else ""
+        return f"正在分析互动窗口 {index + 1}/{len(windows)}；已保留 {len(events)} 条候选{suffix}"
+
+    if window_context_policy == "concurrent":
+        seen_windows = 0
+
+        def batch_worker(window: dict, _index: int, batch_context: list[dict]) -> dict:
+            local_frames, sheets, cells = local_prepare(window)
+            frame_map, incoming, rejected = analyze_window(window, local_frames, sheets, cells, batch_context)
+            return {"window": window, "frame_map": frame_map, "sheets": sheets,
+                    "incoming": incoming, "rejected": rejected}
+
+        def on_batch(context: list[dict], completed: list[tuple[int, Any]]) -> list[dict]:
+            nonlocal seen_windows
+            merged = context
+            for _absolute_index, outcome in completed:
+                if not outcome.ok:
+                    # 付费失败：已完成窗口的 {id}-model.json 已落盘，续跑只会重跑失败窗口。
+                    raise outcome.error
+                merged = merge_events(merged, outcome.value["incoming"])
+                seen_windows += 1
+            progress("interaction_windows", f"正在分析互动窗口 {seen_windows}/{len(windows)}；已保留 {len(merged)} 条候选；并发 {concurrency} 路")
+            _write_json(directory / "progress.json", {"completed_windows": seen_windows, "events": merged,
+                                                        "rejected_model_events": rejected_model_events})
+            return merged
+
+        outcomes, events = run_batches(windows, batch_worker, batch_size=concurrency, stats=stats,
+                                       initial_context=[], on_batch=on_batch)
+        # 与窗口同序回放：帧 / 联系表 / 告警的落盘顺序与串行一致（结果可复现）。
+        for outcome in outcomes:
+            if outcome.ok:
+                value = outcome.value
+                note_window(value["window"], value["frame_map"], value["sheets"], value["rejected"])
+    elif concurrency == 1:
+        # 路线甲 · 完全串行：与既有实现逐字节一致，连线程都不建。
+        for index, window in enumerate(windows):
+            progress("interaction_windows", progress_text(index))
+            local_frames, sheets, cells = local_prepare(window)
+            frame_map, incoming, rejected = analyze_window(window, local_frames, sheets, cells, events)
+            note_window(window, frame_map, sheets, rejected)
+            events = merge_events(events, incoming)
+            _write_json(directory / "progress.json", {"completed_windows": index + 1, "events": events,
+                                                        "rejected_model_events": rejected_model_events})
+    else:
+        # 路线甲 · 本地预取：付费调用仍严格串行且按窗口序，只把本地抽帧/联系表滚动预取到 C 路。
+        with bounded_executor(concurrency, stats=stats) as submit:
+            pending: dict[int, Any] = {}
+            for index in range(min(concurrency, len(windows))):
+                pending[index] = submit(local_prepare, windows[index])
+            for index, window in enumerate(windows):
+                local_frames, sheets, cells = pending.pop(index).result()
+                ahead = index + concurrency
+                if ahead < len(windows):
+                    pending[ahead] = submit(local_prepare, windows[ahead])
+                progress("interaction_windows", progress_text(index))
+                frame_map, incoming, rejected = analyze_window(window, local_frames, sheets, cells, events)
+                note_window(window, frame_map, sheets, rejected)
+                events = merge_events(events, incoming)
+                _write_json(directory / "progress.json", {"completed_windows": index + 1, "events": events,
+                                                            "rejected_model_events": rejected_model_events})
 
     # Round-robin endpoints: no first event can consume the entire detail budget.
     allowance = MAX_DETAIL_FRAMES if profile == "detailed" else 6
@@ -539,7 +725,7 @@ def build_interaction_index(source: Path, output_dir: Path, *, ffmpeg: str, ffpr
     visual_attempts = sum(int(json.loads(f.read_text(encoding="utf-8")).get("attempts", 1)) for f in directory.glob("*-model.json"))
     index = {"version": VERSION, "status": "completed", "signature": signature, "cache_hit": False,
              "source": {"fingerprint": fingerprint}, "duration": duration, "profile": profile, "identity": identity,
-             "audio": {"policy": "doubao_transcript" if recognize_audio else "disabled",
+             "audio": {"policy": transcript_policy_name,
                        "status": audio_status, "provider": asr_identity if recognize_audio else None,
                        "utterances": utterances},
              "windows": windows, "events": events, "ranked_event_ids": [x["event_id"] for x in ranking],

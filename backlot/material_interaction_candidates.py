@@ -12,7 +12,12 @@ import json
 from pathlib import Path
 from typing import Any
 
-from backlot.material_audio_evidence import MaterialAudioEvidenceError, detect_silence
+from backlot.material_audio_evidence import MaterialAudioEvidenceError, detect_silence, policy_uses_transcript
+from backlot.material_evidence import (
+    MaterialEvidenceError,
+    build_material_evidence,
+    read_material_evidence,
+)
 from backlot.material_interaction_edit import (
     InteractionEditConflict,
     InteractionEditError,
@@ -101,6 +106,31 @@ def _speech_activity_cache_path(output_root: Path, source_fingerprint: str,
     return output_root.resolve() / "speech-activity" / (hashlib.sha256(payload.encode()).hexdigest()[:20] + ".json")
 
 
+def _motion_evidence(source: Path, *, output_root: Path, ffmpeg: str, index: dict[str, Any],
+                     ) -> dict[str, Any] | None:
+    """Read the shared evidence document, building it once when it is absent.
+
+    This stage already requires FFmpeg, so building here cannot add a dependency
+    to a path that never had one.  A failure returns ``None`` and the caller
+    falls back to the historical per-window sampler.
+    """
+    try:
+        existing = read_material_evidence(source, output_root=output_root, with_arrays=True)
+        if isinstance(existing, dict) and existing.get("motion") is not None:
+            return existing
+        duration = float(index.get("duration") or 0)
+        if duration <= 0:
+            return existing if isinstance(existing, dict) else None
+        return build_material_evidence(
+            source, output_root=output_root, ffmpeg=ffmpeg, duration=duration,
+            sections=("audio_envelope", "motion"),
+        )
+    except (MaterialEvidenceError, OSError, ValueError) as exc:
+        return {"status": "unavailable", "motion": None, "envelope": None,
+                "degradations": [f"material_evidence_unavailable:{str(exc)[:200]}"],
+                "sections": {}, "metadata": {}}
+
+
 def _pause_visual_activity(source: Path, *, source_fingerprint: str, output_root: Path,
                            index: dict[str, Any], ffmpeg: str, timeout: float) -> dict[str, Any]:
     payload = {
@@ -117,10 +147,19 @@ def _pause_visual_activity(source: Path, *, source_fingerprint: str, output_root
             cached = {}
         if cached.get("cache_signature") == signature and cached.get("status") in {"available", "partial"}:
             return {**cached, "cache_hit": True}
+    evidence = _motion_evidence(source, output_root=output_root, ffmpeg=ffmpeg, index=index)
+    motion_timeline = (evidence or {}).get("motion")
     result = analyze_pause_visual_activity(
         source, index, ffmpeg=ffmpeg, timeout=min(float(timeout), 180.0),
+        motion_timeline=motion_timeline,
     )
-    frozen = {**result, **payload, "cache_signature": signature, "cache_hit": False}
+    frozen = {**result, **payload, "cache_signature": signature, "cache_hit": False,
+              "material_evidence": {
+                  "status": (evidence or {}).get("status"),
+                  "signature": (evidence or {}).get("signature"),
+                  "degradations": list((evidence or {}).get("degradations") or []),
+                  "source": "whole_file_timeline" if motion_timeline is not None else "per_window_decode",
+              }}
     if result.get("status") in {"available", "partial"}:
         path.parent.mkdir(parents=True, exist_ok=True)
         temporary = path.with_suffix(".json.tmp")
@@ -248,17 +287,22 @@ def generate_candidate(
     output_root: Path,
     ffmpeg: str,
     ffprobe: str,
+    render_source: Path | None = None,
     timeout: float = 900,
     target_gap: float = .3,
 ) -> dict[str, Any]:
-    """Plan, render and persist one pending-review candidate."""
+    """Plan, render and persist one pending-review candidate.
+
+    ``render_source`` 是真正交给 FFmpeg 取帧的媒体，应为时间戳连续的审核代理；
+    为 None 时退回原片。原因见 ``material_interaction_render.render_interaction_candidate``。
+    """
     event = _review_event(review, event_id)
     audio = index.get("audio") if isinstance(index.get("audio"), dict) else {}
     silences: list[dict[str, float]] = []
     speech_activity: dict[str, Any] | None = None
     pause_visual: dict[str, Any] | None = None
     vad_warning = None
-    if audio.get("policy") == "doubao_transcript" and audio.get("status") == "available":
+    if policy_uses_transcript(audio.get("policy")) and audio.get("status") == "available":
         try:
             source_fingerprint = str((index.get("source") or {}).get("fingerprint") or "")
             vad_start = max(0.0, float(event["start"]) - 6.0)
@@ -341,6 +385,7 @@ def generate_candidate(
             output_root / "renders",
             ffmpeg=ffmpeg,
             ffprobe=ffprobe,
+            render_source=render_source,
             timeout=timeout,
         )
         plan = attach_render_result(
@@ -369,6 +414,7 @@ def update_candidate(
     removal_states: dict[str, bool] | None = None,
     ffmpeg: str,
     ffprobe: str,
+    render_source: Path | None = None,
     timeout: float = 900,
 ) -> dict[str, Any]:
     """Apply one CAS action and regenerate only when the edit became stale."""
@@ -389,6 +435,7 @@ def update_candidate(
                 output_root / "renders",
                 ffmpeg=ffmpeg,
                 ffprobe=ffprobe,
+                render_source=render_source,
                 timeout=timeout,
             )
             updated = attach_render_result(

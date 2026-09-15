@@ -371,6 +371,30 @@ class TestBacklotServerApi:
         assert state_body["title"] == "Film"
         assert state_body["stages"]
 
+    @pytest.mark.parametrize("age,expected", [(3600, False), (60, True)])
+    def test_summary_cache_never_pins_a_project_in_progress(self, projects_root, monkeypatch, age, expected):
+        """`live` 只有 5 分钟时效，摘要缓存却只在文件再次变化时才失效。
+
+        任务收尾写入之后不会再有文件改动 → 缓存里的 live=True 会永久驻留，
+        项目列表就一直显示「制作中 · 4m ago」。缓存命中时必须按 last_activity 重算，
+        同时不能误伤真正刚写完的项目。
+        """
+        _make_project(projects_root, "film")
+        monkeypatch.setattr(server_mod, "_summary_cache", {
+            "film": {
+                "project_id": "film", "title": "Film", "pipeline_type": "unknown",
+                "has_pipeline_state": False, "poster": None,
+                "live": True, "last_activity": time.time() - age,
+                "active_stage": None, "awaiting_human": False,
+                "stage_states": [], "completed_count": 0,
+                "render_count": 0, "scene_count": 0,
+            }
+        })
+
+        rows = server_mod._cached_summaries()
+
+        assert rows[0]["live"] is expected
+
     def test_library_creates_a_project_with_a_reusable_intake(self, client, projects_root):
         response = client.post("/api/projects", json={
             "project_id": "robot-lamp-demo",

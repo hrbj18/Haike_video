@@ -1,8 +1,18 @@
 """Validated semantic units for a selected outdoor interaction.
 
 The model may classify and group supplied evidence IDs.  It never owns source
-timestamps: OpenMontage derives every range from the frozen ASR evidence and
-the parent candidate's allowed source ranges.
+timestamps: OpenMontage derives every range from the frozen evidence (phrase
+level speech units when the VAD evidence allows it, ASR utterances otherwise)
+and the parent candidate's allowed source ranges.
+
+V3 (this revision) changes two things, both driven by measured defects on real
+material (see ``docs/SINGLE_DEVELOPMENT_GUIDE_INTERACTION_PHRASE_UNIT_RANK_V4_ZH-CN.md``):
+
+* the atoms handed to the model are now **2—6 second phrase units whose edges sit
+  in real VAD gaps** instead of 27—60 second ASR blocks, so a fine-grained drop
+  and a 3—5 second hook both become expressible;
+* "从明显的开场词开始、到明显的告别词结束" is implemented as a **deterministic**
+  edge anchor (``_anchor_edges``) rather than left to the model's judgement.
 """
 from __future__ import annotations
 
@@ -12,9 +22,15 @@ import json
 import math
 from typing import Any, Callable
 
+from backlot.material_interaction_units import (
+    FAREWELL_LEXICON,
+    GREETING_LEXICON,
+    text_hits,
+)
 
-VERSION = "interaction-story-v2"
-PROMPT_VERSION = "interaction-story-prompt-v2"
+
+VERSION = "interaction-story-v4"
+PROMPT_VERSION = "interaction-story-prompt-v3"
 GROUP_TYPES = {
     "greeting", "question_answer", "follow_up", "setup", "punchline",
     "reaction", "action", "result", "farewell", "repetition", "other",
@@ -167,17 +183,32 @@ def _visual_evidence(index: dict[str, Any], parent_plan: dict[str, Any]) -> dict
     return {"events": events, "frames": frames, "pause_windows": pause_windows}
 
 
-def build_story_context(index: dict[str, Any], parent_plan: dict[str, Any], options: dict[str, Any]) -> dict[str, Any]:
-    utterances = story_utterances(index, parent_plan)
-    if not utterances:
+def build_story_context(index: dict[str, Any], parent_plan: dict[str, Any], options: dict[str, Any],
+                        *, units: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+    """Frozen planning context.
+
+    ``units`` are the phrase-level speech units from
+    :mod:`backlot.material_interaction_units`.  When they are supplied the model
+    groups *those*; otherwise the older utterance-level atoms are used and the
+    context says so, so a degraded run is auditable instead of silent.
+    """
+    atoms = [dict(row) for row in units] if units else story_utterances(index, parent_plan)
+    if not atoms:
         raise InteractionStoryError("所选互动没有可用的带时间戳转写，无法自动提取对白精华")
     context = {
         "version": PROMPT_VERSION,
+        # The cached analysis record stores the *normalized* story, so the rules
+        # that produced it must be part of the request identity: changing the
+        # edge anchor or the lexicon without bumping this would silently reuse a
+        # decision this build no longer makes.
+        "normalizer": VERSION,
         "task": "outdoor_interaction_second_pass",
         "group_id": parent_plan.get("group_id"),
         "allowed_source_ranges": _allowed_ranges(parent_plan),
         "options": deepcopy(options),
-        "utterances": deepcopy(utterances),
+        "utterances": deepcopy(atoms),
+        "unit_source": "vad_aligned" if units else "asr_utterance",
+        "unit_count": len(atoms),
         "visual_evidence": _visual_evidence(index, parent_plan),
         "contract": {
             "cover_every_utterance_once": True,
@@ -186,6 +217,10 @@ def build_story_context(index: dict[str, Any], parent_plan: dict[str, Any], opti
             "hook_target_seconds": [3, 5],
             "hook_candidates_maximum": MAX_HOOKS,
             "timestamps_are_not_model_owned": True,
+            # The edges are anchored by code, so the model must not delete a whole
+            # opening/closing group merely to "trim" the clip.
+            "edges_anchored_by_system": options.get("trim_head") is not False
+            or options.get("trim_tail") is not False,
         },
     }
     context["signature"] = _digest(context)
@@ -251,6 +286,97 @@ def _dependency_closure(groups: list[dict[str, Any]]) -> None:
                     changed = True
 
 
+def _lexical_index(atoms: list[dict[str, Any]], lexicon: Any, *, reverse: bool) -> tuple[int | None, list[str]]:
+    indexes = range(len(atoms) - 1, -1, -1) if reverse else range(len(atoms))
+    for index in indexes:
+        hits = text_hits(atoms[index].get("text"), lexicon)
+        if hits:
+            return index, hits
+    return None, []
+
+
+def _anchor_edges(groups: list[dict[str, Any]], atoms: list[dict[str, Any]],
+                  options: dict[str, Any]) -> list[str]:
+    """Keep the clip from the first obvious opening word to the last obvious closing word.
+
+    The user's requirement is explicit and lexical: "从『你好』开始、到『拜拜』
+    结束".  Doing that with a word list is deterministic and auditable, whereas
+    asking the model to *type* a group as greeting/farewell produced a 27-second
+    block being dropped instead of a 2-second "你好" being removed.
+
+    Rules, in order:
+
+    1. everything strictly **before** the opening hit is dropped;
+    2. everything strictly **after** the closing hit is dropped;
+    3. the two hit groups themselves are **forced kept** — they *are* the edges,
+       so a model that decided "the greeting is redundant" must not delete the
+       word the user asked the clip to start on;
+    4. dependencies that point at a dropped group are removed, because the head
+       anchor has just declared that the preceding context is not required.
+
+    With no lexical hit the function does nothing and says so; the older
+    "drop leading greeting groups" behaviour then still applies.
+    """
+    warnings: list[str] = []
+    if not atoms or not groups:
+        return warnings
+    order = {str(row.get("id")): index for index, row in enumerate(atoms)}
+    head = tail = None
+    if options.get("trim_head") is not False:
+        head, _ = _lexical_index(atoms, GREETING_LEXICON, reverse=False)
+    if options.get("trim_tail") is not False:
+        tail, _ = _lexical_index(atoms, FAREWELL_LEXICON, reverse=True)
+    if head is not None and tail is not None and tail < head:
+        warnings.append("首尾锚定词顺序矛盾（告别词出现在开场词之前），已只保留开场锚定")
+        tail = None
+    if head is None and tail is None:
+        warnings.append("未找到明确的开场或告别词，片头片尾沿用模型取舍")
+        return warnings
+    head_index, tail_index = head, tail
+
+    before: set[str] = set()
+    after: set[str] = set()
+    for group in groups:
+        positions = [order[str(value)] for value in group.get("utterance_ids") or [] if str(value) in order]
+        if not positions:
+            continue
+        if head_index is not None and max(positions) < head_index:
+            before.add(str(group["id"]))
+        elif tail_index is not None and min(positions) > tail_index:
+            after.add(str(group["id"]))
+    kept_edges: set[str] = set()
+    for group in groups:
+        positions = [order[str(value)] for value in group.get("utterance_ids") or [] if str(value) in order]
+        if not positions:
+            continue
+        if head_index is not None and min(positions) <= head_index <= max(positions):
+            kept_edges.add(str(group["id"]))
+        if tail_index is not None and min(positions) <= tail_index <= max(positions):
+            kept_edges.add(str(group["id"]))
+
+    for group in groups:
+        group_id = str(group["id"])
+        if group_id in kept_edges:
+            if not group["selected"]:
+                group["selected"], group["decision"] = True, "keep"
+                group["reason"] = "片头/片尾锚定词所在的分组，已保留作为成片边界"
+            continue
+        if group_id in before:
+            group["selected"], group["decision"] = False, "drop"
+            group["reason"] = "片头锚定词之前的内容，已按明确开场词裁掉"
+        elif group_id in after:
+            group["selected"], group["decision"] = False, "drop"
+            group["reason"] = "片尾锚定词之后的内容，已按明确告别词裁掉"
+
+    removed = before | after
+    if removed:
+        for group in groups:
+            group["depends_on"] = [str(value) for value in group.get("depends_on") or []
+                                   if str(value) not in removed]
+        warnings.append(f"已按明确开场/告别词裁掉首尾 {len(removed)} 个语义组")
+    return warnings
+
+
 def normalize_story_analysis(raw: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise InteractionStoryError("内容精选结果不是对象")
@@ -274,6 +400,21 @@ def normalize_story_analysis(raw: dict[str, Any], context: dict[str, Any]) -> di
         for row in (visual.get("frames") or []) + (visual.get("pause_windows") or [])
         if isinstance(row, dict) and _text(row.get("id"), 120)
     }
+    # Everything the model was *shown* counts as valid evidence.  The global
+    # ``frames`` list is capped at ``MAX_VISUAL_FRAMES``, while each event keeps
+    # its own (also capped) list, so a frame id can legitimately appear in the
+    # prompt and be missing from ``frames``.  Validating against the narrower set
+    # rejected a real id as "invented" and threw away a paid analysis on the
+    # acceptance run — the guard must police fabrication, not truncation.
+    for raw_event in visual.get("events") or []:
+        if not isinstance(raw_event, dict):
+            continue
+        for value in raw_event.get("evidence_frame_ids") or []:
+            if _text(value, 120):
+                valid_evidence_ids.add(_text(value, 120))
+        for item in raw_event.get("highlights") or []:
+            if isinstance(item, dict) and _text(item.get("frame_id"), 120):
+                valid_evidence_ids.add(_text(item.get("frame_id"), 120))
     for sequence, item in enumerate(raw_groups, 1):
         if not isinstance(item, dict):
             raise InteractionStoryError("对话分组结构无效")
@@ -351,23 +492,20 @@ def normalize_story_analysis(raw: dict[str, Any], context: dict[str, Any]) -> di
         for row in groups:
             row["selected"], row["decision"] = True, "keep"
             row["reason"] = "用户未启用提取精华，保留完整对话组"
-    if options.get("trim_head") is not False:
-        for row in groups:
-            if row["type"] != "greeting":
-                break
-            row["selected"], row["decision"] = False, "drop"
-            row["reason"] = "用户启用掐头，已删除开场独立寒暄"
-    if options.get("trim_tail") is not False:
-        for row in reversed(groups):
-            if row["type"] != "farewell":
-                break
-            row["selected"], row["decision"] = False, "drop"
-            row["reason"] = "用户启用去尾，已删除结尾独立告别"
+    # ``trim_head`` / ``trim_tail`` mean "the system may anchor this edge on an
+    # explicit opening/closing word" (see ``_anchor_edges``).  They used to force
+    # a whole leading ``greeting`` group to be dropped regardless of what the
+    # model decided, which is exactly the "掐头去尾太狠" behaviour the user
+    # rejected: a 13-second greeting group disappeared even though the model had
+    # argued to keep it.  With no lexical hit the edge is simply left alone.
     if options.get("trim_head") is False:
         groups[0]["selected"], groups[0]["decision"] = True, "keep"
     if options.get("trim_tail") is False:
         groups[-1]["selected"], groups[-1]["decision"] = True, "keep"
     _dependency_closure(groups)
+    # Runs after the closure on purpose: the anchor is the user's explicit
+    # boundary, so it must not be undone by a dependency being pulled back in.
+    warnings.extend(_anchor_edges(groups, utterances, options))
     if not any(row["selected"] for row in groups):
         raise InteractionStoryError("内容精选删除了全部对话，已阻止生成")
 
@@ -427,8 +565,9 @@ def analyze_story(
     options: dict[str, Any],
     *,
     analyze: Callable[[dict[str, Any]], tuple[dict[str, Any], str]],
+    units: list[dict[str, Any]] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    context = build_story_context(index, parent_plan, options)
+    context = build_story_context(index, parent_plan, options, units=units)
     raw, model = analyze(deepcopy(context))
     normalized = normalize_story_analysis(raw, context)
     return normalized, {
@@ -437,4 +576,6 @@ def analyze_story(
         "prompt_version": PROMPT_VERSION,
         "context_signature": context["signature"],
         "analysis_signature": normalized["signature"],
+        "unit_source": context["unit_source"],
+        "unit_count": context["unit_count"],
     }

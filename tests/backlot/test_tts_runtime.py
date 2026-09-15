@@ -76,6 +76,51 @@ def test_cloud_profile_is_forced_to_doubao_and_normalised_to_wav(tmp_path, monke
     assert not (tmp_path / ".cloud.doubao.mp3").exists()
 
 
+def test_tencent_take_asks_for_lossless_wav(tmp_path, monkeypatch):
+    """A 24 kHz MP3 take would be band-limited to ~8 kHz, so Tencent must send WAV."""
+    captured = {}
+
+    def fake_execute(self, inputs):
+        captured.update(inputs)
+        Path(inputs["output_path"]).write_bytes(b"cloud-wav")
+        Path(inputs["metadata_path"]).write_text("{}", encoding="utf-8")
+        return ToolResult(
+            success=True,
+            data={"output": inputs["output_path"], "metadata_path": inputs["metadata_path"]},
+            artifacts=[inputs["output_path"], inputs["metadata_path"]],
+            cost_usd=0.01,
+        )
+
+    def fake_convert(source, target):
+        assert source.name == ".cloud.tencent.wav"
+        target.write_bytes(b"RIFFtencent")
+        return None
+
+    monkeypatch.setattr(tts_runtime.TencentTTS, "execute", fake_execute)
+    monkeypatch.setattr(tts_runtime, "_convert_to_wav", fake_convert)
+    output = tmp_path / "cloud.wav"
+
+    result = tts_runtime.generate_voice_audio(
+        text="腾讯配音。",
+        profile={
+            "id": "tencent:custom:abc",
+            "name": "专业梓欣",
+            "provider_id": "tencent",
+            "provider_voice_id": "602005",
+            "speech_rate": 1.2,
+        },
+        output_path=output,
+    )
+
+    assert result.success
+    assert captured["format"] == "wav"
+    assert captured["sample_rate"] == 24000
+    assert captured["playback_rate"] == 1.2
+    assert result.data["provider_speech_rate"] == 1
+    assert result.data["normalised_format"] == "wav_pcm_s16le_mono_24000"
+    assert output.read_bytes() == b"RIFFtencent"
+
+
 def test_unknown_provider_never_silently_falls_back(tmp_path):
     result = tts_runtime.generate_voice_audio(
         text="不要换声音。",

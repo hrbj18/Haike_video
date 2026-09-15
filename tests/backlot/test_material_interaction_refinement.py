@@ -105,3 +105,102 @@ def test_local_pause_visual_activity_only_authorizes_low_motion(tmp_path):
     assert all(row["stage"] == "action" and not row["safe_to_shorten"]
                for row in result["windows"][1:])
     assert result["metadata"]["frame_count"] <= refinement.PAUSE_VISUAL_MAX_WINDOWS * 5
+
+
+# --- A5: the timeline replaces the per-window sampler ------------------------
+
+def _timeline(scores, *, fps=2.0):
+    import numpy as np
+
+    return {"scores": np.asarray(scores, dtype=np.float32), "fps": fps,
+            "low_motion_threshold": refinement.PAUSE_VISUAL_LOW_MOTION}
+
+
+def test_window_max_from_the_timeline_equals_the_manual_window_computation():
+    index, _ = fixtures()
+    windows = refinement.plan_pause_visual_windows(index, max_windows=3)
+    assert windows
+    scores = [0.4] * 200
+    timeline = _timeline(scores)
+    for row in windows:
+        expected = max(scores[k] for k in range(int(row["start"] * 2), int(row["end"] * 2) - 1))
+        measured = refinement.max_motion_in(timeline, row["start"], row["end"])
+        assert abs(measured - expected) <= 1e-6, f"{row['id']}: {measured} vs {expected}"
+
+
+def test_window_max_is_not_quantised_by_the_timeline_storage():
+    import numpy as np
+
+    value = 0.035123456789
+    timeline = _timeline([value, 0.0])
+    assert refinement.max_motion_in(timeline, 0.0, 1.0) == float(np.float32(value))
+
+
+def test_timeline_backed_analysis_spawns_nothing(tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    index, _ = fixtures()
+
+    def exploding(command, **_kwargs):
+        raise AssertionError("a supplied timeline must not spawn ffmpeg")
+
+    result = refinement.analyze_pause_visual_activity(
+        source, index, ffmpeg="ffmpeg", runner=exploding, motion_timeline=_timeline([0.01] * 200),
+    )
+    assert result["metadata"]["spawns"] == 0
+    assert result["metadata"]["source"] == "whole_file_timeline"
+    assert all(row["safe_to_shorten"] for row in result["windows"])
+    assert all(row["motion"]["maximum"] == 0.01 for row in result["windows"])
+
+
+def test_timeline_backed_analysis_still_protects_high_motion(tmp_path):
+    source = tmp_path / "source.mp4"
+    source.write_bytes(b"source")
+    index, _ = fixtures()
+    result = refinement.analyze_pause_visual_activity(
+        source, index, ffmpeg="ffmpeg", runner=lambda *a, **k: None,
+        motion_timeline=_timeline([0.9] * 200),
+    )
+    assert all(row["stage"] == "action" and not row["safe_to_shorten"] for row in result["windows"])
+
+
+def test_timeline_plan_has_no_global_budget_and_covers_every_gap():
+    # Three utterances -> two gaps; the legacy plan gives at most 12 windows for
+    # the whole source and, with a bigger fixture, would truncate them.
+    index = {
+        "status": "completed", "duration": 400,
+        "audio": {"status": "available", "utterances": [
+            {"id": f"U{n}", "start": 20.0 * n, "end": 20.0 * n + 2.0}
+            for n in range(1, 18)
+        ]},
+    }
+    timeline = _timeline([0.01] * 2000)
+    legacy = refinement.plan_pause_visual_windows(index)
+    every = refinement.plan_pause_visual_windows_from_timeline(index, timeline)
+    assert len(legacy) == refinement.PAUSE_VISUAL_MAX_WINDOWS
+    assert len(every) == 16
+    assert len(every) > refinement.PAUSE_VISUAL_MAX_WINDOWS
+    assert all({"motion_maximum", "authorized"} <= set(row) for row in every)
+    assert all(row["authorized"] for row in every)
+
+
+def test_timeline_plan_marks_moving_gaps_as_unauthorized():
+    index = {
+        "status": "completed", "duration": 60,
+        "audio": {"status": "available", "utterances": [
+            {"id": "U1", "start": 1.0, "end": 2.0},
+            {"id": "U2", "start": 20.0, "end": 21.0},
+        ]},
+    }
+    timeline = _timeline([0.5] * 400)
+    rows = refinement.plan_pause_visual_windows_from_timeline(index, timeline)
+    assert rows and all(not row["authorized"] and row["stage"] == "action" for row in rows)
+
+
+def test_motion_identity_is_part_of_the_visual_permission_identity():
+    from backlot.material_motion_timeline import motion_identity
+
+    base = refinement.pause_visual_identity()
+    assert base["motion_identity"] == motion_identity()["signature"]
+    assert base["signature"] != refinement.pause_visual_identity({"signature": "other"})["signature"]
+    assert refinement.PAUSE_VISUAL_VERSION == "interaction-pause-visual-v2"

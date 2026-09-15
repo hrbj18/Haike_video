@@ -16,11 +16,30 @@ from typing import Any, Callable
 
 
 VERSION = "material-audio-evidence-v1"
-POLICIES = {"disabled", "doubao_transcript"}
+# Every selectable transcript engine gets its own cache policy so switching
+# engines can never reuse another engine's transcripts.
+TRANSCRIPT_PROVIDERS = ("doubao", "tencent", "local")
+DEFAULT_TRANSCRIPT_PROVIDER = "doubao"
+POLICIES = {"disabled"} | {f"{provider}_transcript" for provider in TRANSCRIPT_PROVIDERS}
 
 
 class MaterialAudioEvidenceError(ValueError):
     pass
+
+
+def transcript_policy(provider: str | None = None) -> str:
+    """Return the cache policy for one transcript engine."""
+
+    slug = str(provider or DEFAULT_TRANSCRIPT_PROVIDER).strip().lower()
+    if slug not in TRANSCRIPT_PROVIDERS:
+        raise MaterialAudioEvidenceError(f"不支持的语音识别服务：{slug or '未指定'}")
+    return f"{slug}_transcript"
+
+
+def policy_uses_transcript(policy: str | None) -> bool:
+    """True when a stored policy carries real transcript evidence."""
+
+    return str(policy or "") in POLICIES and str(policy) != "disabled"
 
 
 def _finite(value: Any, *, minimum: float, maximum: float, label: str) -> float:
@@ -35,15 +54,16 @@ def _finite(value: Any, *, minimum: float, maximum: float, label: str) -> float:
     return round(number, 3)
 
 
-def audio_policy(recognize_audio: bool) -> str:
+def audio_policy(recognize_audio: bool, provider: str | None = None) -> str:
     if not isinstance(recognize_audio, bool):
         raise MaterialAudioEvidenceError("识别音频必须明确为开启或关闭")
-    return "doubao_transcript" if recognize_audio else "disabled"
+    return transcript_policy(provider) if recognize_audio else "disabled"
 
 
-def cache_identity(source_fingerprint: str, *, recognize_audio: bool, asr_identity: str | None) -> str:
-    policy = audio_policy(recognize_audio)
-    if policy == "doubao_transcript" and not str(asr_identity or "").strip():
+def cache_identity(source_fingerprint: str, *, recognize_audio: bool, asr_identity: str | None,
+                   provider: str | None = None) -> str:
+    policy = audio_policy(recognize_audio, provider)
+    if policy != "disabled" and not str(asr_identity or "").strip():
         raise MaterialAudioEvidenceError("开启音频识别后必须冻结语音服务身份")
     payload = {
         "version": VERSION,
@@ -83,6 +103,7 @@ def resolve_audio_evidence(
     recognize_audio: bool,
     asr_identity: str | None = None,
     transcript_provider: Callable[[Path], tuple[str, list[dict[str, Any]], dict[str, Any]]] | None = None,
+    provider: str | None = None,
 ) -> dict[str, Any]:
     """Resolve one in-memory evidence result.
 
@@ -90,7 +111,7 @@ def resolve_audio_evidence(
     when the source has no audio.  Durable remote-call journaling remains the
     caller's responsibility so an unknown acceptance state cannot be retried.
     """
-    policy = audio_policy(recognize_audio)
+    policy = audio_policy(recognize_audio, provider)
     if not has_audio:
         return {"version": VERSION, "policy": policy, "status": "no_audio", "provider": None,
                 "utterances": [], "metadata": {"utterance_count": 0}}
