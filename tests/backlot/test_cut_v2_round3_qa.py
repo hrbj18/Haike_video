@@ -509,10 +509,23 @@ def test_subprocess_hard_kill_mid_submit_freezes_and_never_repays(tmp_path):
         deadline = time.time() + 40
         done_marker = cache / "chunk-00000.json"
         submitting_marker = cache / "chunk-00001.json"
+
+        def _marker_state(path: Path) -> str | None:
+            """Tolerant read: the child may be mid-write when we peek."""
+            try:
+                return _read_json(path).get("state")
+            except (OSError, ValueError):
+                return None
+
         while time.time() < deadline:
-            if done_marker.is_file() and submitting_marker.is_file():
-                if _read_json(submitting_marker).get("state") == t.CHUNK_STATE_SUBMITTING:
-                    break
+            # 两个分片是并发的（HAIKE_ASR_CONCURRENCY=2）⇒ chunk 1 的 submitting 标记
+            # 完全可能早于 chunk 0 的 done 落盘。只等 chunk 1 会在 chunk 0 之前命中，
+            # 于是 kill 掉一个「还没写完 done」的进程 —— 那是本用例的竞态误判，不是产品缺陷。
+            # 必须两个条件同时成立才收网；chunk 1 的提交永不返回，不会错过窗口。
+            if _marker_state(done_marker) == t.CHUNK_STATE_DONE and (
+                _marker_state(submitting_marker) == t.CHUNK_STATE_SUBMITTING
+            ):
+                break
             if proc.poll() is not None:  # died on its own: unexpected
                 break
             time.sleep(0.05)
