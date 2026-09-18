@@ -4,6 +4,13 @@
     python -m backlot open --no-browser   # start server only; print the local URL
     python -m backlot serve [--port N]    # run the server in the foreground
 
+    python -m backlot research-pack <path>            # intake one episode research pack
+    python -m backlot research-pack --batch <root>    # reconcile every episode below root
+
+``research-pack`` runs in-process on purpose: it needs neither the server nor the
+heavy production queue, because intake only writes a ledger and an editorial
+snapshot (never a project or a final video).
+
 ``open`` is idempotent and non-fatal by design: agents call it at pipeline
 initialization and must continue the production even if it fails.
 """
@@ -240,6 +247,36 @@ def cmd_queue(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_research_pack(args: argparse.Namespace) -> int:
+    """研究包 intake：只读消费 CopySkill 已发布的包，走本地账本 + 快照。
+
+    刻意**不经**统一生产队列：队列的 kind 全部是 ``projects_root/<project_id>``
+    下的媒体生产任务，而 intake 不产出项目也不产出成片。因此这里直接进程内调用
+    （不需要 Backlot 服务、不触网、不花钱）。
+    """
+    from pathlib import Path
+
+    from backlot.research_pack_intake import intake_from_current_json, reconcile
+
+    if not Path(args.path).exists():
+        print(f"backlot research-pack: 路径不存在：{args.path}", file=sys.stderr)
+        return 1
+    try:
+        if args.batch:
+            result = reconcile(
+                args.path, ledger_path=args.ledger, snapshot_root=args.snapshot_root
+            )
+        else:
+            result = intake_from_current_json(
+                args.path, ledger_path=args.ledger, snapshot_root=args.snapshot_root
+            )
+    except Exception as exc:
+        print(f"backlot research-pack: {exc}", file=sys.stderr)
+        return 1
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="backlot", description=__doc__)
     sub = parser.add_subparsers(dest="command")
@@ -274,6 +311,24 @@ def main(argv: list[str] | None = None) -> int:
     p_queue_priority.add_argument("job_id")
     p_queue_priority.add_argument("priority", choices=("priority", "normal", "background"))
 
+    p_research = sub.add_parser(
+        "research-pack",
+        help="read-only intake of a published episode research pack (no server, no network)",
+    )
+    p_research.add_argument(
+        "path",
+        help="episode root, its current.json, or (with --batch) a research-pack root",
+    )
+    p_research.add_argument(
+        "--batch",
+        action="store_true",
+        help="treat path as a research-pack root and reconcile every episode below it",
+    )
+    p_research.add_argument("--ledger", default=None, help="override the intake ledger json path")
+    p_research.add_argument(
+        "--snapshot-root", default=None, help="override where editorial snapshots are written"
+    )
+
     args = parser.parse_args(argv)
     if args.command == "open":
         return cmd_open(args.project_id, open_browser=not args.no_browser)
@@ -281,6 +336,8 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_serve(args.port)
     if args.command == "queue":
         return cmd_queue(args)
+    if args.command == "research-pack":
+        return cmd_research_pack(args)
     parser.print_help()
     return 2
 

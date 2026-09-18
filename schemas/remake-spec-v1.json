@@ -1,0 +1,143 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "openmontage/remake/remake-spec-v1",
+  "title": "Remake Spec v1",
+  "description": "主题先行复刻规格书：由 episode-research-pack-v1 经编辑决策与真实 TTS 时长探针生成。段数由论证容量决定，音频是主时钟。",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "project_id",
+    "pipeline_type",
+    "aspect",
+    "fps",
+    "sources",
+    "sections",
+    "duration"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "schema_version": { "type": "string", "const": "remake-spec-v1" },
+    "project_id": { "type": "string", "minLength": 1 },
+    "title": { "type": "string" },
+    "brief": { "type": "string" },
+    "aspect": { "type": "string", "enum": ["portrait", "landscape", "square"] },
+    "pipeline_type": { "type": "string", "const": "avatar-spokesperson" },
+    "style_playbook": { "type": "string" },
+    "fps": { "type": "integer", "minimum": 1 },
+    "theme": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["theme_id", "statement"],
+      "properties": {
+        "theme_id": { "type": "string" },
+        "statement": { "type": "string", "minLength": 1 },
+        "stance": { "type": "string" },
+        "rationale": { "type": "string" }
+      }
+    },
+    "voice": { "type": "object" },
+    "music": { "type": "object" },
+    "material_root": { "type": "string" },
+    "sources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["key", "aweme_id", "url"],
+        "properties": {
+          "key": { "type": "string", "minLength": 1 },
+          "aweme_id": { "type": "string" },
+          "title": { "type": "string" },
+          "author": { "type": "string" },
+          "url": { "type": "string" },
+          "crop_bottom_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+          "duration_seconds": { "type": "number", "minimum": 0 },
+          "rights": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["render_eligible"],
+            "properties": {
+              "render_eligible": { "type": "boolean" },
+              "license": { "type": "string" },
+              "attribution": { "type": "string" },
+              "note": { "type": "string" }
+            }
+          },
+          "availability": { "type": "string" },
+          "note": { "type": "string" }
+        }
+      }
+    },
+    "rejected_sources": {
+      "type": "array",
+      "items": { "type": "object" }
+    },
+    "sections": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "turn_id", "text", "shots"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "turn_id": { "type": "string", "pattern": "^T[0-9]{3,}$" },
+          "label": { "type": "string" },
+          "text": { "type": "string", "minLength": 1 },
+          "dim": { "type": "string" },
+          "theme_support": { "type": "string" },
+          "claim_refs": { "type": "array", "items": { "type": "string" } },
+          "source_refs": { "type": "array", "items": { "type": "string" } },
+          "measured_seconds": { "type": "number", "minimum": 0 },
+          "duration_seconds": { "type": "number", "minimum": 0 },
+          "shots": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["source", "in", "out", "start_seconds", "end_seconds"],
+              "properties": {
+                "source": { "type": "string", "minLength": 1 },
+                "in": { "type": "number", "minimum": 0 },
+                "out": { "type": "number", "minimum": 0 },
+                "intent": { "type": "string" },
+                "start_seconds": { "type": "number", "minimum": 0 },
+                "end_seconds": { "type": "number", "minimum": 0 }
+              }
+            }
+          }
+        }
+      }
+    },
+    "duration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["measured_seconds", "total_seconds", "total_frames", "fps"],
+      "properties": {
+        "measured_seconds": { "type": "number", "minimum": 0 },
+        "total_seconds": { "type": "number", "minimum": 0 },
+        "total_frames": { "type": "integer", "minimum": 0 },
+        "fps": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "gaps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "required": ["reason"],
+        "properties": {
+          "section_id": { "type": "string" },
+          "claim_id": { "type": "string" },
+          "reason": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+    "advisories": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

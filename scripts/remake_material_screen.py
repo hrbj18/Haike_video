@@ -152,13 +152,35 @@ def detect_bands(profiles: np.ndarray, height: int) -> list[dict]:
     return merged
 
 
+class FrameSampleError(RuntimeError):
+    """单条源抽帧失败。★ 设计成可捕获异常，让 `cmd_screen` 跳过该条继续跑整批。"""
+
+
+def safe_dir_stem(stem: str, limit: int = 24) -> str:
+    """把文件名干熔成「能安全出现在 ffmpeg 输出模板里」的目录名。
+
+    ★ 2026-09-17 踩到（musk 期 `极说_80%合并概率！拆解特斯拉与SpaceX_7660134287102268323.mp4`）：
+      `sample_frames` 把 `out_dir / "%05d.jpg"` 这**整条路径**交给 ffmpeg，而 image2
+      muxer 会扫描路径里**所有** `%` 找序列占位符。词干里的 `80%` 把 `%合` 变成了
+      "非法占位符" ⇒ ffmpeg 判定"这不是序列模式"，于是拒绝写第二个文件：
+        `Cannot write more than one file with the same name. Are you missing
+         the -update option or a sequence pattern?`
+      后果是**整条源被跳过**（musk 双筛 rc=1、六期里那一期直接没有 json）。
+      ⇒ `%` 一律替换掉；顺带挡掉路径分隔符与通配符，目录名永远可预测。
+    """
+    bad = '%"*/:<>?\\|\n\r\t'
+    out = "".join("_" if ch in bad else ch for ch in stem[:limit]).strip()
+    return out or "video"
+
+
 def sample_frames(ffmpeg: Path, path: Path, out_dir: Path, fps: float) -> list[Path]:
     out_dir.mkdir(parents=True, exist_ok=True)
     cmd = [str(ffmpeg), "-y", "-v", "error", "-i", str(path), "-vf", f"fps={fps}",
            "-pix_fmt", "yuvj420p", "-q:v", "3", str(out_dir / "%05d.jpg")]
     r = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
     if r.returncode != 0:
-        raise SystemExit(f"抽帧失败：{r.stderr[:300]}")
+        # 抛可捕获异常而不是 SystemExit：一条源坏掉不该让整批（6 期）白跑。
+        raise FrameSampleError(f"抽帧失败：{(r.stderr or '').strip()[:300]}")
     return sorted(out_dir.glob("*.jpg"))
 
 
@@ -205,8 +227,12 @@ def cmd_screen(args: argparse.Namespace) -> int:
         if path.suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm"}:
             continue
         duration = probe(path, ffprobe)["duration"]
-        frames_dir = out_dir / f".frames-{path.stem[:24]}"
-        frames = sample_frames(ffmpeg, path, frames_dir, SAMPLE_FPS)
+        frames_dir = out_dir / f".frames-{safe_dir_stem(path.stem)}"
+        try:
+            frames = sample_frames(ffmpeg, path, frames_dir, SAMPLE_FPS)
+        except FrameSampleError as exc:
+            print(f"跳过（{exc}）: {path.name}", flush=True)
+            continue
         if not frames:
             print(f"跳过（无帧）: {path.name}", flush=True)
             continue
@@ -235,7 +261,17 @@ def cmd_screen(args: argparse.Namespace) -> int:
         print(f"{path.name[:40]:<42} {width}x{height} {duration:6.1f}s "
               f"字幕带[{band_text}] 人脸命中 {main_faces['hit_ratio']:.3f} "
               f"小脸 {small_faces['hit_ratio']:.3f}", flush=True)
-    target = out_dir / (args.json or "screen-report.json")
+    target = Path(args.json or "screen-report.json")
+    # ★ 2026-09-17 踩到：`--json` 传 `.backlot/_diag/screen-leijun-bak.json`（带目录的
+    #   相对路径）时，旧写法 `out_dir / args.json` 会拼成
+    #   `<out_dir>/.backlot/_diag/...` ⇒ 目录不存在，FileNotFoundError 抛在**最后一行**，
+    #   前面整轮抽帧/人脸/字幕带检测全部白跑（leijun 备份目录 5 条就这么丢过一次结果）。
+    #   约定：裸文件名 → 仍落在 `--out` 目录下（保持旧行为）；带目录成分 → 按调用方 cwd 解析。
+    if not target.is_absolute() and target.parent != Path("."):
+        target = Path.cwd() / target
+    else:
+        target = out_dir / target
+    target.parent.mkdir(parents=True, exist_ok=True)
     Path(target).write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
     print("WROTE", target)
     return 0

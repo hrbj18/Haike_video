@@ -30,6 +30,11 @@ if str(REPO) not in sys.path:
 
 from backlot import music_library as ml  # noqa: E402
 from backlot import workbench as wb  # noqa: E402
+from backlot.music_preferences import DEFAULT_PLAYBACK_GAIN_DB  # noqa: E402
+from backlot.narration_preferences import (  # noqa: E402
+    DEFAULT_NARRATION_GAIN_DB,
+    clamp_narration_gain_db,
+)
 from backlot.state import PROJECTS_DIR  # noqa: E402
 from lib.checkpoint import init_project  # noqa: E402
 
@@ -145,10 +150,25 @@ def main(spec_path: Path) -> None:
         "aspect": spec["aspect"], "aspect_label": "竖版 9:16",
         "created_from": "remake_workflow", "duration_source": "audio_driven",
         "brief": spec["brief"],
-        "avatar": {"source_status": "ready", "generation_mode": "runninghub_longcat",
-                   "import_mode": "per_turn", "default_treatment": "custom",
-                   "background_mode": "opaque"},
     }
+    # ★ 2026-09-17：**无数字人期不得写 `avatar` 键**。
+    #   原实现无条件写 `avatar: {..., "default_treatment": "custom"}`，副作用是：
+    #   `_normalize_intake` 一见到 avatar 就把字段补全，而 "custom" 属于
+    #   `PRESENTER_TREATMENTS` 的合法值 ⇒ 后续 `_scene_presenter()` 不会把它回退成
+    #   "hidden"，于是 animated-explainer 期每次重建都被推回"有数字人"上下文。
+    #   判据与源码保持一致（非自创）：
+    #     `_is_avatar_project(state)` == `pipeline_type == AVATAR_PIPELINE`
+    #     （`backlot/workbench.py:4611` 用它决定"是否强制要求数字人素材"）
+    #   ⇒ 非 avatar 期直接不写该键，让 `_presenter_default()`（treatment="hidden"）生效。
+    if spec["pipeline_type"] == "avatar-spokesperson":
+        marker["intake"]["avatar"] = {
+            "source_status": "ready", "generation_mode": "runninghub_longcat",
+            "import_mode": "per_turn", "default_treatment": "custom",
+            "background_mode": "opaque",
+        }
+    else:
+        print(f"[1] pipeline_type={spec['pipeline_type']} → 无数字人（intake 不写 avatar）",
+              flush=True)
     marker_path.write_text(json.dumps(marker, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"[1] 项目骨架就绪 {project_dir}", flush=True)
 
@@ -186,6 +206,66 @@ def main(spec_path: Path) -> None:
                 break
         if key not in key_to_asset:
             raise SystemExit(f"资产登记失败：{key}")
+
+    # ---- 2b. 清理上一版残留的素材资产（★ 必须做，否则下游会绑错素材）-------
+    # 2026-09-15 事故：本脚本原来**只增不删**资产。整期换素材后（aweme_id 变了
+    # ⇒ clean-master 文件名变了），旧资产仍留在表里，且与新资产**共用 "S1 " 名字前缀**；
+    # `pp8.step_retime` 当时用 `name.startswith(f"{k} ")` 反查映射，`next()` 取先出现者
+    # ⇒ 画面块被悄悄绑回旧素材（powerbank 开头 4 块仍是央视画面、ram 的猫meme、
+    # deepseek 的静态录屏）。现在 retime 已改成按 path 精确匹配，这里再把残留扫干净，
+    # 让资产表本身也不含歧义（UI 里也不会看到两条同名素材）。
+    expect = {(project_dir / CLEAN_DIR / f"{s['key']}-{s['aweme_id']}.mp4").relative_to(project_dir).as_posix()
+              for s in spec["sources"]}
+    stale = [a for a in state.get("assets") or []
+             if isinstance(a, dict)
+             and str(a.get("path") or "").startswith(CLEAN_DIR.as_posix() + "/")
+             and str(a.get("path")) not in expect]
+
+    # 2b-1. 保留资产的**名字也要跟着 spec 刷新**：aweme_id 没变（如 recrop 再构图版）
+    #       时文件名相同、不会新增登记，但 title 变了；不刷新就会出现
+    #       「名字写着旧标题、文件其实是新内容」的误导（ram S1 实测）。
+    title_by_rel = {(project_dir / CLEAN_DIR / f"{s['key']}-{s['aweme_id']}.mp4")
+                    .relative_to(project_dir).as_posix(): str(s.get("title") or "")
+                    for s in spec["sources"]}
+    renamed = 0
+    for a in state.get("assets") or []:
+        if not isinstance(a, dict):
+            continue
+        rel = str(a.get("path") or "")
+        want_name = title_by_rel.get(rel)
+        if not want_name:
+            continue
+        key_of = rel.split("/")[-1].split("-", 1)[0]
+        full = f"{key_of} {want_name}"
+        if str(a.get("name") or "") != full:
+            a["name"] = full
+            renamed += 1
+    if renamed:
+        wb._save(project_dir, state)
+        print(f"[2b] 刷新 {renamed} 个资产显示名（aweme_id 未变但标题变了）", flush=True)
+    if stale:
+        # 移入项目内回收目录（不是删除），保留可回溯
+        recycle = project_dir / "assets" / "_recycle" / "remake-stale"
+        for a in stale:
+            src = project_dir / str(a.get("path"))
+            if src.is_file():
+                dst = recycle / src.name
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                if dst.exists():
+                    dst = dst.with_name(f"{dst.stem}-{a.get('id')}{dst.suffix}")
+                shutil.move(str(src), str(dst))
+                print(f"[2b] 残留素材资产移入回收：{src.name} ← {a.get('id')} "
+                      f"{str(a.get('name'))[:36]}", flush=True)
+            else:
+                print(f"[2b] 残留素材资产登记已移除（文件不存在）：{a.get('id')} "
+                      f"{str(a.get('name'))[:36]}", flush=True)
+        removed = {str(a.get("id")) for a in stale}
+        state["assets"] = [a for a in state.get("assets") or []
+                           if str(a.get("id")) not in removed]
+        wb._save(project_dir, state)
+        print(f"[2b] 共清理 {len(stale)} 个残留素材资产（新的 {len(expect)} 个保留）", flush=True)
+    else:
+        print(f"[2b] 无残留素材资产（{len(expect)} 个）", flush=True)
 
     # ---- 3. 正式脚本 -------------------------------------------------------
     script = build_script(spec)
@@ -257,9 +337,22 @@ def main(spec_path: Path) -> None:
         print(f"    {scene['id']} {duration}s ← {len(blocks)} 个本地区间", flush=True)
 
     # ---- 6. 配音（数字人母版会按该音色生成）------------------------------
+    # ★ 2026-09-16：与第 7 步 BGM 对称——spec 不写 `narration_gain_db` 时**必须兜底
+    #   软件级默认 +8.0**，不能是 0.0。原实现 `float(spec.get(...) or 0.0)` 让**每次
+    #   重建都把口播增益打回 0 dB**（实测 matext2-remake-1 12:53 重建后
+    #   `narration_policy.playback_gain_db == 0.0`，而同期几期都是 +8.0）
+    #   ⇒ 与「重建后 BGM 又变小」是同一类漏洞的姊妹，只是方向相反、更隐蔽：
+    #     0 dB 不会报错、预览也能过，只有上手机听才会发现口播发闷。
+    narration_gain = spec.get("narration_gain_db")
+    # ★ 2026-09-16 修：此处原写 `np_[...]`，但 `np_` **从未定义** ⇒ 每次重建
+    #   都在这一步 `NameError: name 'np_' is not defined`（第 4 步之后、第 6 步崩），
+    #   而且是在场景已经改完、母版已经重转之后崩 ⇒ 留下"半重建"的项目。
+    #   正确写法：先取 state、再取 narration_policy 的引用，改完一并保存。
     state = wb._load_for_write(project_dir)
     np_ = wb._ensure_narration_policy(state)
-    np_["playback_gain_db"] = float(spec.get("narration_gain_db") or 0.0)
+    np_["playback_gain_db"] = clamp_narration_gain_db(
+        narration_gain if narration_gain is not None else DEFAULT_NARRATION_GAIN_DB
+    )
     np_["updated_at"] = wb._now()
     wb._save(project_dir, state)
 
@@ -276,7 +369,7 @@ def main(spec_path: Path) -> None:
             "enabled": True,
             "category": "project_upload",
             "track_id": metadata["id"],
-            "playback_gain_db": float(music.get("playback_gain_db", -16.0)),
+            "playback_gain_db": float(music.get("playback_gain_db", DEFAULT_PLAYBACK_GAIN_DB)),
             "loop": True,
             "source_start_seconds": 0.0,
             "source_end_seconds": None,
@@ -287,6 +380,21 @@ def main(spec_path: Path) -> None:
         wb._save(project_dir, state)
         print(f"[7] BGM 已入项目曲库：{metadata['id'][:34]}… 时长 {metadata.get('duration_seconds')}s "
               f"增益 {policy['playback_gain_db']}dB", flush=True)
+
+    # ---- 7b. 重建必然改变音频混音签名 → 旧样板置 stale ---------------------
+    # ★ 为什么必须在这里清（2026-09-15 实测踩到）：
+    #   服务端在 `full_preview` 入口用 `sample.policy_signature == _audio_mix_signature(state)`
+    #   校验（workbench.py:3204），而签名里含**人声增益 + BGM 设置 + 输出响度目标**。
+    #   rebuild 改写了 narration_gain（第 6 步）与 music gain（第 7 步），签名一定变；
+    #   但 rebuild 是**直接写 state.json、没走 API**，所以服务端不会自动置 stale。
+    #   后果：`pp8.step_music` 看到 `sample.status == "approved"` 就跳过 → 紧接着
+    #   preview 撞 `HTTP 422 声音设置已修改：请先生成并确认第一段音量样板，再生成全片`。
+    state = wb._load_for_write(project_dir)
+    policy = wb._ensure_music_policy(state)
+    if (policy.get("sample") or {}).get("status") == "approved":
+        wb._stale_music_sample(policy, "项目重建：音频混音设置已变更，第一段样板需重新生成并确认")
+        wb._save(project_dir, state)
+        print("[7b] 音频混音签名已变更 → 旧声音样板置 stale（下游会重新生成样板）", flush=True)
 
     # ---- 8. 摘要 ----------------------------------------------------------
     state = wb.read_workbench(project_dir)
