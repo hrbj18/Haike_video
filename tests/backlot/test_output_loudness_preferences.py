@@ -9,7 +9,8 @@ def test_output_loudness_preferences_default_and_clamp(tmp_path, monkeypatch):
     target = tmp_path / "output-loudness.json"
     monkeypatch.setattr(preferences, "PREFERENCES_PATH", target)
 
-    assert preferences.read_output_loudness_preferences()["target_lufs"] == -10.0
+    # 2026-09-16 定案：软件级默认成片响度 -9.0 LUFS（抖音端实测后维持）。
+    assert preferences.read_output_loudness_preferences()["target_lufs"] == -9.0
     saved = preferences.save_output_loudness_preferences({"target_lufs": -8.0})
     assert saved["target_lufs"] == -8.0
     assert json.loads(target.read_text(encoding="utf-8"))["true_peak_limit_dbtp"] == -1.0

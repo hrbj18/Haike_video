@@ -19,7 +19,18 @@ from backlot.state import REPO_ROOT
 
 
 PREFERENCES_PATH = REPO_ROOT / ".backlot" / "music_preferences.json"
-DEFAULT_PLAYBACK_GAIN_DB = -14.0
+# 2026-09-15 第一次调整：短视频平台做响度归一化后，人声/BGM 相差 22 dB
+# （旧值 +8/−14）会让 BGM 几乎不可闻。BGM 提到 −9.5 dB。
+#
+# 2026-09-16 第二次调整（依据 = 把已发布的成片从抖音下载回来做分带实测）：
+#   · 抖音**不做**大幅整体衰减 —— 全频 I 只降 1.1 dB（"声音被调小"不成立）；
+#   · 抖音**专门削低电平内容** —— P5 降 4.4 dB、P25 降 4.3 dB。P5/P25 正是
+#     人声句间停顿，也就是 BGM 唯一露头的地方 ⇒ 平台把我们垫底的 BGM 再拉开 4~5 dB；
+#   · 手机单喇叭 <300 Hz 衰减 15~20 dB ⇒ BGM 低频主体在手机上直接消失；
+#   · 我们混音无 ducking、BGM 恒定增益 ⇒ 抬 playback_gain_db 是**唯一有效杠杆**。
+#   ⇒ −9.5 → −6.0（人声/BGM 比 7.4 → ~4 dB），把人声 +8 与成片响度目标一律不动：
+#     主动降 target_lufs 只会让整条视频更小，不会让 BGM 变清楚。
+DEFAULT_PLAYBACK_GAIN_DB = -6.0
 MIN_PLAYBACK_GAIN_DB = -24.0
 MAX_PLAYBACK_GAIN_DB = 0.0
 

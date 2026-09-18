@@ -21,6 +21,21 @@
 - 配音中心的「云端音色管理」不再只支持豆包：新增「配音服务」下拉，可选豆包或腾讯云，填入显示名称与音色 ID 即可添加并试听。
   腾讯云侧接受任意纯数字 `VoiceType`（如 502003、601010），语速下拉只给腾讯支持档位；豆包侧行为与以前完全一致（含 `S_` 前缀自动用 ICL 资源）。
   旧配置文件里只有豆包的记录（无服务字段）继续按豆包加载，不会丢失。
+- **口播处理链**（`backlot/workbench.py`）：人声增益不再只做裸 `volume=NdB`。旧实现把台词推到 +0.6~+2.9 dBFS 削顶（gpu / microduck 期实测），既失真又听不清；现在固定叠加 `highpass 90` + `equalizer 3k +3dB` + `volume(项目增益 + 10dB)` + `alimiter 0.85`，波峰因数 13.2 → 9.4，可在不牺牲 LRA 的前提下把可达响度提高约 1.8 dB。施加上限由实测决定：驱动 +22 dB 时 TP 越 −1.0 容差。
+- **成片响度不再在混音前的中间态否决**（`workbench.py::_generate_project_video_render`）：此前正式渲染在施加人声/BGM 之前就按发布容差 raise，一个本来能被混音救回的中间电平会掐死整条链（gpu 期实测中间态只到 −12.4 就中止，声音设置根本没机会应用）。现在只有「直接音轨模式」的正式渲染才在该点把关，其余交给混音之后那次权威归一化。
+- 修订**软件级音频默认**为 人声 **+8 dB** / BGM **−6 dB** / 成片 **−9 LUFS**（此前 BGM −14、成片 −10）。依据是把已发布成片从抖音取回分带实测：平台不做大幅整体衰减（全频仅 −1.1 dB），但专门削低电平内容（P5 −4.4 / P25 −4.3 dB），而 P5/P25 正是 BGM 唯一露头处；叠加手机单喇叭 <300 Hz 衰减 15~20 dB ⇒ 抬 BGM 是唯一有效杠杆。验收判据随之改为音频包络 P5/P25，不得再用整片 200–800 Hz 的 LUFS。
+- 修复**重建项目把音频默认打回**的两处漏洞（`scripts/remake_build_project.py`）：BGM 缺键时兜底软件级默认而不是 −16 dB；`narration_gain_db` 缺键时兜底 +8 dB 而不是 0 dB。后者的原写法还会在 `np_` 未定义处抛 `NameError`，且崩在场景与母版已改完之后，留下"半重建"项目。
+- 修复**重建后全片预览必然 422**（`scripts/remake_build_project.py`）：重建会改变音频混音签名，但脚本直接写 `state.json` 不走 API，服务端不会自动把第一段声音样板置 stale。现在重建末尾显式置 stale，下游重新生成样板。
+- 修复**重建后画面绑回旧素材**（`scripts/remake_build_project.py`）：脚本原先只增不删资产，整期换素材后旧资产仍留在表里并与新资产共用 `S1 ` 名字前缀，转场重排会绑错素材（powerbank / ram / deepseek 期实测）。现在会清理残留资产（移入项目内回收目录而非删除）并刷新未变 aweme_id 的资产显示名。
+- 修复**无数字人期被推回"有数字人"上下文**（`scripts/remake_build_project.py`）：原实现无条件写入 `avatar.default_treatment="custom"`，使 `_scene_presenter()` 不再回退 `hidden` ⇒ animated-explainer 期每次重建都走数字人分支。现按 `pipeline_type == "avatar-spokesperson"` 才写该键。
+- 新增**素材选择政策 V1**（`docs/MATERIAL_SELECTION_POLICY_V1_ZH-CN.md`）：素材选择权归本项目而非 copyskill，必须基于多宫格帧大图先看图再选区段，禁止"整条源当一整块素材"。附 shengteng 水印/烧入字幕漏筛等四期事故复盘。
+- 新增**`remake-spec-v1` 机读契约**（`schemas/remake-spec-v1.json`）与离线校验层 `backlot/remake_project.py`（规格书 → `script.json` 与逐段视觉时间线的纯函数适配，帧口径与 `workbench.py::_validated_visual_timeline` 一致，供离线校验与后续编排复用，带单元测试）。
+- 新增**跨仓研究包只读消费链路**：`backlot/copy_skill_research_pack.py`（权威校验：current → READY → manifest → 七语义文件、hash、路径安全、外键、时间码、权限门）、`research_pack_snapshot.py`（冻结 editorial snapshot 纯投影）、`research_pack_intake.py`（账本 + 快照，永不扫 `.staging`）、编辑层 `remake_intake.py` / `remake_editorial.py` / `remake_editorial_verdict.py`；CLI `scripts/remake_editorial_cli.py`（fail-closed，退出码 2/3/4）。新增 `python -m backlot research-pack <path> [--batch]` 子命令，进程内执行：不进生产队列、不触网、不花钱。
+- 修复**素材筛选中 `%` 让整条源被跳过**（`scripts/remake_material_screen.py`）：抽帧把整条输出路径交给 ffmpeg，image2 muxer 会扫描路径里所有 `%`，词干里的 `80%` 被当成非法序列占位符 ⇒ 报 "Cannot write more than one file"，整条源无结果（musk 期实测）。目录名现在会先净化。
+- 修复**素材筛选一坏俱坏与结果丢失**（`scripts/remake_material_screen.py`）：单条源抽帧失败原先抛 `SystemExit` 直接终止整批；`--json` 传带目录的相对路径时会在最后一行 `FileNotFoundError`，前面整轮抽帧/人脸/字幕带检测全部白跑。现在失败可捕获并跳过该条，输出路径按调用方 cwd 解析并自动建目录。
+- 新增**切镜闪白**（`workbench.py::_directive_filter_chain`）：`flash_white` 进入外科手术式组件白名单，以 start 为中心做整帧白场。它不套用通用 `duration = max(0.5, …)`，否则 0.15 秒会被抬到 0.5 秒。
+- 修复**字幕把一个词切成两半**（`workbench.py`、`material_interaction_units.py`）：行宽是算术，按"第 N 个字符"切的硬上限会把 `1000` 切成 `100`+`0`、`UnifoLM-WLA-1.0` 切开，成片里出现以孤立字符开头的字幕。现在 ASCII 字母/数字串（含 `Model 3`、`RTX 5090`、`7:14`、`48%`）视为不可断整体，硬切落在串内时整体后移。
+- 新增 **RunningHub Plus 48GB 工作流构建与付费 A/B 探针**（`scripts/build_runninghub_infinitetalk_48g_workflow.py`、`scripts/probe_infinitetalk_48g_variants.py`）：从冻结 24GB 图派生 48GB 版本并逐变体付费对比。实测耗时模型 `t = 19s + 39s × 窗口数`（启动只占一分钟渲染的约 2%），去掉 block swap、改 load_device 或量化对耗时均为噪声 ⇒ 显存升级不等于提速。
 
 ## v0.1.1 - 2026-09-01
 

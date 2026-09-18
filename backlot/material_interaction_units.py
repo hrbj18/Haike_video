@@ -113,6 +113,54 @@ def _number(value: Any) -> float | None:
 
 # ------------------------------------------------------------------ phrases --
 
+# An ASCII letter/digit run is one spoken token however the width limit falls:
+# a fixed-width split turned "1000" into "100" + "0" and "UnifoLM-WLA-1.0" into
+# "Unifo" + "LM-WLA-1.0", so the next caption opened with a fragment that reads
+# as a typo.  The optional space group keeps multi-word names whole as well
+# ("Model 3", "RTX 5090"), and the trailing symbol class covers what occurs
+# inside such runs ("7:14", "48%", "9.62").
+_UNBREAKABLE_RUN_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._+:/'%-]*(?:[ ][A-Za-z0-9][A-Za-z0-9._+:/'%-]*)*"
+)
+# A run that begins at the line head has no readable stub to break before, so
+# keeping it whole is the only option — which means carrying past ``max_chars``.
+# A Latin glyph is about half the width of a CJK one, so twice the budget is
+# still inside the frame; the factor is also the bound that keeps a
+# 198-character ASCII monologue from collapsing into a single line.
+_RUN_WIDTH_FACTOR = 2
+
+
+def _hard_split(token: str, *, max_chars: int) -> list[str]:
+    """Fixed-width split whose cuts never land inside an ASCII letter/digit run.
+
+    ``max_chars`` is a width budget, not a word boundary.  When a cut would fall
+    inside such a run the whole run moves to the next line — a short caption
+    reads fine, a broken word does not.  The run's trailing edge is used only
+    when its leading edge would leave no text at all, and only while the wider
+    Latin budget holds; otherwise a broken word beats one unbounded line.
+    """
+    result: list[str] = []
+    start = 0
+    while start < len(token):
+        cut = min(start + max_chars, len(token))
+        for match in _UNBREAKABLE_RUN_RE.finditer(token, start):
+            if match.start() >= cut:
+                break                       # runs are ordered; no later one can fit
+            if match.end() > cut:           # cut lands strictly inside this run
+                if match.start() > start:
+                    cut = match.start()
+                elif match.end() - start <= max_chars * _RUN_WIDTH_FACTOR:
+                    cut = match.end()
+                else:
+                    cut = min(start + max_chars, len(token))
+                break
+        if cut <= start:                    # never stall, whatever the token is
+            cut = min(start + max_chars, len(token))
+        result.append(token[start:cut])
+        start = cut
+    return result
+
+
 def _explode_token(token: str, *, max_chars: int) -> list[str]:
     """Break a whitespace-free token down to phrases no longer than ``max_chars``."""
     if len(token) <= max_chars:
@@ -121,13 +169,13 @@ def _explode_token(token: str, *, max_chars: int) -> list[str]:
     if len(pieces) <= 1:
         # No usable punctuation: fall back to a fixed-width hard split so a
         # 198-character monologue still becomes readable lines.
-        return [token[index:index + max_chars] for index in range(0, len(token), max_chars)]
+        return _hard_split(token, max_chars=max_chars)
     result: list[str] = []
     for piece in pieces:
         if len(piece) <= max_chars:
             result.append(piece)
         else:
-            result.extend(piece[index:index + max_chars] for index in range(0, len(piece), max_chars))
+            result.extend(_hard_split(piece, max_chars=max_chars))
     return result
 
 

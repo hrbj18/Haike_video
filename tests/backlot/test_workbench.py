@@ -150,6 +150,28 @@ def test_subtitle_phrases_let_a_nearby_comma_beat_the_hard_cut():
     ]
 
 
+def test_subtitle_head_run_is_carried_over_but_only_within_the_latin_budget():
+    """A run at the head of a caption has no stub to break before.
+
+    ``Xiaomi AI Cube Prototype`` is 23 characters against an 18-character CJK
+    budget, so keeping it whole means carrying past the budget — acceptable,
+    because a Latin glyph is about half as wide as a CJK one.  A run far beyond
+    twice that budget is still split: one unbounded caption is worse than a
+    broken word.
+    """
+    phrases = workbench_mod._split_subtitle_phrases(
+        "Xiaomi AI Cube Prototype端侧AI原型设备今天正式对外发布了。"
+    )
+    assert "Xiaomi AI Cube Prototype" in phrases
+
+    unbounded = "SupercalifragilisticexpialidociousModelV2UltraPrototypeEditionPlus"
+    widened = workbench_mod._split_subtitle_phrases(f"{unbounded}端侧AI设备。")
+    ceiling = workbench_mod.SUBTITLE_MAX_CHARS * workbench_mod.SUBTITLE_RUN_WIDTH_FACTOR
+
+    assert len(widened) > 1
+    assert max(len(phrase) for phrase in widened) <= ceiling
+
+
 def test_subtitle_captions_drop_the_line_final_mark_but_keep_inner_commas():
     """The frame cut terminates a caption, so a dangling mark reads as a typo.
 
@@ -5267,7 +5289,15 @@ def test_narration_gain_changes_derivative_by_requested_db_without_touching_sour
     after = workbench_mod._measure_integrated_loudness(output, ffmpeg)["integrated_lufs"]
 
     assert report["playback_gain_db"] == 6.0
-    assert abs((after - before) - 6.0) <= 0.5
+    # 2026-09-15: the derivative is deliberately hotter than the requested gain.
+    # `playback_gain_db` is the user-visible number that *drives* the chain, and
+    # the chain adds a fixed drive before a limiter so the crest factor drops —
+    # that is what raises the achievable loudness of the final loudnorm.  So the
+    # measured delta is the gain plus the drive, and this quiet tone never
+    # reaches the limiter.  The chain is recorded on the report for auditing.
+    expected_db = 6.0 + workbench_mod.NARRATION_LIMITER_DRIVE_DB
+    assert abs((after - before) - expected_db) <= 0.5
+    assert report["processing_chain"] == workbench_mod._narration_processing_chain(6.0)
     assert source.read_bytes() == before_bytes
 
 

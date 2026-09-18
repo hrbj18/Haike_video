@@ -344,7 +344,7 @@ STOCK_KEYWORD_TRANSLATIONS = {
     "云计算": "cloud computing", "数据网络": "digital data network",
     "创作工作台": "creative desk overhead", "手部操作": "hands using technology",
 }
-SURGICAL_COMPONENT_TYPES = {"text_callout", "info_label", "focus_box"}
+SURGICAL_COMPONENT_TYPES = {"text_callout", "info_label", "focus_box", "flash_white"}
 SURGICAL_COMPONENT_POSITIONS = {"top_left", "top_right", "center", "lower_third"}
 PRESENTER_LAYOUT_DEFAULTS = (
     # Approved on the 2026-08-23 daily-tech project: this framing keeps the
@@ -8883,6 +8883,17 @@ def _directive_filter_chain(project_dir: Path, state: dict, directives: list[dic
         start = _as_number(directive.get("start_seconds"))
         if not global_time:
             start -= _as_number(directive.get("scene_start_seconds"))
+        if kind == "flash_white":
+            # 2026-09-16 切镜闪白（9.15 五期统一效果）：以 start 为中心的整帧白场。
+            # ★ 不能复用下面那个 duration = max(0.5, …)：它会把 0.15s 抬到 0.5s。
+            # ★ enable 表达式里的逗号必须转义成 \,，否则 ffmpeg 静默不生效
+            #   （实测：输出与输入字节数完全一致，不报错、rc=0），坑已踩过。
+            half = max(0.02, _as_number(directive.get("duration_seconds"), 0.15) / 2.0)
+            filters.append(
+                "drawbox=x=0:y=0:w=iw:h=ih:color=white@1.0:thickness=fill:"
+                f"enable='between(t\\,{start - half:.3f}\\,{start + half:.3f})'"
+            )
+            continue
         duration = max(0.5, _as_number(directive.get("duration_seconds"), 2.5))
         end = start + duration
         enable = f"between(t\\,{start:.3f}\\,{end:.3f})"
@@ -11504,6 +11515,43 @@ SUBTITLE_MIN_TAIL_CHARS = 4
 # carry intonation that the cut itself cannot express.
 SUBTITLE_TRAILING_PUNCTUATION = "，,、。.；;：:"
 
+# A caption is a reading unit, so its break must fall *between* words, never
+# inside one.  ``SUBTITLE_MAX_CHARS`` is width arithmetic, and a word modelled
+# only as "N characters" gets sliced by it: a delivered film opened a caption
+# with the stranded "0" of "1000" ("…就对大约100" / "0辆车启动了合规审查").
+# An ASCII letter/digit run is the one class of "word" this repo can recognise
+# without a CJK segmenter, so it is treated as atomic.  The optional space group
+# keeps multi-word names whole too ("Model 3", "RTX 5090"), and the trailing
+# symbol class covers what occurs *inside* such runs ("UnifoLM-WLA-1.0",
+# "7:14", "48%").
+SUBTITLE_UNBREAKABLE_RUN_RE = re.compile(
+    r"[A-Za-z0-9][A-Za-z0-9._+:/'%-]*(?:[ ][A-Za-z0-9][A-Za-z0-9._+:/'%-]*)*"
+)
+# When the cut lands inside such a run, the run's leading edge is the natural
+# break.  If honouring it would leave a stub line, the run's trailing edge is
+# used instead — but only while that still fits the frame; otherwise the
+# original cut stands, because a broken word beats an overflowing frame.
+SUBTITLE_MIN_HEAD_CHARS = 6
+# A run that starts at (or too near) the head of the remainder has no readable
+# stub to break before, so keeping the word whole is the only option left — and
+# that means carrying past ``limit``.  The budget counts CJK glyph widths
+# (line above), and a Latin glyph is about half as wide, so twice the budget is
+# still inside the 1080px frame.  The factor is also what stops a 198-character
+# ASCII monologue from becoming a single caption.
+SUBTITLE_RUN_WIDTH_FACTOR = 2
+
+
+def _cut_off_unbreakable_run(text: str, cut: int, *, limit: int) -> int:
+    """Move ``cut`` out of an ASCII letter/digit run it would slice in half."""
+    for match in SUBTITLE_UNBREAKABLE_RUN_RE.finditer(text):
+        if match.start() < cut < match.end():
+            if match.start() >= SUBTITLE_MIN_HEAD_CHARS:
+                return match.start()
+            if match.end() <= limit * SUBTITLE_RUN_WIDTH_FACTOR:
+                return match.end()
+            return cut
+    return cut
+
 
 def _strip_subtitle_trailing_punctuation(text: str) -> str:
     """Drop sentence-final punctuation from one caption line only."""
@@ -11547,16 +11595,10 @@ def _split_subtitle_phrases(text: str, max_chars: int = SUBTITLE_MAX_CHARS) -> l
             window = remainder[:wide_limit]
             comma_breaks = [index + 1 for index, char in enumerate(window) if char in break_chars]
             cut = max(comma_breaks) if comma_breaks else max_chars
-            if not comma_breaks:
-                latin_group = next((
-                    match for match in re.finditer(
-                        r"[A-Za-z0-9][A-Za-z0-9._+/-]*(?: [A-Za-z0-9][A-Za-z0-9._+/-]*)+",
-                        remainder,
-                    )
-                    if match.start() < cut < match.end()
-                ), None)
-                if latin_group is not None:
-                    cut = latin_group.start() if latin_group.start() > 0 else latin_group.end()
+            # A comma boundary already sits between words; the hard limit does
+            # not, so give it a second chance to land between them instead of
+            # slicing "1000" or "Model Y" in half.
+            cut = _cut_off_unbreakable_run(remainder, cut, limit=wide_limit)
             piece = remainder[:cut].strip()
             if piece:
                 phrases.append(piece)
@@ -12401,6 +12443,42 @@ def mark_project_video_render_failed(project_dir: Path, error: object) -> dict:
     return _save(project_dir, state)
 
 
+# ★★★ 口播处理链（2026-09-15 定案）
+# 手机小喇叭只能有效重放中频，单纯抬增益（旧实现 volume=+8dB）不但听不清，
+# 还会把音轨推过 0 dBFS 造成削顶失真（实测 gpu +0.6 dB、microduck +2.9 dB）。
+#
+# 为什么是「强驱动 + 限幅」而不是常规压缩（实测对比，样本=檬檬声母版）：
+#   旧 volume+8        → 波峰因数 13.2，可达积分响度 -12.2 LUFS
+#   acompressor(阈值 -20dB) → 波峰因数 13.2（阈值低于语音平均电平，压缩器只是
+#                          等量衰减 I 与 TP，波峰因数纹丝不动）—— 等于白做
+#   acompressor(阈值 -8dB)  → 波峰因数 14.4（只吃瞬态，几乎无收益）
+#   volume=+14dB + alimiter → 波峰因数 9.1，可达 -10.4 LUFS（+1.8 dB）★采用
+# 收尾 loudnorm 是单增益（linear=true），输出 I = min(目标, -2.0 - 波峰因数)，
+# 所以"能不能更响"完全取决于波峰因数 —— 把信号驱动进限幅器压平瞬态才是正解。
+#
+# ★ 驱动量二次扫描（2026-09-15，`audio_lab4.py`，同一母版音轨）：
+#   drive14（+8 增益 +6 驱动）→ 波峰因数 9.4 / LRA 2.9 → 目标 -9.5 落地 -10.6
+#   drive18（+8 增益 +10 驱动）→ 波峰因数 8.4 / LRA 2.9 → 目标 -9.5 落地 -9.9 ★
+#   drive22                      → 波峰因数 8.0 / LRA 2.7 → 落地 -9.5 但 TP -0.7 超限 ✗
+#   drive26                      → 波峰因数 7.9 / LRA 2.7 → 落地 -9.5（LRA 已掉）
+# 取 10.0：**把旧链靠削顶换来的那 0.7 dB 拿回来，而 LRA 一点没掉**（2.9→2.9），
+# 且 TP 仍有 0.6 dB 余量。再往上（22）TP 就越过 -1.0 的发布容差。
+NARRATION_LIMITER_DRIVE_DB = 10.0
+NARRATION_PROCESSING_CHAIN = (
+    "highpass=f=90,"
+    "equalizer=f=3000:t=q:w=1.5:g=3,"
+    "volume={drive:.1f}dB,"
+    "alimiter=limit=0.85:attack=5:release=80:level=disabled:asc=disabled"
+)
+
+
+def _narration_processing_chain(gain_db: float) -> str:
+    """项目增益 + 固定驱动量一起推进限幅器，保证波峰因数被真正压下来。"""
+    return NARRATION_PROCESSING_CHAIN.format(
+        drive=gain_db + NARRATION_LIMITER_DRIVE_DB
+    )
+
+
 def _apply_project_narration_gain(
     project_dir: Path,
     state: dict,
@@ -12408,7 +12486,13 @@ def _apply_project_narration_gain(
     *,
     output_path: Path | None = None,
 ) -> dict:
-    """Apply project speech gain to a derivative without touching its source."""
+    """Apply project speech gain to a derivative without touching its source.
+
+    ★ 2026-09-15：不再只做 ``volume=NdB``。实测旧实现把人物台词推到
+    +0.6~+2.9 dBFS 削顶（gpu 期 +0.6、microduck 期 +2.9），失真直接损害口播
+    清晰度；这也是"手机外放听不清、同行口播更清晰"的物理原因之一。改为施加
+    完整口播处理链，并对所有视频一律生效。
+    """
     gain_db = clamp_narration_gain_db(
         _ensure_narration_policy(state).get("playback_gain_db")
     )
@@ -12431,6 +12515,7 @@ def _apply_project_narration_gain(
     temporary = target.with_name(
         f".{target.stem}-narration-{uuid4().hex[:8]}{target.suffix}"
     )
+    speech_filters = _narration_processing_chain(gain_db)
     ok, detail = _run_media([
         ffmpeg,
         "-y",
@@ -12443,7 +12528,7 @@ def _apply_project_narration_gain(
         "-c:v",
         "copy",
         "-af",
-        f"volume={gain_db:.1f}dB",
+        speech_filters,
         "-c:a",
         "aac",
         "-b:a",
@@ -12462,6 +12547,7 @@ def _apply_project_narration_gain(
         "enabled": True,
         "playback_gain_db": gain_db,
         "linear_gain": round(10 ** (gain_db / 20.0), 6),
+        "processing_chain": speech_filters,
         "output_path": _safe_relpath(project_dir, str(target)),
     }
 
@@ -13247,11 +13333,18 @@ def _generate_project_video_render(project_dir: Path, *, preview: bool) -> dict:
         }
     )
     loudness_policy = _ensure_output_loudness_policy(state)
+    # ★ 这里只是**混音前的中间态**归一化：紧随其后的音频阶段会重新施加
+    # 人声增益 + BGM，然后再做一次权威归一化（见函数下方 render_report["loudness"]）。
+    # 所以中间态绝不能用"发布容差"否决 —— 否则一个本来能被混音救回来的中间电平
+    # 会直接把整条渲染链掐死在混音之前（2026-09-15 实测：gpu 期目标改到 -10 后，
+    # 中间态只到 -12.4 就 raise，人声与 BGM 根本没机会应用）。
     loudness_result = _normalize_video_loudness(
         project_dir,
         output,
         target_lufs=loudness_policy["target_lufs"],
-        enforce_acceptance=not preview,
+        # 直接音轨模式下这一刻的音频就是终态（没有后续混音），照旧按发布容差把关；
+        # 其余正式渲染把把关交给函数末尾混音之后的那一次。
+        enforce_acceptance=direct_track_audio and not preview,
     )
     report_path = AUTOMATION_PREVIEW_RENDER_REPORT if preview else AUTOMATION_RENDER_REPORT
     render_report = {

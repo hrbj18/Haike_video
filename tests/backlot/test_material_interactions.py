@@ -1344,7 +1344,9 @@ def _canonical(index, output_dir):
     copy.pop("cache_hit", None)
     blob = json.dumps(copy, ensure_ascii=False, sort_keys=True)
     # JSON 里的反斜杠是转义过的，用同样的转义形式做替换，Windows 路径才匹配得上。
-    needle = json.dumps(str(output_dir))[1:-1]
+    # ensure_ascii 必须与上面的 blob 一致：默认 True 会把非 ASCII 路径转成 \uXXXX，
+    # 在含中文的工作区路径下永远替换不上（blob 里是原字符），CI 的纯 ASCII 路径掩盖了它。
+    needle = json.dumps(str(output_dir), ensure_ascii=False)[1:-1]
     return blob.replace(needle, "<OUT>")
 
 
